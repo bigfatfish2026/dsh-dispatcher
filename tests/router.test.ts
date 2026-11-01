@@ -296,6 +296,116 @@ describe('bindRouter', () => {
     expect(lifted).toEqual([])
     expect(filters).toHaveLength(1)
   })
+
+  // The 2026-11-01 incident. A pass ran while dsh-memory's tools were
+  // momentarily unregistered (plugin reload ordering), judged those names
+  // missing and installed a short whitelist. From then on the agent's own view
+  // could not see them either — the restriction *we* had just installed hid
+  // them — so every later pass re-derived the same short list, and the
+  // "same names as installed" short-circuit answered `unchanged` forever.
+  describe('the whitelist must not shrink because it can no longer see itself', () => {
+    const LIST = ['dispatch_open', 'memory_recall']
+    const escapeFile = (): string => join(tempDir(), 'no-restrict')
+
+    // a) 已装名单里的名字一律算已知：即便 agent 视图被自己的 restriction
+    // 过滤空、全局视图也不为它作答，名单也不能因此缩水。
+    it('keeps an installed name both views read as absent', () => {
+      const { agent, filters } = fakeAgent({ registered: [...LIST] })
+      const binding = bindRouter(agent, { allow: LIST, escapeFile: escapeFile(), log: () => {} })
+      expect(binding.installed()).toEqual(LIST)
+      expect(filters).toEqual([LIST])
+
+      agent.ctx.tools.get = () => undefined
+      expect(binding.sync()).toBe('unchanged')
+      // 'unchanged' and not 'empty': the list still counts itself.
+      expect(binding.installed()).toEqual(LIST)
+      expect(filters).toHaveLength(1)
+    })
+
+    // b) 第一次 sync 时缺的名字，等它注册之后必须补得回来。
+    it('adds the missing name back once the plugin registers it', () => {
+      const registered = ['dispatch_open']
+      const { agent, filters } = fakeAgent({ registered })
+      let restricted = false
+      const realGet = agent.ctx.tools.get
+      agent.ctx.tools.get = (name: string) => (restricted ? undefined : realGet(name))
+      const binding = bindRouter(agent, {
+        allow: LIST,
+        escapeFile: escapeFile(),
+        registry: {
+          get: (name: string) => (registered.includes(name) ? { name } : undefined),
+          names: () => [...registered],
+        },
+        log: () => {},
+      })
+      expect(binding.installed()).toEqual(['dispatch_open'])
+      expect(filters).toEqual([['dispatch_open']])
+      restricted = true
+
+      // 注册表没动：重复 pass 不许重装。
+      expect(binding.sync()).toBe('unchanged')
+      expect(filters).toHaveLength(1)
+
+      registered.push('memory_recall')
+      expect(binding.sync()).toBe('updated')
+      expect(binding.installed()).toEqual(LIST)
+      expect(filters.at(-1)).toEqual(LIST)
+
+      // 补回来之后就安静下来，不再每个事件重装一遍。
+      expect(binding.sync()).toBe('unchanged')
+      expect(filters).toHaveLength(2)
+    })
+
+    // c) 名单真没变化就 unchanged，哪怕还缺名字：装名单本身会触发
+    // tools/change，见一个事件重装一次会自己喂自己。
+    it('does not reinstall while the same names stay unregistered', () => {
+      const { binding, filters, lifted } = bind(['dispatch_open'])
+      expect(binding.sync()).toBe('unchanged')
+      expect(binding.sync()).toBe('unchanged')
+      expect(binding.sync()).toBe('unchanged')
+      expect(filters).toHaveLength(1)
+      expect(lifted).toEqual([])
+    })
+
+    // 真卸载掉的名字不能把 binding 卡死在 error：restrict 会整份拒绝，
+    // 于是这一轮把那个名字剔掉、装剩下的。
+    it('prunes a name the host no longer knows instead of failing the pass', () => {
+      const hostKnown = ['dispatch_open', 'memory_recall']
+      const { agent, filters } = fakeAgent({ registered: [...hostKnown] })
+      agent.ctx.tools.restrict = (filter: { allow?: readonly string[] }) => {
+        const unknown = (filter.allow ?? []).filter((name) => !hostKnown.includes(name))
+        if (unknown.length > 0) throw new Error(`tools.restrict() names unknown global tool "${unknown[0]}"`)
+        filters.push([...(filter.allow ?? [])])
+        return () => {}
+      }
+      const binding = bindRouter(agent, {
+        allow: [...LIST, 'external_send_file'],
+        escapeFile: escapeFile(),
+        registry: { get: (name: string) => (hostKnown.includes(name) ? { name } : undefined) },
+        log: () => {},
+      })
+      expect(binding.installed()).toEqual(LIST)
+      // 装好之后本模块的 restriction 让 agent 自己的视图什么都读不到。
+      agent.ctx.tools.get = () => undefined
+
+      // 一次插件重载：memory_recall 没了，external_send_file 来了。current 里还
+      // 记着 memory_recall（自己的视图被挡着，看不出来），restrict 会整份
+      // 拒绝——这一轮得把死名字剔掉，把活着的那份装上去。
+      hostKnown.splice(1, 1, 'external_send_file')
+      expect(binding.sync()).toBe('updated')
+      expect(binding.installed()).toEqual(['dispatch_open', 'external_send_file'])
+
+      // 名单这会儿跟 current 一样了，但 allow 里还缺 memory_recall：上一轮
+      // 的「缺的是谁」跟这一轮不同，所以不许拿「名单没变」当结论收工，得
+      // 再核一遍（这一轮重装同一份）。核过之后签名稳定，下一轮才回到
+      // unchanged——否则每来一个 tools/change 就重装一次，自己喂自己。
+      const afterPrune = filters.length
+      expect(binding.sync()).toBe('updated')
+      expect(filters).toHaveLength(afterPrune + 1)
+      expect(binding.sync()).toBe('unchanged')
+      expect(filters).toHaveLength(afterPrune + 1)
+    })
+  })
 })
 
 /**
