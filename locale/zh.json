@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "调度台",
+    "description": "给 DSH 用的票本和派活工具：主会话只管回话，长活交给 worker。"
+  }
+}

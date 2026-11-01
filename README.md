@@ -1,0 +1,127 @@
+# dsh-dispatcher
+
+A dispatch plugin for DeepSeek Harness: the main session keeps talking, worker subagents do the work.
+
+The point is responsiveness. Someone asks a question over QQ and expects an answer now; the main session cannot give one while it is buried in a task. So instead it writes the task down as a ticket, hands it to a worker, and goes straight back to the conversation. The ticket records where the work stands, and it is still there when the main session looks back later.
+
+The design follows the official prototype, [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), and keeps three of its parts:
+
+| Prototype | dsh-dispatcher |
+| --- | --- |
+| Source / Trigger / Thread / Subscription | Dropped: messages already arrive in the main session |
+| Two-layer Eval + versioned Policy | Dropped: the main session decides whether to delegate |
+| Dedicated DSH session as Executor | A `subagent`, sharing the working directory |
+| Ticket lifecycle + panel + retries | Tickets, status, and a staleness mark |
+| Input queue + report delivery | Two queues in the log, plus a sweep that delivers them |
+
+## Compatibility
+
+| Surface | Status |
+|---|---|
+| Harness | DeepSeek Harness `0.2.1-rc.5` (peer dep `>=0.1.2-rc.1 <0.3.0`, spelled as several OR'd ranges in `package.json`) |
+| Node | `^22.19.0 \|\| >=24.0.0` |
+| Platforms | All (plain ESM; no native code, no network) |
+
+## Install
+
+```sh
+pnpm pack
+dsh plugin --profile <name> add ./dsh-dispatcher-0.3.1.tgz
+dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
+```
+
+Restart the instance afterwards; the plugin only loads on startup. Tickets default to `$DSH_HOME/dispatcher/tickets.jsonl`: one event per line, append-only, and a half-written trailing line is skipped on read.
+
+## Configuration
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
+| `staleMinutes` | number | `30` | Silence after which a ticket counts as stale |
+| `maxOpen` | number | `4` | Cap on concurrently open tickets |
+| `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
+| `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off |
+| `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
+| `quietSweep` | boolean | `false` | Never wake the main session on a sweep; reports stay in the log and an outside script pushes them to QQ |
+| `ownerSessionId` | string | empty | Session to wake; empty picks the c2c session from the QQ prefs file |
+| `qqPrefsPath` | string | `''` | Conversation-key to session-id map |
+| `ownerOpenId` | string | empty | Owner openid, used when more than one c2c session exists |
+| `noWaitGuard` | boolean | `true` | Refuse main-session calls that would wait; workers are unaffected |
+| `maxCommandMs` | number | `30000` | Longest a single command may hold the main session |
+| `maxWaitMs` | number | `5000` | Longest a `job_output` wait may hold the main session |
+| `routerRestrict` | boolean | `true` | Give every non-worker session the `routerTools` whitelist |
+| `routerEscapeFile` | string | `~/.dsh/no-restrict` | While this file exists the whitelist is not installed on any session |
+| `routerTools` | string[] | 36 names | Global tool names the main session keeps |
+
+```yaml
+- id: dsh-dispatcher
+  name: dsh-dispatcher
+  config:
+    staleMinutes: 20
+    maxOpen: 3
+```
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying |
+| `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
+| `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports |
+| `dispatch_send` | Queue one more message for a ticket's worker |
+| `dispatch_report` | Record a report on a ticket without ending it |
+| `dispatch_close` | Close a ticket once the work is delivered |
+| `dispatch_sweep` | Run a sweep now instead of waiting for the timer |
+
+Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot.
+
+## Queues
+
+A ticket carries two queues, both lines in the same log, so a restart loses nothing: messages waiting for the worker (`dispatch_send`) and reports the worker handed back (`dispatch_report`). Each entry has its own id and a `delivered` mark.
+
+`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone; the main session reads reports on the next turn or sweep. A sweep pushes undelivered messages to live workers, carries undelivered reports to the owner session in one message, and reopens a `done` ticket that received more mail — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut.
+
+## How the main session should use it
+
+Open the ticket, hand off, reply. That order. The ticket is a note to your future self: half an hour later `dispatch_list` says which jobs are still silent, without scrolling back through the conversation.
+
+When a worker needs a decision, it writes the question into `note`, switches the ticket to `blocked`, and lets the main session answer it, ask the person, or drop the work.
+
+## The waiting guard
+
+A prompt section is a request, not a guarantee: the main session can still sit in a `bash` call for two minutes while the person waits for an answer. So every session except a worker gets a `tools.guard` when it is created, and the guard refuses three shapes outright — a command that runs `sleep`, a `timeoutMs` over `maxCommandMs`, and a `job_output` wait over `maxWaitMs`. A foreground command with no `timeoutMs` is refused too, and the reason names the two ways out. Sessions that already exist when the plugin loads are covered as well, or a reload would only protect the next one.
+
+This is upstream dsh-superagent's `noWait` guard, which caps the router shell at five seconds and refuses the same shapes. What differs is how a session earns the right to wait: there it is the agent preset, here it is `session.header.origin === 'subagent'`.
+
+## The router whitelist
+
+The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `grep`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers are untouched: a subagent keeps the full surface, which is the whole point — heavy work has somewhere to go.
+
+The default list is 36 names and lives in `DEFAULT_ROUTER_TOOLS` in `src/config.ts`. Names must match the registered global tool exactly. `tools.restrict` throws on an unknown one, and `ctx.effect` hands a throw from its callback to cordis' error handling rather than back to the caller, so the plugin checks the list against the registry first: it warns with the names nothing answers to and drops just those from the filter. A typo costs a log line, not the whitelist.
+
+Hiding a tool is only half of it. Every tool plugin also registers a `tool:<group>` prompt section saying how to use it, and that section is assembled from the prompt registry rather than from the schema list — so the main session used to read "Use `browser_navigate` …" for a tool the whitelist had already taken away. While the restriction is installed the session also gets a scoped `system-prompt/assemble` listener that drops exactly the tool sections whose tools are all hidden. The judgement is deliberately narrow: only `tool:` sections are candidates (persona, plan policy, the hand-off rules and every other prose section are never touched); a section stays when its group name is itself a visible tool (`tool:bash` while `bash` is whitelisted) or when its prose still names a visible tool (`tool:goal` survives on `create_goal`). Nothing is inferred from a shared prefix: `read` and `read_image` are two tools, so one being visible never decides the other's section — with both whitelisted, `tool:read` stays on `read` alone. Both checks read `assembly.tools`, the schemas the model is about to receive, so whitelisted-but-unregistered names cannot keep a section alive. Subagents have their own prompt scope and never see this listener; with the escape file present there is no restriction, so there is nothing to prune either.
+
+Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is not installed on any session; delete the file to turn it back on. `routerRestrict: false` turns it off for good. The escape file is read once per session, so a change needs a restart (for a session that already exists, a plugin reload).
+
+## Sweeps
+
+Every `sweepMinutes` the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail, push queued messages to workers that are still alive, carry undelivered reports and quiet tickets into the owner session as one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking), and mark what it delivered. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory. A ticket that has not moved is only announced once.
+
+`quietSweep: true` drops the third step. One `followup` costs a whole main-session turn with all of its context, so with quiet mode on the sweep still reopens tickets, steers live workers, marks reports delivered and refreshes the stale snapshot, but never wakes the session; the reports stay in the log for a script to read. This repository ships none — it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer) that pushes new reports wherever you want them, with the same backoff as the progress heartbeat.
+
+This is the prototype's `Passes` heartbeat plus `evaluateDue`, with the delivery work kept and the evaluation dropped: nothing in a sweep asks a model anything.
+
+## Development
+
+```sh
+pnpm install
+pnpm test       # vitest
+pnpm run typecheck
+pnpm run build  # tsdown → lib/
+```
+
+Tests touch neither the network nor the DSH runtime: they cover event folding, status rules, log round-trips, both queues, and the waiting guard's refusal rules.
+
+## License
+
+[Apache License 2.0](LICENSE) © 2026 dsh-dispatcher contributors.

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dispatcher",
+    "description": "Ticket log and hand-off tools for a DSH dispatcher: the main session answers, worker subagents do the work."
+  }
+}
