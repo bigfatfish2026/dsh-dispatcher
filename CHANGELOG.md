@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 — 2026-11-01
+
+The operator's rule from 2026-11-01 — memory writes belong to the main session, a worker may only read — gets its second layer. `dsh-memory` already refuses the call at execute time; `workerToolDeny` (on by default) now also takes `workerDenyTools` out of every worker's tool schema with `tools.restrict({ deny })`, so `memory_save`, `memory_archive`, `memory_merge`, `memory_reflect`, `memory_split`, `memory_consolidate` and `memory_sleep` never reach a subagent's model. It is a deny list rather than a reverse whitelist because `restrict` validates an allow list against the scope's restrictable names and the public enumeration (`tools.schemas()`) projects the global layer alone: a worker also inherits tools a preset put on the agent plane, and an allow list built from that projection would hide those too and leave the worker nearly tool-less. Names nothing registers are dropped with a warning; a list that would cover every registered tool is refused instead of handed to `restrict` (an empty allow throws there, and an empty worker is not what the config meant); a denied name stays denied on later passes even though the restricted scope then reads it as absent. The switch is separate from `routerRestrict` — the main session's convenience and the house's write authority are two decisions — and the escape file still turns both off. `memory_recall`, `memory_entity` and the chat tools stay. The worker prompt is untouched this round: the memory plugin registers no `tool:` guidance section and its auto-recall block is already skipped for subagents, so the schema list was the only place those names appeared.
+
+Also in 1.1.0, from the work left in the tree since 1.0.0: `progress_note`, a tool that pushes one line of progress straight to the person through `notifyScript` (`notifyTimeoutMs` caps it) without waking a session or writing to disk — that is how a long job stops making someone wait in silence; `handoffPolicyText`, the hand-off rules as a config string so the wording is a `cordis.yml` edit and not a code change (empty means "do not inject"); and prompt pruning for hidden tools plus the load-order fix in the notes below.
+
 ## 1.0.0 — 2026-11-01
 
 First public release, cut from one development line; the 0.x entries below record how it got here.

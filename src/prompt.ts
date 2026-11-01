@@ -152,6 +152,12 @@ export interface PromptFilterOptions {
   log?(message: string): void
 }
 
+/** What one installed prune pass can be undone by. */
+export interface PromptFilterBinding {
+  /** Drop the listener; safe to call twice, including after the scope disposed it. */
+  dispose(): void
+}
+
 /**
  * Install the prune pass on one agent's own prompt scope.
  *
@@ -160,15 +166,22 @@ export interface PromptFilterOptions {
  * agent's assembly. That is what keeps worker subagents untouched even though
  * their prompts go through the same event.
  *
- * @returns whether the host offers a scoped hook to install into.
+ * The returned binding is what makes the pass reinstallable: the router grows
+ * the whitelist when a late plugin registers its tools, and the prune pass has
+ * to move with it instead of keeping the first (smaller) allow list forever.
+ *
+ * @returns the installed pass, or `undefined` when the host has no scoped hook.
  */
-export function installPromptFilter(scope: PromptScope, options: PromptFilterOptions): boolean {
+export function bindPromptFilter(
+  scope: PromptScope,
+  options: PromptFilterOptions,
+): PromptFilterBinding | undefined {
   const on = scope.on
   if (typeof on !== 'function') {
     options.log?.(
       '[dispatcher] no scoped system-prompt/assemble hook in this host: tool guidance for hidden tools stays in the prompt',
     )
-    return false
+    return undefined
   }
 
   const register = on as (
@@ -176,9 +189,10 @@ export function installPromptFilter(scope: PromptScope, options: PromptFilterOpt
     listener: PromptAssemblyHook,
   ) => () => void
   let announced = false
+  let stop: (() => void) | undefined
   scope.effect(
-    () =>
-      register('system-prompt/assemble', async (assembly, _context, next) => {
+    () => {
+      stop = register('system-prompt/assemble', async (assembly, _context, next) => {
         const assembled = await next()
         const { assembly: pruned, removed } = pruneToolSections(assembled, options.allow)
         if (removed.length > 0 && !announced) {
@@ -186,8 +200,31 @@ export function installPromptFilter(scope: PromptScope, options: PromptFilterOpt
           options.log?.(`[dispatcher] pruned prompt sections for hidden tools: ${removed.join(', ')}`)
         }
         return pruned
-      }),
+      })
+      return () => {
+        stop?.()
+        stop = undefined
+      }
+    },
     'dsh-dispatcher.router-prompt',
   )
-  return true
+
+  return {
+    dispose() {
+      stop?.()
+      stop = undefined
+    },
+  }
+}
+
+/**
+ * Install the prune pass once, without a handle on it.
+ *
+ * Kept for callers that only ever install once; the reinstallable path is
+ * {@link bindPromptFilter}.
+ *
+ * @returns whether the host offers a scoped hook to install into.
+ */
+export function installPromptFilter(scope: PromptScope, options: PromptFilterOptions): boolean {
+  return bindPromptFilter(scope, options) !== undefined
 }
