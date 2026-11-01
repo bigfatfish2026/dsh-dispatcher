@@ -644,15 +644,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }
     // The self-test must not read through this agent's own restriction: once
     // the first pass is in, every name it hid reads as unregistered. The plain
-    // plugin context answers from the global view instead.
+    // plugin context answers from the global view instead, which no scoped
+    // restriction can filter.
     const registry = {
       get(name: string): unknown {
         const tools = (ctx as { tools?: { get?: (name: string) => unknown } }).tools
         return tools?.get?.(name)
       },
-      // Only the worker deny list's safety check reads this: an allow list built
-      // from the global projection would hide everything a preset registered on
-      // the agent plane, so the router never enumerates for that.
+      // Two readers now. The worker deny list's safety check wants the whole
+      // projection; the router asks for it lazily, only about names `get` has
+      // already said no to — the global view is the authority for a global
+      // tool, and a preset's agent-plane tool never appears here at all, which
+      // is why the router also treats anything already installed as known.
       names(): readonly string[] {
         const tools = (ctx as { tools?: { schemas?: () => readonly { name: string }[] } }).tools
         try {

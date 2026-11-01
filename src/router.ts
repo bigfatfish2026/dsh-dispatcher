@@ -84,7 +84,7 @@ export type RouterOutcome =
   | 'empty'
   /** This agent was already handled. */
   | 'already'
-  /** A later pass added names the first one could not find. */
+  /** A later pass added names the first one could not find, or re-checked a list that is still short. */
   | 'updated'
   /** The registry has nothing new for this whitelist. */
   | 'unchanged'
@@ -137,6 +137,75 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((name) => b.includes(name))
 }
 
+/**
+ * One pass's answer to "does a tool with this name exist?", read as of now.
+ *
+ * Three sources, and the asymmetry between them is the whole point:
+ *
+ * - `agent.ctx.tools.get` answers for one scope. It sees this agent's own
+ *   registrations and every global tool the restriction still admits — and a
+ *   name this module hid reads as **absent** there. So a "yes" is evidence, a
+ *   "no" is not.
+ * - `options.registry` is the plugin context's view. No scoped restriction
+ *   reaches it (restrictions live on the scope chain, and the global view has
+ *   no chain), so it is the authoritative source for global tools. What it
+ *   cannot see is a tool a preset registered through `agent.ctx.tools.register`
+ *   — that one lives on the agent's own layer and never enters the global one.
+ * - `options.registry.names()` is the same global view listed out. It costs a
+ *   schema projection (a deep clone per tool), so it is read lazily — only when
+ *   `get` has already said no to a name — and once per pass at most.
+ *
+ * OR-ing all three is therefore the only combination that neither drops a live
+ * global tool during a registration race nor forgets one it installed itself.
+ * A name that only this module's own list remembers is handled by the caller,
+ * not here: see `current.includes` in each binding.
+ */
+function registryLookup(
+  agent: RouterAgent,
+  options: RouterOptions,
+): { confirmed: (name: string) => boolean; names: () => readonly string[] } {
+  let listed: readonly string[] | undefined
+  const names = (): readonly string[] => (listed ??= options.registry?.names?.() ?? [])
+  const confirmed = (name: string): boolean =>
+    Boolean(agent.ctx.tools.get(name)) || Boolean(options.registry?.get(name)) || names().includes(name)
+  return { confirmed, names }
+}
+
+/**
+ * Install one list, pruning the names `restrict` refuses as unknown.
+ *
+ * A name can be in the list on the strength of {@link RouterBinding} memory
+ * alone — this module installed it, and the restricted scope now reads it as
+ * absent. If that tool is really gone, `restrict` refuses the whole list and
+ * `sync` would sit on `error` forever with the old restriction in force. So
+ * the second attempt drops exactly the names the *authoritative* lookup cannot
+ * confirm, and gives up (reporting the refusal) if that changes nothing: a
+ * list where every name is confirmed by the registry but still refused is not
+ * a name problem.
+ */
+function restrictPruned(
+  agent: RouterAgent,
+  filter: 'allow' | 'deny',
+  names: readonly string[],
+  confirmed: (name: string) => boolean,
+): { stop?: () => void; kept: string[]; refused?: string } {
+  let kept = [...names]
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const stop = agent.ctx.tools.restrict(filter === 'allow' ? { allow: kept } : { deny: kept })
+      return { stop, kept }
+    } catch (error) {
+      const refused = error instanceof Error ? error.message : String(error)
+      if (attempt > 0) return { kept, refused }
+      const pruned = kept.filter(confirmed)
+      if (pruned.length === 0 || pruned.length === kept.length) return { kept, refused }
+      kept = pruned
+    }
+  }
+  /* v8 ignore next -- the loop returns on both paths. */
+  return { kept, refused: 'tools.restrict() refused the list' }
+}
+
 /** A binding that never does anything, for the agents this module exempts. */
 function inertBinding(outcome: RouterOutcome): RouterBinding {
   return {
@@ -180,10 +249,12 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
    *
    * The installed list counts as known too: once a deny is in force this scope
    * reads the hidden names as absent, and a plain `get` check would then drop
-   * them from the next pass and hand the worker its memory tools back.
+   * them from the next pass and hand the worker its memory tools back. The
+   * registry half is {@link registryLookup}, which also reads the global name
+   * list rather than `get` alone.
    */
-  const known = (name: string): boolean =>
-    Boolean(agent.ctx.tools.get(name)) || Boolean(options.registry?.get(name)) || current.includes(name)
+  const known = (confirmed: (name: string) => boolean, name: string): boolean =>
+    confirmed(name) || current.includes(name)
 
   const dispose = (): void => {
     if (disposed) return
@@ -204,7 +275,9 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
     if (syncing) return first ?? 'unchanged'
     syncing = true
     try {
-      const names = wanted.filter(known)
+      const lookup = registryLookup(agent, options)
+      const confirmed = lookup.confirmed
+      const names = wanted.filter((name) => known(confirmed, name))
       const missing = wanted.filter((name) => !names.includes(name))
 
       if (names.length === 0) {
@@ -218,7 +291,7 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
       // A deny list that covers the whole registry is a typo, not a rule: the
       // worker would come up with no tools at all and every ticket would fail
       // with "unknown tool". Refuse it while the previous pass stays in force.
-      const registered = options.registry?.names?.() ?? []
+      const registered = lookup.names()
       if (registered.length > 0 && registered.every((name) => names.includes(name))) {
         options.log?.(
           `[dispatcher] worker deny list covers all ${registered.length} registered tools; refusing to leave a worker with nothing`,
@@ -233,26 +306,31 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
       }
 
       const previous = current
-      let nextStop: () => void
-      try {
-        nextStop = agent.ctx.tools.restrict({ deny: [...names] })
-      } catch (error) {
+      const attempt = restrictPruned(agent, 'deny', names, confirmed)
+      if (attempt.stop === undefined) {
         options.log?.(
-          `[dispatcher] worker deny list refused: ${error instanceof Error ? error.message : String(error)} — keeping the previous one`,
+          `[dispatcher] worker deny list refused: ${attempt.refused ?? 'unknown reason'} — keeping the previous one`,
         )
         first ??= 'error'
         return 'error'
       }
+      const installed = attempt.kept
+      const dropped = names.filter((name) => !installed.includes(name))
+      if (dropped.length > 0) {
+        options.log?.(
+          `[dispatcher] worker deny list dropped ${dropped.length} name(s) the registry no longer answers to: ${dropped.join(', ')}`,
+        )
+      }
       const removed = stopRestrict
-      stopRestrict = nextStop
-      current = [...names]
+      stopRestrict = attempt.stop
+      current = [...installed]
       removed?.()
       arm()
 
       if (first === undefined) {
         first = 'denied'
         options.info?.(
-          `[dispatcher] worker subagents no longer see ${names.length} tool(s): ${names.join(', ')}`,
+          `[dispatcher] worker subagents no longer see ${installed.length} tool(s): ${installed.join(', ')}`,
         )
         if (missing.length > 0) {
           options.log?.(
@@ -262,7 +340,7 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
         return 'denied'
       }
 
-      const added = names.filter((name) => !previous.includes(name))
+      const added = installed.filter((name) => !previous.includes(name))
       if (added.length > 0) {
         options.info?.(`[dispatcher] worker deny list grew by ${added.length}: ${added.join(', ')}`)
       }
@@ -312,22 +390,33 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
   let armed = false
   let disposed = false
   let syncing = false
+  /**
+   * The missing-name set the last pass acted on, sorted and joined.
+   *
+   * The "has anything moved since I last looked" half of the short-circuit:
+   * equal means the registry repeated itself, so an install would install the
+   * same list again and only feed `tools/change`.
+   */
+  let lastMissing = ''
 
   /**
-   * Names the registry can answer for right now.
+   * Names this pass can hand to `restrict`.
    *
-   * Both views are asked because neither is complete on its own: the agent's
-   * view is filtered by the restriction this module installed (a name it
-   * installed still answers, one it did not is invisible), and the global view
-   * cannot see tools a preset registered on the agent plane.
+   * Two layers on purpose. {@link registryLookup} is the authority: the global
+   * plugin view, which no restriction of ours can filter. On top of it, a name
+   * already in `current` counts as known — that is not a registry fact, it is
+   * the one thing this module must never get wrong about itself. The incident
+   * this fix comes from: a pass ran while dsh-memory's tools were momentarily
+   * unregistered (plugin reload ordering), the name was judged missing and
+   * dropped, and from then on the agent's own view could not see it either —
+   * because the restriction *we* installed had hidden it. Asking only that
+   * view made the short list self-confirming, so it never grew back.
    */
-  const usable = (allow: readonly string[]): string[] => {
+  const usable = (allow: readonly string[], confirmed: (name: string) => boolean): string[] => {
     const names: string[] = []
     for (const name of allow) {
       if (names.includes(name)) continue
-      let known = Boolean(agent.ctx.tools.get(name))
-      if (!known) known = Boolean(options.registry?.get(name))
-      if (known) names.push(name)
+      if (confirmed(name) || current.includes(name)) names.push(name)
     }
     return names
   }
@@ -355,42 +444,63 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
     syncing = true
     try {
       const allow = [...new Set(options.allow)]
-      const names = usable(allow)
+      const { confirmed } = registryLookup(agent, options)
+      const names = usable(allow, confirmed)
       const missing = allow.filter((name) => !names.includes(name))
+      const missingKey = [...missing].sort().join('\n')
 
       if (names.length === 0) {
         options.log?.('[dispatcher] router whitelist is empty after the self-test; nothing installed')
         first ??= 'empty'
         return 'empty'
       }
-      if (sameNames(names, current)) {
+
+      /**
+       * A pass whose list is the one already installed, but still short of what
+       * `allow` asks for, is the interesting case: "no change" would be a lie
+       * about the registry and a promise to never look again.
+       *
+       * Only a *different* set of missing names is worth another install. That
+       * is the explicit "what did I last try, and has anything moved since"
+       * test: `tools.restrict` fires `tools/change`, which lands right back
+       * here, and a rule that reinstalled on every event would feed itself
+       * forever. Identical missing sets mean the registry has said nothing new
+       * since the last attempt, so the answer stands.
+       */
+      const stale = missing.length > 0 && missingKey !== lastMissing
+      if (sameNames(names, current) && !stale) {
         first ??= 'installed'
         return 'unchanged'
       }
 
       const known = current.length > 0
-      const added = names.filter((name) => !current.includes(name))
-      const removed = current.filter((name) => !names.includes(name))
-
-      // Install the new pair before lifting the old one. `tools.restrict`
-      // refuses unknown names, and if it refuses here the old whitelist is
-      // still on instead of the main session suddenly seeing everything.
-      let nextStop: () => void
-      try {
-        nextStop = agent.ctx.tools.restrict({ allow: [...names] })
-      } catch (error) {
+      // Compared against what was actually installed last time, not against
+      // `names`: a prune inside `restrictPruned` can shorten the list.
+      const attempt = restrictPruned(agent, 'allow', names, confirmed)
+      if (attempt.stop === undefined) {
         options.log?.(
-          `[dispatcher] router whitelist reinstall refused: ${error instanceof Error ? error.message : String(error)} — keeping the previous one`,
+          `[dispatcher] router whitelist reinstall refused: ${attempt.refused ?? 'unknown reason'} — keeping the previous one`,
         )
         first ??= 'error'
         return 'error'
       }
-      const nextPrompt = bindPromptFilter(agent.ctx, { allow: names, log: options.log })
+      const installed = attempt.kept
+      const prunedNames = names.filter((name) => !installed.includes(name))
+      if (prunedNames.length > 0) {
+        options.log?.(
+          `[dispatcher] router whitelist dropped ${prunedNames.length} name(s) the registry no longer answers to: ${prunedNames.join(', ')}`,
+        )
+      }
+      const added = installed.filter((name) => !current.includes(name))
+      const removed = current.filter((name) => !installed.includes(name))
+
+      const nextPrompt = bindPromptFilter(agent.ctx, { allow: installed, log: options.log })
       const previousStop = stopRestrict
       const previousPrompt = promptBinding
-      stopRestrict = nextStop
+      stopRestrict = attempt.stop
       promptBinding = nextPrompt
-      current = [...names]
+      current = [...installed]
+      lastMissing = missingKey
       previousStop?.()
       previousPrompt?.dispose()
       arm()
@@ -408,7 +518,7 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
       first ??= 'installed'
       if (added.length > 0) {
         options.info?.(
-          `[dispatcher] router whitelist grew by ${added.length}: ${added.join(', ')} (now ${names.length} tools)`,
+          `[dispatcher] router whitelist grew by ${added.length}: ${added.join(', ')} (now ${installed.length} tools)`,
         )
       }
       if (removed.length > 0) {
