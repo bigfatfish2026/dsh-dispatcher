@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_ROUTER_TOOLS } from '../src/config'
-import { installPromptFilter, mentionedToolNames, pruneToolSections, prunesToolSection, toolSectionGroup } from '../src/prompt'
+import {
+  installPromptFilter,
+  mentionedToolNames,
+  pruneToolSections,
+  prunesToolSection,
+  sectionToolFamily,
+  toolSectionGroup,
+} from '../src/prompt'
 import type { PromptAssembly, PromptAssemblyHook } from '../src/prompt'
 
-/** A main session after the whitelist: only these schemas are left. */
+/**
+ * A main session after the whitelist: only these schemas are left. It is the
+ * shape the real one has — no `browser_*`, no `bili_*`, no `mcp__*`.
+ */
 const VISIBLE = new Set([
+  'bash',
+  'read',
+  'write',
+  'edit',
+  'present',
+  'todo_write',
   'dispatch_open',
   'dispatch_list',
   'dispatch_send',
@@ -12,14 +28,16 @@ const VISIBLE = new Set([
   'get_goal',
   'update_goal',
   'memory_recall',
-  'yuyu_face',
-  'present',
   'chat_recall',
+  'web_search',
+  'web_fetch',
+  'yuyu_face',
 ])
 
 /**
- * The sections that actually matter here: the ones the host and the tool
- * plugins register, cut down to the lines that name their tools.
+ * The sections that actually matter here, cut down to the lines that name their
+ * tools. The four at the top are the ones the real main session kept reading
+ * even though none of their tools were visible.
  */
 function mainSessionAssembly(): PromptAssembly {
   return {
@@ -28,25 +46,26 @@ function mainSessionAssembly(): PromptAssembly {
       { name: 'harness:identity', order: -1000, text: 'You are an AI agent powered by DeepSeek Harness.' },
       { name: 'deployment:persona-prefix', order: 0, text: '你是用户的私人助手，说话简短。' },
       { name: 'dispatcher:handoff', order: 95, text: '【派活规矩 · dispatcher】主会话的活是及时回话，长活交给 worker。' },
-      {
-        name: 'tool:bash',
-        order: 1000,
-        text: 'Check the [exit code: N] marker on every bash result; investigate failures before moving on.',
-      },
-      {
-        name: 'tool:bilibili',
-        order: 111,
-        text: 'Use bilibili_search to find videos; follow up with bilibili_video, bilibili_subtitles or bilibili_playurl.',
-      },
+      { name: 'plan:policy', order: 900, text: 'Do not write files before the plan is approved.' },
       {
         name: 'tool:browser',
         order: 160,
-        text: 'Use the browser tools (browser_navigate, browser_snapshot, browser_click) to inspect web pages.',
+        text: 'Use the browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_evaluate, browser_take_screenshot, browser_tabs) to inspect and interact with web pages. After navigating, read browser_snapshot before deciding the next action. Prefer browser tools over scraping via shell when a page is involved.',
       },
       {
-        name: 'tool:jobs',
-        order: 1600,
-        text: 'Long commands belong in a job; call job_output instead of waiting.',
+        name: 'tool:bili-notify',
+        order: 112,
+        text: "bili_notify_unread / bili_mentions / bili_replies read the bilibili account's notifications (mentioned-in and replied-to), and bili_comments reads a video's comment section by bvid.",
+      },
+      {
+        name: 'mcp:github',
+        order: 500,
+        text: '## GitHub\nUse mcp__github__search_code to find code, mcp__github__search_issues for issues, and mcp__github__create_pull_request to open a pull request.',
+      },
+      {
+        name: 'mcp-resource-servers',
+        order: 501,
+        text: '## MCP resource servers\n\nUse list_mcp_resources, list_mcp_resource_templates, or read_mcp_resource with one of these names as the server argument: ["ha"].',
       },
       {
         name: 'tool:goal',
@@ -68,6 +87,11 @@ function mainSessionAssembly(): PromptAssembly {
         order: 2600,
         text: 'dispatch_open opens a ticket; dispatch_send queues a message for the worker.',
       },
+      {
+        name: 'tool:read',
+        order: 1050,
+        text: 'Use the read tool — not shell commands like cat — to inspect text files.',
+      },
     ],
   }
 }
@@ -79,14 +103,65 @@ describe('toolSectionGroup', () => {
     expect(toolSectionGroup('tool:bash')).toBe('bash')
     expect(toolSectionGroup('tool:bilibili')).toBe('bilibili')
     expect(toolSectionGroup('tool:session-query')).toBe('session_query')
+    expect(toolSectionGroup('tool:bili-notify')).toBe('bili_notify')
   })
 
   it('leaves every other section alone', () => {
     expect(toolSectionGroup('harness:identity')).toBeUndefined()
     expect(toolSectionGroup('deployment:persona-prefix')).toBeUndefined()
     expect(toolSectionGroup('dispatcher:handoff')).toBeUndefined()
+    expect(toolSectionGroup('mcp:github')).toBeUndefined()
+    expect(toolSectionGroup('mcp-resource-servers')).toBeUndefined()
     expect(toolSectionGroup('ui:deliverable-file-references')).toBeUndefined()
     expect(toolSectionGroup('tools:ptc-only')).toBeUndefined()
+  })
+})
+
+describe('sectionToolFamily', () => {
+  it('covers the group name, its prefixed members and its suffixed members', () => {
+    const family = sectionToolFamily('tool:browser')!
+    expect(family('browser')).toBe(true)
+    expect(family('browser_navigate')).toBe(true)
+    expect(family('browser_take_screenshot')).toBe(true)
+    expect(family('browserify')).toBe(false)
+    expect(family('read')).toBe(false)
+  })
+
+  it('reaches the suffixed goal tools', () => {
+    const family = sectionToolFamily('tool:goal')!
+    expect(family('create_goal')).toBe(true)
+    expect(family('get_goal')).toBe(true)
+    expect(family('update_goal')).toBe(true)
+    expect(family('goal')).toBe(true)
+    expect(family('goal_state')).toBe(true)
+  })
+
+  it('hyphenates the group name the way the tools are named', () => {
+    const family = sectionToolFamily('tool:bili-notify')!
+    expect(family('bili_notify_unread')).toBe(true)
+    expect(family('bili_mentions')).toBe(false)
+  })
+
+  it('maps an mcp server section onto that server namespace only', () => {
+    const family = sectionToolFamily('mcp:github')!
+    expect(family('mcp__github__search_code')).toBe(true)
+    expect(family('mcp__github__create_pull_request')).toBe(true)
+    expect(family('mcp__ha__HassTurnOn')).toBe(false)
+    expect(family('search_code')).toBe(false)
+  })
+
+  it('maps the shared resource section onto the three resource tools', () => {
+    const family = sectionToolFamily('mcp-resource-servers')!
+    expect(family('list_mcp_resources')).toBe(true)
+    expect(family('list_mcp_resource_templates')).toBe(true)
+    expect(family('read_mcp_resource')).toBe(true)
+    expect(family('mcp__ha__list_resources')).toBe(false)
+  })
+
+  it('has no family for prose sections', () => {
+    expect(sectionToolFamily('harness:identity')).toBeUndefined()
+    expect(sectionToolFamily('plan:policy')).toBeUndefined()
+    expect(sectionToolFamily('dispatcher:handoff')).toBeUndefined()
   })
 })
 
@@ -103,46 +178,94 @@ describe('mentionedToolNames', () => {
     expect(mentionedToolNames('investigate failures with bash', vocabulary)).toEqual(['bash'])
     expect(mentionedToolNames('investigate failures with the shell', vocabulary)).toEqual([])
   })
+
+  it('ignores bare words once the section spells out a snake_case name', () => {
+    // This is the bili-notify section: "read the notifications" used to match
+    // the visible `read` tool and keep the whole thing in the prompt.
+    const vocabulary = new Set(['read'])
+    expect(
+      mentionedToolNames("bili_notify_unread read the account's notifications", vocabulary),
+    ).toEqual(['bili_notify_unread'])
+  })
 })
 
 describe('prunesToolSection', () => {
-  const vocabulary = new Set([...VISIBLE, 'bash', 'browser', 'bilibili', 'jobs', 'goal', 'session_query', 'dispatch', 'present'])
+  const vocabulary = new Set([...VISIBLE, 'bili-notify', 'bili_notify', 'browser', 'session_query', 'dispatch'])
 
-  it('drops a section whose only tool is hidden', () => {
+  it('drops a section whose family is entirely hidden', () => {
     const section = { name: 'tool:bash', text: 'investigate failures with bash' }
+    expect(prunesToolSection(section, new Set(['read']), vocabulary)).toBe(true)
+  })
+
+  it('drops the browser section even though its prose says "read"', () => {
+    const section = {
+      name: 'tool:browser',
+      text: 'Use the browser tools (browser_navigate, browser_snapshot) to inspect web pages. After navigating, read browser_snapshot before deciding the next action.',
+    }
     expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
   })
 
-  it('keeps a section that names a tool still visible', () => {
-    const section = { name: 'tool:goal', text: 'create_goal opens a long objective' }
-    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(false)
+  it('drops bili-notify when no bili_* tool is visible', () => {
+    const section = {
+      name: 'tool:bili-notify',
+      text: "bili_notify_unread read the account's notifications; bili_comments reads a comment section.",
+    }
+    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
   })
 
+  it('keeps a section whose family has a visible member', () => {
+    const section = { name: 'tool:goal', text: 'Goals: create_goal for a long objective, get_goal to read it.' }
+    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(false)
+  })
 
   it('keeps a section whose group name is itself a visible tool', () => {
     const section = { name: 'tool:present', text: 'Declare existing files as final deliverables.' }
     expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(false)
   })
 
-  it('does not keep a section because another tool shares its prefix', () => {
-    // `read_image` is whitelisted and `read` is not; the group is `read`, and
-    // a prefix match would wrongly spare the section.
+  it('keeps the read section on read itself', () => {
     const section = {
       name: 'tool:read',
       text: 'Use the read tool — not shell commands like cat — to inspect text files.',
+    }
+    // Kept because `read` is there; nothing else in the family is needed.
+    expect(prunesToolSection(section, new Set(['read']), new Set(['read']))).toBe(false)
+  })
+
+  it('does not keep the read section on a whitelisted-but-unregistered name', () => {
+    // `read` is on the default allow list, and the prose says "read", but the
+    // schema list does not have it: only visibility may keep a section alive.
+    const section = {
+      name: 'tool:read',
+      text: 'Use the read tool — not shell commands like cat — to inspect text files.',
+    }
+    const visibleWithoutRead = new Set(['bash', 'write', 'edit'])
+    expect(prunesToolSection(section, visibleWithoutRead, new Set([...vocabulary, 'read']))).toBe(true)
+  })
+
+  it('drops mcp:github when no mcp__github__ tool is visible', () => {
+    const section = {
+      name: 'mcp:github',
+      text: 'Use mcp__github__search_code to find code and mcp__github__search_issues for issues.',
     }
     expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
   })
 
-  it('keeps the read section once read itself is whitelisted', () => {
-    // The other half of the same rule: `read` is on the default list now, so
-    // its own section stays — and it stays on `read`, not on `read_image`.
-    const visible = new Set([...VISIBLE, 'read'])
+  it('keeps mcp:github once one of its tools is visible', () => {
     const section = {
-      name: 'tool:read',
-      text: 'Use the read tool — not shell commands like cat — to inspect text files.',
+      name: 'mcp:github',
+      text: 'Use mcp__github__search_code to find code.',
     }
-    expect(prunesToolSection(section, visible, new Set([...vocabulary, 'read']))).toBe(false)
+    expect(prunesToolSection(section, new Set(['mcp__github__search_code']), vocabulary)).toBe(false)
+  })
+
+  it('drops the resource section when the three resource tools are hidden', () => {
+    const section = {
+      name: 'mcp-resource-servers',
+      text: 'Use list_mcp_resources, list_mcp_resource_templates, or read_mcp_resource with one of these names: ["ha"].',
+    }
+    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
+    expect(prunesToolSection(section, new Set([...VISIBLE, 'read_mcp_resource']), vocabulary)).toBe(false)
   })
 
   it('never touches a section that is not a tool section', () => {
@@ -152,17 +275,19 @@ describe('prunesToolSection', () => {
 })
 
 describe('pruneToolSections', () => {
-  it('drops exactly the sections whose tools are all hidden', () => {
+  it('drops exactly the sections no visible tool stands behind', () => {
     const { assembly, removed } = pruneToolSections(mainSessionAssembly(), DEFAULT_ROUTER_TOOLS)
-    expect(removed).toEqual(['tool:bash', 'tool:bilibili', 'tool:browser', 'tool:jobs'])
+    expect(removed).toEqual(['tool:browser', 'tool:bili-notify', 'mcp:github', 'mcp-resource-servers'])
     expect(names(assembly)).toEqual([
       'harness:identity',
       'deployment:persona-prefix',
       'dispatcher:handoff',
+      'plan:policy',
       'tool:goal',
       'tool:session-query',
       'tool:present',
       'tool:dispatch',
+      'tool:read',
     ])
   })
 
@@ -176,6 +301,15 @@ describe('pruneToolSections', () => {
     const pruned = pruneToolSections(assembly, DEFAULT_ROUTER_TOOLS)
     expect(pruned.removed).toEqual([])
     expect(names(pruned.assembly)).toEqual(['tool:session-query'])
+  })
+
+  it('falls back to a bare word when the section names no snake_case tool', () => {
+    const assembly: PromptAssembly = {
+      tools: [{ name: 'bash' }],
+      sections: [{ name: 'tool:shell', text: 'Investigate failures with bash before moving on.' }],
+    }
+    const pruned = pruneToolSections(assembly, DEFAULT_ROUTER_TOOLS)
+    expect(pruned.removed).toEqual([])
   })
 
   it('drops a tool section that names nothing, because its group is gone too', () => {
@@ -207,6 +341,7 @@ describe('pruneToolSections', () => {
         { name: 'deployment:persona-suffix', text: '说话短一点。' },
         { name: 'dispatcher:handoff', text: '派完立刻 dispatch_open 记票。' },
         { name: 'plan:policy', text: 'Do not write files before the plan is approved.' },
+        { name: 'mcp-server-notice', text: 'ignored: no such section shape' },
       ],
     }
     const pruned = pruneToolSections(assembly, DEFAULT_ROUTER_TOOLS)
@@ -216,6 +351,7 @@ describe('pruneToolSections', () => {
       'deployment:persona-suffix',
       'dispatcher:handoff',
       'plan:policy',
+      'mcp-server-notice',
     ])
   })
 })
@@ -246,8 +382,10 @@ describe('installPromptFilter', () => {
     expect(hooks).toHaveLength(1)
     const assembly = mainSessionAssembly()
     const out = await hooks[0](assembly, {}, () => Promise.resolve(assembly))
-    expect(names(out)).not.toContain('tool:bilibili')
     expect(names(out)).not.toContain('tool:browser')
+    expect(names(out)).not.toContain('tool:bili-notify')
+    expect(names(out)).not.toContain('mcp:github')
+    expect(names(out)).not.toContain('mcp-resource-servers')
     expect(names(out)).toContain('deployment:persona-prefix')
     expect(names(out)).toContain('dispatcher:handoff')
   })
@@ -259,7 +397,7 @@ describe('installPromptFilter', () => {
     await hooks[0](assembly, {}, () => Promise.resolve(assembly))
     await hooks[0](assembly, {}, () => Promise.resolve(assembly))
     expect(messages.filter((line) => line.includes('pruned'))).toHaveLength(1)
-    expect(messages[0]).toContain('tool:bilibili')
+    expect(messages[0]).toContain('tool:browser')
   })
 
   it('reports a host without a scoped hook instead of pretending', () => {
