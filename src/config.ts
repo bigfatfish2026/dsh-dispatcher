@@ -58,10 +58,12 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   // Machine health, read-only.
   'host_status',
   'host_alerts',
-  // 2026-11-01 加：宿主注册的只读文件工具——读文本、搜内容、按 glob 列文件。
+  // 2026-11-01 加：宿主注册的只读文件工具——读文本、按 glob 列文件。
   // 宿主没有 ls / stat / tree，能列文件名的就是 glob。只读，不写盘。
+  // grep 2026-11-01 摘掉：它的输出体积不可控，一次 -rn 就能把满仓的命中行倒进上下文；
+  // 主会话的长上下文成本里 98.6% 是 cache read，一句没收住的搜索等于按整段日志付钱。
+  // 要搜内容就让 worker 去搜，把结果压成几行带回来。
   'read',
-  'grep',
   'glob',
 ]
 
