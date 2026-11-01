@@ -390,11 +390,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
     let delivered = 0
     const notices: string[] = []
 
-    // A ticket that ended but received more mail reopens — the prototype's
-    // `tickets.wake`. A dropped ticket is a person's stop and stays shut.
+    // A ticket that ended but received more mail *after* it ended reopens — the
+    // prototype's `tickets.wake`. A dropped ticket is a person's stop and stays
+    // shut. The after-it-ended part is the whole point: an input queued while
+    // the ticket was still running never reaches a worker whose session is gone
+    // (dispatch_send only hands it over to a live, idle agent), so it sits in the
+    // log forever. Counting that as "new mail" is what used to flip finished
+    // tickets back to open on the next sweep, with a fresh timestamp.
     for (const ticket of store.list()) {
       if (ticket.status !== 'done') continue
-      if (pending(ticket.inputs).length === 0) continue
+      const since = Date.parse(ticket.closedAt ?? ticket.updatedAt)
+      const fresh = pending(ticket.inputs).filter((entry) => Date.parse(entry.at) > since)
+      if (fresh.length === 0) continue
       store.update(ticket.id, { status: 'open' })
       notices.push(`${ticket.id}「${ticket.goal}」结束后又收到新消息，已重新打开`)
     }
