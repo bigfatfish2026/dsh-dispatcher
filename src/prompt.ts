@@ -8,11 +8,22 @@
  * …" and calls them anyway. This module drops the sections whose tools are all
  * hidden, and nothing else.
  *
- * Section names come from the host: every first-party tool contribution is
- * named `tool:<group>` (`tool:bash`, `tool:goal`, `tool:session-query`), and the
- * third-party ones follow the same shape (`tool:bilibili`, `tool:browser`).
- * Anything that is not a `tool:` section is somebody else's prose — persona,
- * plan policy, the hand-off rules this plugin appends — and is never touched.
+ * A section is judged by the family of tool names it stands for, not by the
+ * words its prose happens to contain. `tool:<group>` covers the group itself
+ * plus every name that starts with `group_` or ends with `_group`; that is what
+ * makes `tool:browser` the section for `browser_navigate` and `tool:goal` the
+ * section for `create_goal` / `get_goal` / `update_goal`, without making
+ * `browser` and `goal` themselves registered tools. MCP guidance has its own
+ * two shapes — `mcp:<server>` for one server's tools, all named
+ * `mcp__<server>__*`, and the single `mcp-resource-servers` section for the
+ * three shared resource tools — and is judged the same way. Anything that is
+ * not one of those sections is somebody else's prose: persona, plan policy, the
+ * hand-off rules this plugin appends, and is never touched.
+ *
+ * The prose is only a fallback: a section survives if a name inside it is still
+ * visible, but a bare word counts only when the section names no snake_case
+ * tool at all. That is what stopped `tool:browser` from being kept alive by the
+ * word "read" in "After navigating, read browser_snapshot before deciding".
  */
 
 /** The slice of one assembled prompt section this module needs. */
@@ -45,12 +56,30 @@ export type PromptAssemblyHook = (
 const TOOL_SECTION_PREFIX = 'tool:'
 
 /**
+ * The MCP naming: the client registers one section per server as
+ * `mcp:<server>` and names that server's tools `mcp__<server>__<rawName>`, while
+ * the resource plugin owns one shared section for the three tools it registers
+ * outside any server's namespace.
+ */
+const MCP_SERVER_PREFIX = 'mcp:'
+const MCP_TOOL_PREFIX = 'mcp__'
+const MCP_RESOURCE_SECTION = 'mcp-resource-servers'
+const MCP_RESOURCE_TOOLS: ReadonlySet<string> = new Set([
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+])
+
+/**
  * Tool names are snake_case; a word with at least one underscore is taken as a
  * tool name on sight. Single words are only taken when they are already in the
  * vocabulary, or every "the" and "result" would count as a tool.
  */
 const MULTI_SEGMENT = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g
 const WORD = /[A-Za-z][A-Za-z0-9]*/g
+
+/** The test a section's tools have to pass to keep that section in the prompt. */
+export type ToolFamily = (toolName: string) => boolean
 
 /**
  * The tool group a section explains, or `undefined` for any other section.
@@ -64,16 +93,48 @@ export function toolSectionGroup(name: string): string | undefined {
 }
 
 /**
+ * The family of tool names one section stands for, or `undefined` when the
+ * section is not a tool section at all and must be left alone.
+ *
+ * A group name is not necessarily a tool: `browser` and `goal` are sections the
+ * plugins put the tools under, not schemas of their own, so the family has to
+ * reach the members. Two directions are needed because plugin authors put the
+ * group on either end of the name — `browser_navigate` prefixes it,
+ * `create_goal` suffixes it — and the exact name is kept so a section named
+ * after a real tool (`tool:bash`, `tool:present`) still matches it.
+ */
+export function sectionToolFamily(name: string): ToolFamily | undefined {
+  if (name === MCP_RESOURCE_SECTION) {
+    return (tool) => MCP_RESOURCE_TOOLS.has(tool)
+  }
+  if (name.startsWith(MCP_SERVER_PREFIX)) {
+    const server = name.slice(MCP_SERVER_PREFIX.length)
+    if (server === '') return undefined
+    const prefix = `${MCP_TOOL_PREFIX}${server}__`
+    return (tool) => tool.startsWith(prefix)
+  }
+  const group = toolSectionGroup(name)
+  if (group === undefined || group === '') return undefined
+  return (tool) =>
+    tool === group || tool.startsWith(`${group}_`) || tool.endsWith(`_${group}`)
+}
+
+/**
  * Tool names a section's prose mentions.
  *
- * `vocabulary` is what makes a bare word count: the allow list, the visible
- * schemas and the section group names themselves. That is how `tool:bash`
- * ("investigate failures … with bash") is recognised as being about `bash`
- * even when the word carries no underscore.
+ * One rule holds the whole thing together: snake_case wins. If the text already
+ * spells out a tool name, only those names count — a section that says
+ * `bili_notify_unread` and also says "read the notifications" is about
+ * `bili_notify_unread`, not about `read`. The bare-word pass exists only for
+ * sections that name nothing (`tool:bash`: "investigate failures … with bash"),
+ * and `vocabulary` — the allow list, the visible schemas and the section group
+ * names — is what makes a word like `bash` count without an underscore, or
+ * every "the" and "result" would be a tool.
  */
 export function mentionedToolNames(text: string, vocabulary: ReadonlySet<string>): string[] {
+  const named = [...new Set([...text.matchAll(MULTI_SEGMENT)].map((match) => match[0]))]
+  if (named.length > 0) return named
   const found = new Set<string>()
-  for (const match of text.matchAll(MULTI_SEGMENT)) found.add(match[0])
   for (const match of text.matchAll(WORD)) {
     const lower = match[0].toLowerCase()
     if (vocabulary.has(lower)) found.add(lower)
@@ -84,20 +145,23 @@ export function mentionedToolNames(text: string, vocabulary: ReadonlySet<string>
 /**
  * Whether one section only explains tools this session can no longer see.
  *
- * Two ways to stay. The group name itself is still a visible tool (`tool:bash`
- * while `bash` is whitelisted), or the prose names a tool that is still visible
- * — `tool:goal` keeps its place because `create_goal` is there. Nothing is
- * inferred from a shared prefix: `read_image` being visible must not keep the
- * `tool:read` section alive, and `read` is a different tool.
+ * Two ways to stay. A member of the section's tool family is still in the
+ * visible schemas — `tool:goal` keeps its place because `create_goal` is there,
+ * `tool:browser` goes because no `browser_*` is — or the prose names a visible
+ * tool (see {@link mentionedToolNames}). Nothing is inferred from the allow
+ * list: a name this session cannot actually call must not keep a section alive,
+ * or the model reads guidance for a tool the schema list does not have.
  */
 export function prunesToolSection(
   section: PromptSection,
   visible: ReadonlySet<string>,
   vocabulary: ReadonlySet<string>,
 ): boolean {
-  const group = toolSectionGroup(section.name)
-  if (group === undefined) return false
-  if (visible.has(group)) return false
+  const family = sectionToolFamily(section.name)
+  if (family === undefined) return false
+  for (const tool of visible) {
+    if (family(tool)) return false
+  }
   const mentioned = mentionedToolNames(section.text, vocabulary)
   return !mentioned.some((name) => visible.has(name))
 }
