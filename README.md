@@ -1,62 +1,64 @@
 # dsh-dispatcher
 
-A dispatch plugin for DeepSeek Harness: the main session keeps talking, worker subagents do the work.
+[English](README.en.md) · 中文
 
-The point is responsiveness. Someone asks a question over QQ and expects an answer now; the main session cannot give one while it is buried in a task. So instead it writes the task down as a ticket, hands it to a worker, and goes straight back to the conversation. The ticket records where the work stands, and it is still there when the main session looks back later.
+给 DeepSeek Harness 用的派活插件：主会话负责回话，活交给 worker 子代理去做。
 
-The design follows the official prototype, [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), and keeps three of its parts:
+初衷很简单——人在 QQ 里问一句，希望马上有回应。可主会话一旦自己埋头干活，回话就慢了。这个插件让主会话多一件可做的事：把活登记成「票」，派给子代理，然后立刻回来接着聊；票的进展单独记，随时可查。
 
-| Prototype | dsh-dispatcher |
+思路来自官方原型 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)，但只取了其中三件：
+
+| 原型 | dsh-dispatcher |
 | --- | --- |
-| Source / Trigger / Thread / Subscription | Dropped: messages already arrive in the main session |
-| Two-layer Eval + versioned Policy | Dropped: the main session decides whether to delegate |
-| Dedicated DSH session as Executor | A `subagent`, sharing the working directory |
-| Ticket lifecycle + panel + retries | Tickets, status, and a staleness mark |
-| Input queue + report delivery | Two queues in the log, plus a sweep that delivers them |
+| Source / Trigger / Thread / Subscription | 不做事件源，消息本来就在主会话里 |
+| Eval 双层判定 + 版本化 Policy | 不做，主会话自己判断要不要派活 |
+| 独立 DSH 会话当 Executor | 用 subagent，共享工作目录 |
+| 票的生命周期 + 面板 + 重试 | 只留票、状态、超时标记 |
+| Input queue + report delivery | 两条队列都记在日志里，巡检负责送 |
 
-## Compatibility
+## 兼容性
 
-| Surface | Status |
+| 项目 | 状态 |
 |---|---|
-| Harness | DeepSeek Harness `0.2.1-rc.5` (peer dep `>=0.1.2-rc.1 <0.3.0`, spelled as several OR'd ranges in `package.json`) |
+| Harness | DeepSeek Harness `0.2.1-rc.5`（peer 依赖 `>=0.1.2-rc.1 <0.3.0`，`package.json` 里拆成多条区间用 OR 拼） |
 | Node | `^22.19.0 \|\| >=24.0.0` |
-| Platforms | All (plain ESM; no native code, no network) |
+| 平台 | 全部（纯 ESM，无原生代码、无网络） |
 
-## Install
+## 装
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-0.3.1.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-1.1.1.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
-Restart the instance afterwards; the plugin only loads on startup. Tickets default to `$DSH_HOME/dispatcher/tickets.jsonl`: one event per line, append-only, and a half-written trailing line is skipped on read.
+装完要重启对应的 dsh 实例才会加载。票默认记在 `$DSH_HOME/dispatcher/tickets.jsonl`，一行一个事件，只追加不改写；读到半截行会跳过。
 
-## Configuration
+## 配置
 
-| Key | Type | Default | Meaning |
+| 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
-| `staleMinutes` | number | `30` | Silence after which a ticket counts as stale |
-| `maxOpen` | number | `4` | Cap on concurrently open tickets |
-| `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
-| `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string means "do not inject" |
-| `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off |
-| `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
-| `quietSweep` | boolean | `false` | Never wake the main session on a sweep; reports stay in the log and an outside script pushes them to QQ |
-| `ownerSessionId` | string | empty | Session to wake; empty picks the c2c session from the QQ prefs file |
-| `qqPrefsPath` | string | `''` | Conversation-key to session-id map |
-| `ownerOpenId` | string | empty | Owner openid, used when more than one c2c session exists |
-| `noWaitGuard` | boolean | `true` | Refuse main-session calls that would wait; workers are unaffected |
-| `maxCommandMs` | number | `30000` | Longest a single command may hold the main session |
-| `maxWaitMs` | number | `5000` | Longest a `job_output` wait may hold the main session |
-| `routerRestrict` | boolean | `true` | Give every non-worker session the `routerTools` whitelist |
-| `routerEscapeFile` | string | `~/.dsh/no-restrict` | While this file exists the whitelist is not installed on any session |
-| `routerTools` | string[] | 36 names | Global tool names the main session keeps |
-| `workerToolDeny` | boolean | `true` | Take `workerDenyTools` out of every worker subagent's tool schema; independent of `routerRestrict` |
-| `workerDenyTools` | string[] | 7 names | Tool names a worker does not see: the write-side memory tools |
-| `notifyScript` | string | `/home/julia/fatfish/notify.sh` | Script `progress_note` runs to push one line to QQ; it owns the openid |
-| `notifyTimeoutMs` | number | `5000` | Hard cap on one progress push |
+| `stateFile` | string | `dispatcher/tickets.jsonl` | 票的日志路径，相对路径按 `DSH_HOME` 解析 |
+| `staleMinutes` | number | `30` | 多久没更新算「卡住」 |
+| `maxOpen` | number | `4` | 同时开着的票上限，`done` / `dropped` 不占名额 |
+| `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
+| `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
+| `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
+| `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
+| `quietSweep` | boolean | `false` | 巡检时不叫醒主会话；报告只入票日志，由外部脚本直发 QQ |
+| `ownerSessionId` | string | 空 | 叫醒哪个会话；空则从 QQ 偏好文件里认 c2c 会话 |
+| `qqPrefsPath` | string | `''` | 会话映射文件 |
+| `ownerOpenId` | string | 空 | 主人 openid，多个 c2c 会话时用来挑对的那个 |
+| `noWaitGuard` | boolean | `true` | 拦下会让主会话干等的调用；worker 不受影响 |
+| `maxCommandMs` | number | `30000` | 单条命令最多占用主会话多久 |
+| `maxWaitMs` | number | `5000` | `job_output` 最多占用主会话多久 |
+| `routerRestrict` | boolean | `true` | 给每个非 worker 会话装 `routerTools` 白名单 |
+| `routerEscapeFile` | string | `~/.dsh/no-restrict` | 这个文件存在时，任何会话都不装白名单 |
+| `routerTools` | string[] | 37 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` |
+| `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从每个 worker subagent 的工具 schema 里摘掉；跟 `routerRestrict` 各自独立 |
+| `workerDenyTools` | string[] | 7 个名字 | worker 看不见的工具名：写记忆那七个，`DEFAULT_WORKER_DENY_TOOLS` |
+| `notifyScript` | string | `/home/julia/fatfish/notify.sh` | `progress_note` 推送用的脚本，openid 在脚本里，插件不存第二份 |
+| `notifyTimeoutMs` | number | `5000` | 一次推送最多等多久，超时杀掉子进程并返回 `sent: false` |
 
 ```yaml
 - id: dsh-dispatcher
@@ -66,65 +68,70 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
     maxOpen: 3
 ```
 
-## Tools
+**改完配置要重启才生效。** `cordis.patch.yml` 里的值在插件加载时读一次，热加载不一定把新值送到已经在跑的会话上；白名单和反向名单这类按会话装的东西尤其如此。改完 `dsh` 配置就重启对应实例，别指望改一行 yml 立刻生效——1.1.1 修的那个问题，就是热加载之后判据错在「谁有权说这个工具不存在」。
 
-| Tool | Purpose |
+## 工具
+
+| 工具 | 作用 |
 |---|---|
-| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying |
-| `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
-| `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports |
-| `dispatch_send` | Queue one more message for a ticket's worker |
-| `dispatch_report` | Record a report on a ticket without ending it |
-| `dispatch_close` | Close a ticket once the work is delivered |
-| `dispatch_sweep` | Run a sweep now instead of waiting for the timer |
+| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话 |
+| `dispatch_touch` | 改状态，可附一行进展说明（`status` 必填） |
+| `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告 |
+| `dispatch_send` | 往票里追加一条给 worker 的消息 |
+| `dispatch_report` | 记一份报告，不结束这张票 |
+| `dispatch_close` | 交付了就关票 |
+| `dispatch_sweep` | 立刻跑一次巡检，不等定时器 |
+| `progress_note` | 把一行进度直接推到主人 QQ 上；不叫醒会话、不写盘，长活每出一段就报一次 |
 
-Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot.
+状态只有六个：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算「还开着」，占 `maxOpen` 名额。
 
-## Queues
+## 两条队列
 
-A ticket carries two queues, both lines in the same log, so a restart loses nothing: messages waiting for the worker (`dispatch_send`) and reports the worker handed back (`dispatch_report`). Each entry has its own id and a `delivered` mark.
+一张票带两条队列，都是日志里的行，重启也丢不了：等 worker 收的消息（`dispatch_send`）和 worker 交回来的报告（`dispatch_report`）。每条有自己的 id 和一个 `delivered` 标记。
 
-`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone; the main session reads reports on the next turn or sweep. A sweep pushes undelivered messages to live workers, carries undelivered reports to the owner session in one message, and reopens a `done` ticket that received more mail — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut.
+`dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，主会话下一轮或下次巡检读到。巡检会把没送到的消息推给活着的 worker、把没读的报告合成一条消息交给主人会话，还会把「已经 `done` 却又收到新消息」的票重新打开——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。
 
-## How the main session should use it
+## 给主会话的用法
 
-Open the ticket, hand off, reply. That order. The ticket is a note to your future self: half an hour later `dispatch_list` says which jobs are still silent, without scrolling back through the conversation.
+一句话：**先开票，再派活，马上回话。** 票是写给半小时后的自己看的——回头 `dispatch_list` 一眼就知道哪些还没消息，不必翻聊天记录。
 
-When a worker needs a decision, it writes the question into `note`, switches the ticket to `blocked`, and lets the main session answer it, ask the person, or drop the work.
+worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`，由主会话决定自己答、来问人，还是拒掉。
 
-## The waiting guard
+派的时候把两件事写进任务里：票号（让 worker 用 `dispatch_report` 交活）和打点义务（每出一段进度就调 `progress_note`）。不打点的长活就是让主人干等。主人中途追加的话用 `dispatch_send` 进票，别转述丢了。
 
-A prompt section is a request, not a guarantee: the main session can still sit in a `bash` call for two minutes while the person waits for an answer. So every session except a worker gets a `tools.guard` when it is created, and the guard refuses three shapes outright — a command that runs `sleep`, a `timeoutMs` over `maxCommandMs`, and a `job_output` wait over `maxWaitMs`. A foreground command with no `timeoutMs` is refused too, and the reason names the two ways out. Sessions that already exist when the plugin loads are covered as well, or a reload would only protect the next one.
+## 别在中枢等
 
-This is upstream dsh-superagent's `noWait` guard, which caps the router shell at five seconds and refuses the same shapes. What differs is how a session earns the right to wait: there it is the agent preset, here it is `session.header.origin === 'subagent'`.
+提示词里写的是请求，不是保证：主会话还是能卡在一个 `bash` 里两分钟，主人在那头等着回话。所以每个会话创建时都会挂一道 `tools.guard`，worker 除外，它拦三种形状——跑 `sleep` 的命令、`timeoutMs` 超过 `maxCommandMs` 的命令、`job_output` 等超过 `maxWaitMs` 的等待；没给 `timeoutMs` 的前台命令也拦，拒绝理由里直接写两条出路。插件加载时已经存在的会话同样补挂，不然热重载只保护下一个会话。
 
-## The router whitelist
+这套是原型 `noWait` 守卫的移植——它把 router 的 shell 上限压到五秒，拦的也是这三样。不一样的是「谁有资格等」怎么判：那边靠 agent preset，这边靠 `session.header.origin === 'subagent'`。
 
-The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `grep`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers keep the surface, which is the whole point — heavy work has somewhere to go.
+## 主会话白名单
 
-The default list is 36 names and lives in `DEFAULT_ROUTER_TOOLS` in `src/config.ts`. Names must match the registered global tool exactly. `tools.restrict` throws on an unknown one, and `ctx.effect` hands a throw from its callback to cordis' error handling rather than back to the caller, so the plugin checks the list against the registry first: it warns with the names nothing answers to and drops just those from the filter. A typo costs a log line, not the whitelist.
+等待守卫是拦住「一次调用卡太久」，白名单是干脆不给它这个工具。`routerRestrict` 开着（默认）时，每个不是 worker 的会话一出现就挂上 `tools.restrict({ allow: routerTools })`：主会话留着票、派活、记忆、跟人说话的那几样，加只读文件工具（`read`、`grep`、`glob`）和只读的机器检查，写盘、shell 和等待类全没了——「派出去」于是不再跟「在这儿干」抢，长活也卡不住回话。worker 这一头留着全套工具，重活才有地方去，只摘写记忆的那七个（见下一节）。
 
-Hiding a tool is only half of it. Every tool plugin also registers a `tool:<group>` prompt section saying how to use it, and that section is assembled from the prompt registry rather than from the schema list — so the main session used to read "Use `browser_navigate` …" for a tool the whitelist had already taken away. While the restriction is installed the session also gets a scoped `system-prompt/assemble` listener that drops exactly the tool sections whose tools are all hidden. The judgement is deliberately narrow: only `tool:` sections are candidates (persona, plan policy, the hand-off rules and every other prose section are never touched); a section stays when its group name is itself a visible tool (`tool:bash` while `bash` is whitelisted) or when its prose still names a visible tool (`tool:goal` survives on `create_goal`). Nothing is inferred from a shared prefix: `read` and `read_image` are two tools, so one being visible never decides the other's section — with both whitelisted, `tool:read` stays on `read` alone. Both checks read `assembly.tools`, the schemas the model is about to receive, so whitelisted-but-unregistered names cannot keep a section alive. Subagents have their own prompt scope and never see this listener; with the escape file present there is no restriction, so there is nothing to prune either.
+默认 37 个名字，写在 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` 里。名字必须跟注册的全局工具名对得上：`tools.restrict` 遇到不认识的名字会抛错，而 `ctx.effect` 把回调里的异常交给 cordis 的错误处理、不会送回调用方，所以插件先对着注册表核一遍——把没人认的名字 warn 出来，只从白名单里剔掉那几个。写错一个名字的代价是一行日志，不是整份白名单。
 
-### The worker deny list
+光把工具藏起来只做了一半。每个工具插件还会注册一段 `tool:<组名>` 的提示段，教模型怎么用它；这段提示是由提示登记表装配出来的，跟工具 schema 列表不是一条路——所以主会话以前会读到「Use browser_navigate…」，去调一个已经被白名单收走的工具。于是装上白名单的同时，这个会话还挂一个 scoped 的 `system-prompt/assemble` 钩子，只删「它讲的工具一个都看不见了」的段。判据收得很窄：只有 `tool:` 开头的段进候选，persona、plan policy、手递手规程和其它所有说明段一概不碰；组名本身就是可见工具的就留（`tool:bash`，因为 `bash` 在白名单里），或者段文本里还提到可见工具才留（`tool:goal` 靠 `create_goal` 留下来）。前缀同源不算证据：`read` 和 `read_image` 是两个工具，谁可见都不能替对方那段作主——两个都在白名单里时，`tool:read` 靠的只是 `read` 自己。两个判断都看 `assembly.tools`，也就是模型这一轮真要收到的 schema 列表——白名单里有但没注册的名字撑不住一段提示。子代理有自己的提示作用域，根本看不到这个钩子；escape 文件在的时候压根没装白名单，也就没有可删的。
 
-Since 2026-11-01 the rule is that only the main session writes memory: a worker may recall, never save, archive, merge, reflect, split, consolidate or sleep the memory store. `dsh-memory` enforces it at execute time (`assertMayWrite`), and `workerToolDeny` adds the layer above it — with it on (the default) every worker subagent gets `tools.restrict({ deny: workerDenyTools })` when it appears, so the seven write-side names never reach its schema and the model cannot spend a turn on a call that would be refused. The list is `DEFAULT_WORKER_DENY_TOOLS` in `src/config.ts`: `memory_save`, `memory_archive`, `memory_merge`, `memory_reflect`, `memory_split`, `memory_consolidate`, `memory_sleep`.
+### worker 反向名单
 
-It is a deny list and not the reverse whitelist on purpose. `restrict` checks an allow list against the scope's restrictable names, and the only public enumeration (`tools.schemas()`) projects the global layer alone — a worker also inherits whatever a preset registered on the agent plane, so an allow list built from that projection would hide those too and leave the worker with a handful of tools. Naming the seven cannot over-remove anything, and the failure mode of a bad config is a missing restriction rather than a crippled worker: names nothing registers are dropped with a warning, and a list that would cover every registered tool is refused instead of handed to `restrict`. `memory_recall`, `memory_entity` and the chat/search tools stay.
+2026-11-01 起的规矩：记忆只能主会话写，worker 只许查，不许 save / archive / merge / reflect / split / consolidate / sleep。`dsh-memory` 在 execute 层硬拦（`assertMayWrite`），`workerToolDeny` 是上面那层——开着（默认）时每个 worker subagent 一出现就挂 `tools.restrict({ deny: workerDenyTools })`，这七个名字根本不进它的 schema，模型连「想调一个会被拒的工具」这一步都没有。名单在 `src/config.ts` 的 `DEFAULT_WORKER_DENY_TOOLS`：`memory_save`、`memory_archive`、`memory_merge`、`memory_reflect`、`memory_split`、`memory_consolidate`、`memory_sleep`。
 
-`workerToolDeny` is separate from `routerRestrict` because the two guard different things — one is what the main session can do, the other is who may rewrite what the house remembers — and turning one off must not silently turn the other off. The escape file still turns both off.
+用 deny 而不是反向白名单（allow = 注册表减这七个）是有原因的：`restrict` 拿 allow 去对 restrictable 名字，而唯一公开的枚举 `tools.schemas()` 只投影全局层——worker 还会继承 preset 注册在 agent 层的工具，那些名字不在投影里，按它算 allow 会一起摘掉，worker 直接残废。点名这七个不会多摘任何东西，配错了的后果也只是「没装上限制」，而不是「worker 没工具」：注册表里没有的名字剔掉并告警，覆盖全部注册表的名单直接拒绝、不交给 `restrict`。`memory_recall`、`memory_entity` 和检索类工具照留。
 
-Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is not installed on any session; delete the file to turn it back on. `routerRestrict: false` turns it off for good. The escape file is read once per session, so a change needs a restart (for a session that already exists, a plugin reload).
+`workerToolDeny` 跟 `routerRestrict` 分开，是因为两件事：一个是主会话能干什么，一个是谁能改这屋子记住的东西；关一个不该顺手关掉另一个。escape 文件两个一起关。
 
-## Sweeps
+两条退路。`mkdir -p ~/.dsh && touch ~/.dsh/no-restrict`，任何会话都不装白名单；删掉文件就恢复。`routerRestrict: false` 是彻底关掉。escape 文件每个会话读一次，所以改它要重启（已经存在的会话则是重载插件）。
 
-Every `sweepMinutes` the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail, push queued messages to workers that are still alive, carry undelivered reports and quiet tickets into the owner session as one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking), and mark what it delivered. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory. A ticket that has not moved is only announced once.
+## 巡检
 
-`quietSweep: true` drops the third step. One `followup` costs a whole main-session turn with all of its context, so with quiet mode on the sweep still reopens tickets, steers live workers, marks reports delivered and refreshes the stale snapshot, but never wakes the session; the reports stay in the log for a script to read. This repository ships none — it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer) that pushes new reports wherever you want them, with the same backoff as the progress heartbeat.
+每 `sweepMinutes` 分钟看一遍票，按顺序做四件事：把「结束后又收到消息」的票重开、把排队消息推给还活着的 worker、把没读的报告和卡住的票合成一条 `followup` 交给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）、给送出去的打上已读。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。同一张票没动过只叫一次，动过了才再叫。
 
-This is the prototype's `Passes` heartbeat plus `evaluateDue`, with the delivery work kept and the evaluation dropped: nothing in a sweep asks a model anything.
+`quietSweep: true` 把第三步整个省掉。一次 `followup` 就是主会话带着全部上下文重跑一整轮，太贵；开了这个开关，巡检照旧重开票、给活着的 worker 推消息、把报告标已读、刷新卡住快照，但不叫醒任何会话，报告留在日志里等脚本来读。本仓库不带那个脚本——那是几行脚本加一个定时器（比如 `~/.dsh/dispatcher-notify.sh` 配 systemd timer），退避节奏跟进度心跳同一套，有新报告就推出去。
 
-## Development
+这一段借的是原型的 `Passes` 心跳加 `evaluateDue`，投递那部分留下，评估整个省掉——巡检一次不向模型问任何问题。
+
+## 开发
 
 ```sh
 pnpm install
@@ -133,7 +140,7 @@ pnpm run typecheck
 pnpm run build  # tsdown → lib/
 ```
 
-Tests touch neither the network nor the DSH runtime: they cover event folding, status rules, log round-trips, both queues, and the waiting guard's refusal rules.
+测试不碰网络，也不碰 DSH 运行时，只测事件折叠、状态判定、日志读写、两条队列，以及守卫拦不拦。
 
 ## License
 
