@@ -27,6 +27,13 @@ export interface TicketSnapshot {
   owner?: string
   createdAt: string
   updatedAt: string
+  /**
+   * When the ticket last ended (done or dropped), in the log's own time; unset
+   * while it is open again. A sweep needs this to tell "mail that arrived after
+   * the close" from "mail a dead worker never picked up" — only the first is a
+   * reason to reopen, and the log cannot answer that without keeping the close.
+   */
+  closedAt?: string
   /** Messages queued for the worker, oldest first. */
   inputs: TicketEntry[]
   /** Reports the worker handed back, oldest first. */
@@ -50,6 +57,9 @@ interface TicketEvent {
 export type EntryKind = 'input' | 'report'
 
 const OPEN: ReadonlySet<TicketStatus> = new Set(['open', 'running', 'waiting', 'blocked'])
+
+/** The two statuses that end a ticket: a dropped one is a person's stop. */
+const ENDED: ReadonlySet<TicketStatus> = new Set(['done', 'dropped'])
 
 export function isOpen(status: TicketStatus): boolean {
   return OPEN.has(status)
@@ -97,6 +107,7 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
         owner: event.owner,
         createdAt: event.at,
         updatedAt: event.at,
+        closedAt: event.status && ENDED.has(event.status) ? event.at : undefined,
         inputs: event.input ? queue([], event.at, event.input) : [],
         reports: event.report ? queue([], event.at, event.report) : [],
       })
@@ -110,6 +121,9 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
       note: event.note ?? previous.note,
       owner: event.owner ?? previous.owner,
       updatedAt: event.at,
+      // A status line is the only thing that moves the close: done/dropped set
+      // it, reopening clears it, and every other event leaves it alone.
+      closedAt: event.status ? (ENDED.has(event.status) ? event.at : undefined) : previous.closedAt,
       inputs: event.input
         ? queue(previous.inputs, event.at, event.input)
         : event.delivered?.kind === 'input'
