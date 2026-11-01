@@ -40,6 +40,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `staleMinutes` | number | `30` | Silence after which a ticket counts as stale |
 | `maxOpen` | number | `4` | Cap on concurrently open tickets |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
+| `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string means "do not inject" |
 | `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off |
 | `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
 | `quietSweep` | boolean | `false` | Never wake the main session on a sweep; reports stay in the log and an outside script pushes them to QQ |
@@ -52,6 +53,10 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `routerRestrict` | boolean | `true` | Give every non-worker session the `routerTools` whitelist |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | While this file exists the whitelist is not installed on any session |
 | `routerTools` | string[] | 36 names | Global tool names the main session keeps |
+| `workerToolDeny` | boolean | `true` | Take `workerDenyTools` out of every worker subagent's tool schema; independent of `routerRestrict` |
+| `workerDenyTools` | string[] | 7 names | Tool names a worker does not see: the write-side memory tools |
+| `notifyScript` | string | `/home/julia/fatfish/notify.sh` | Script `progress_note` runs to push one line to QQ; it owns the openid |
+| `notifyTimeoutMs` | number | `5000` | Hard cap on one progress push |
 
 ```yaml
 - id: dsh-dispatcher
@@ -95,11 +100,19 @@ This is upstream dsh-superagent's `noWait` guard, which caps the router shell at
 
 ## The router whitelist
 
-The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `grep`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers are untouched: a subagent keeps the full surface, which is the whole point — heavy work has somewhere to go.
+The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `grep`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers keep the surface, which is the whole point — heavy work has somewhere to go.
 
 The default list is 36 names and lives in `DEFAULT_ROUTER_TOOLS` in `src/config.ts`. Names must match the registered global tool exactly. `tools.restrict` throws on an unknown one, and `ctx.effect` hands a throw from its callback to cordis' error handling rather than back to the caller, so the plugin checks the list against the registry first: it warns with the names nothing answers to and drops just those from the filter. A typo costs a log line, not the whitelist.
 
 Hiding a tool is only half of it. Every tool plugin also registers a `tool:<group>` prompt section saying how to use it, and that section is assembled from the prompt registry rather than from the schema list — so the main session used to read "Use `browser_navigate` …" for a tool the whitelist had already taken away. While the restriction is installed the session also gets a scoped `system-prompt/assemble` listener that drops exactly the tool sections whose tools are all hidden. The judgement is deliberately narrow: only `tool:` sections are candidates (persona, plan policy, the hand-off rules and every other prose section are never touched); a section stays when its group name is itself a visible tool (`tool:bash` while `bash` is whitelisted) or when its prose still names a visible tool (`tool:goal` survives on `create_goal`). Nothing is inferred from a shared prefix: `read` and `read_image` are two tools, so one being visible never decides the other's section — with both whitelisted, `tool:read` stays on `read` alone. Both checks read `assembly.tools`, the schemas the model is about to receive, so whitelisted-but-unregistered names cannot keep a section alive. Subagents have their own prompt scope and never see this listener; with the escape file present there is no restriction, so there is nothing to prune either.
+
+### The worker deny list
+
+Since 2026-11-01 the rule is that only the main session writes memory: a worker may recall, never save, archive, merge, reflect, split, consolidate or sleep the memory store. `dsh-memory` enforces it at execute time (`assertMayWrite`), and `workerToolDeny` adds the layer above it — with it on (the default) every worker subagent gets `tools.restrict({ deny: workerDenyTools })` when it appears, so the seven write-side names never reach its schema and the model cannot spend a turn on a call that would be refused. The list is `DEFAULT_WORKER_DENY_TOOLS` in `src/config.ts`: `memory_save`, `memory_archive`, `memory_merge`, `memory_reflect`, `memory_split`, `memory_consolidate`, `memory_sleep`.
+
+It is a deny list and not the reverse whitelist on purpose. `restrict` checks an allow list against the scope's restrictable names, and the only public enumeration (`tools.schemas()`) projects the global layer alone — a worker also inherits whatever a preset registered on the agent plane, so an allow list built from that projection would hide those too and leave the worker with a handful of tools. Naming the seven cannot over-remove anything, and the failure mode of a bad config is a missing restriction rather than a crippled worker: names nothing registers are dropped with a warning, and a list that would cover every registered tool is refused instead of handed to `restrict`. `memory_recall`, `memory_entity` and the chat/search tools stay.
+
+`workerToolDeny` is separate from `routerRestrict` because the two guard different things — one is what the main session can do, the other is who may rewrite what the house remembers — and turning one off must not silently turn the other off. The escape file still turns both off.
 
 Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is not installed on any session; delete the file to turn it back on. `routerRestrict: false` turns it off for good. The escape file is read once per session, so a change needs a restart (for a session that already exists, a plugin reload).
 

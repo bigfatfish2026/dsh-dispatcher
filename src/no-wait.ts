@@ -55,7 +55,7 @@ export function noWaitReason(
       return `${WHY}命令里不要 sleep：要看结果就 run_in_background，等它结束推回来。`
     }
     if (timeoutMs !== undefined && timeoutMs > limits.maxCommandMs) {
-      return `${WHY}单条命令最多等 ${seconds(limits.maxCommandMs)} 秒：更久的用 run_in_background，或者派给 worker。`
+      return `${WHY}单条命令最多等 ${seconds(limits.maxCommandMs)} 秒：更久的用 run_in_background，或者派给小鱼。`
     }
     if (timeoutMs === undefined && !background) {
       return `${WHY}要么给 timeoutMs（不超过 ${seconds(limits.maxCommandMs)} 秒），要么 run_in_background。`
