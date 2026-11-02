@@ -41,6 +41,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
 | `staleMinutes` | number | `30` | Silence after which a ticket counts as stale in `dispatch_list` (the `!` mark). It no longer drives any announcement |
 | `maxOpen` | number | `4` | Cap on concurrently open tickets; `done` / `dropped` do not take a slot |
+| `briefMaxColumns` | number | `20` | Length cap for a ticket's `brief`, in display columns: a CJK character counts 2, a half-width one 1. 20 columns is 10 汉字, the little screen's second line |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
 | `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string (or whitespace only) means "do not inject" |
 | `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off and leaves only the manual `dispatch_sweep` |
@@ -75,9 +76,9 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 
 | Tool | Purpose |
 |---|---|
-| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying |
+| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying. Takes an optional `brief`; omit it and one is derived from `goal` |
 | `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
-| `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports |
+| `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports. Every row carries `brief` |
 | `dispatch_send` | Queue one more message for a ticket's worker |
 | `dispatch_report` | Record a report on a ticket without ending it |
 | `dispatch_close` | Close a ticket once the work is delivered |
@@ -85,6 +86,14 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `progress_note` | Push one line of progress straight to the owner's QQ; wakes no session and writes nothing to disk — call it once per chunk on long work |
 
 Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot.
+
+### The ticket `brief`
+
+Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` display columns (default 20 = 10 汉字). Anything longer is cut and closed with `…`.
+
+Pass a `brief` to `dispatch_open` when you have a better line than the goal's opening; otherwise one is derived from the first sentence of `goal`, with edge punctuation trimmed and whitespace collapsed. A caller-supplied line is capped the same way, so whoever renders it never has to measure it.
+
+Tickets written before the field existed simply have no `brief`: `foldEvents` leaves it unset instead of failing, and readers call `briefOf()` to derive one from `goal`. That means every row `dispatch_list` returns has a `brief` that fits, old tickets included.
 
 ## Queues
 

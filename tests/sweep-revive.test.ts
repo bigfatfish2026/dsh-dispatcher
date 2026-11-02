@@ -27,6 +27,7 @@ function testConfig(stateFile: string): Config {
     stateFile,
     staleMinutes: 30,
     maxOpen: 8,
+    briefMaxColumns: 20,
     handoffPolicy: false,
     handoffPolicyText: '',
     sweepMinutes: 0,
