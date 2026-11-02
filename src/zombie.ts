@@ -26,10 +26,10 @@ export interface ZombieHit {
   /**
    * 节流指纹：报告条数 + 最后活动时间 + 状态。
    *
-   * 不用 updatedAt：sweep 自己投递报告时会往日志里追加一条 delivered 事件，
-   * 那也会刷新 updatedAt——用它当指纹，推完一次的报告投递会让下一轮再推一遍。
-   * 最后一条报告的 at 和 status 都不会被投递动作改，只有真·新报告或状态变化
-   * （reopen）才会变。
+   * 不用 updatedAt：巡检自己也会往日志里追加事件（把排队消息交给活着的 worker、
+   * 给已关票清账），那会刷新 updatedAt——用它当指纹，这些动作会让刚推过的票下一轮
+   * 再推一遍。最后一条报告的 at 和 status 都不会被投递动作改，只有真·新报告或状态
+   * 变化（reopen）才会变。
    */
   fingerprint: string
 }
