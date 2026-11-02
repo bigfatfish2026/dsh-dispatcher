@@ -14,7 +14,7 @@
 | Eval 双层判定 + 版本化 Policy | 不做，主会话自己判断要不要派活 |
 | 独立 DSH 会话当 Executor | 用 subagent，共享工作目录 |
 | 票的生命周期 + 面板 + 重试 | 只留票、状态、超时标记 |
-| Input queue + report delivery | 两条队列都记在日志里，巡检负责送 |
+| Input queue + report delivery | 两条队列都记在日志里；巡检只送排队消息，报告由主会话自己扫 |
 
 ## 兼容性
 
@@ -46,7 +46,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
 | `zombieMinutes` | number | `20` | 多久没有任何进展算疑似僵尸票，只推一次。只查 `open` / `running`；owner 是能查活的 agent id 且已不在活表时判 `worker-gone`，不受这个值约束 |
 | `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
-| `quietSweep` | boolean | `false` | 巡检时不叫醒主会话；报告只入票日志，由外部脚本直发 QQ |
+| `quietSweep` | boolean | `false` | 巡检时不叫醒主会话，连僵尸票也不推；票照旧重开、排队消息照旧推给活着的 worker、已关票的积压报告照旧清账，报告留给主会话自己看 |
 | `ownerSessionId` | string | 空 | 叫醒哪个会话；空则从 QQ 偏好文件里认 c2c 会话 |
 | `qqPrefsPath` | string | `''` | 会话映射文件 |
 | `ownerOpenId` | string | 空 | 主人 openid，多个 c2c 会话时用来挑对的那个 |
@@ -81,7 +81,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `dispatch_send` | 往票里追加一条给 worker 的消息 |
 | `dispatch_report` | 记一份报告，不结束这张票 |
 | `dispatch_close` | 交付了就关票 |
-| `dispatch_sweep` | 立刻跑一次巡检，不等定时器 |
+| `dispatch_sweep` | 立刻跑一次巡检，不等定时器：重开票、给活着的 worker 推消息、清掉已关票的积压报告、看一眼僵尸票。不推报告 |
 | `progress_note` | 把一行进度直接推到主人 QQ 上；不叫醒会话、不写盘，长活每出一段就报一次 |
 
 状态只有六个：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算「还开着」，占 `maxOpen` 名额。
@@ -90,7 +90,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 一张票带两条队列，都是日志里的行，重启也丢不了：等 worker 收的消息（`dispatch_send`）和 worker 交回来的报告（`dispatch_report`）。每条有自己的 id 和一个 `delivered` 标记。
 
-`dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，主会话下一轮或下次巡检读到。巡检会把没送到的消息推给活着的 worker、把没读的报告合成一条消息交给主人会话，还会把「已经 `done` 却又收到新消息」的票重新打开——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。
+`dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，主会话下一轮自己扫 `dispatch_list` 时读到——`«n` 就是这张票还没读的报告条数。巡检不替主会话收集报告：它只把排队消息推给还活着的 worker，把「已经 `done` 却又收到新消息」的票重新打开（只改状态、不叫醒人）——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。已关票上没人会再读的报告由巡检静默清账（补一条 `delivered`），也不推送。
 
 ## 票的生命周期
 
@@ -136,20 +136,20 @@ worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`�
 
 ## 巡检与僵尸票
 
-每 `sweepMinutes` 分钟（默认 5；设 `0` 关掉定时器，只剩手动 `dispatch_sweep`）看一遍票，按顺序做五件事：把「结束后又收到消息」的票重开、把排队消息推给还活着的 worker、把僵尸票查一遍、把没读的报告和僵尸摘要合成一条 `followup` 交给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）、给送出去的打上已读。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。
+每 `sweepMinutes` 分钟（默认 5；设 `0` 关掉定时器，只剩手动 `dispatch_sweep`）看一遍票，按顺序做四件事：把「结束后又收到消息」的票重开（只改状态，不叫醒主会话）、把排队消息推给还活着的 worker、把已关票上没人会读的报告静默清账、把僵尸票查一遍并在检出时推一条 `followup` 给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）。报告不推：未结票的报告留在 pending 上，主会话用 `dispatch_list` 自己扫。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。
 
 僵尸票只查 `open` 和 `running`。`waiting` / `blocked` 是人按着没动，跳过；`done` / `dropped` 已经结束，也不算。判据两档：
 
 - `worker-gone`：owner 是 uuid 形态的 agent id（裸 uuid 或带 `session-` 前缀）时，拿它去 `AgentRegistry` 查活表——registry 的 key 就是 `agent.session.id`，跟票里记的是同一个。查不到就判死，票多久没动都救不回来。新票留 2 分钟宽限，避开 `dispatch_open` 写 owner 与 subagent 真正注册之间那几秒。
 - `silent`：owner 是「重启小鱼」这种短标签时无从查活——短标签不在活表里，拿它查必然查不到，所以只走这一档。`zombieMinutes`（默认 20）分钟内没有任何进展才判疑似；进展看最后一条报告的时间，不只看 `dispatch_touch`。
 
-节流用内存里的指纹 `${reports.length}|${lastActivity}|${status}`。故意不用 `updatedAt`：巡检自己投递报告时会往日志追加 `delivered` 事件、也刷新 `updatedAt`，拿它当指纹会让刚推过的票下一轮再推一遍；最后一条报告的时间与状态只有真·新报告或状态变化才会动。没有新报告、状态也没变，同一张票只推一次，进程重启最多多推一次。
+节流用内存里的指纹 `${reports.length}|${lastActivity}|${status}`。故意不用 `updatedAt`：巡检自己也会往日志追加事件（给活着的 worker 推消息、给已关票清账），那也刷新 `updatedAt`，拿它当指纹会让刚推过的票下一轮再推一遍；最后一条报告的时间与状态只有真·新报告或状态变化才会动。没有新报告、状态也没变，同一张票只推一次，进程重启最多多推一次。
 
-只在检出僵尸时推一条摘要，没检出就完全静默，一个字都不发。摘要一句：票号、多久没动、哪一档、未读报告几条、goal 前 40 字，最多列三张，多的只说「另有 N 张」。不带报告正文——正文由报告投递那条路单独送，不然这条消息就成了第二份报告。
+只在检出僵尸时推一条摘要，没检出就完全静默，一个字都不发。摘要一句：票号、多久没动、哪一档、未读报告几条、goal 前 40 字，最多列三张，多的只说「另有 N 张」。不带报告正文——报告不由巡检送，正文塞进来这条消息就成了第二份报告。
 
-巡检只负责提醒，不替 M 收尾：票还挂 `running` 也不改状态，W 死了也不会把票关掉。`quietSweep: true` 时僵尸这一步整段不推、也不记指纹，免得静默轮把第一次真推送吞掉。一次 `followup` 就是主会话带着全部上下文重跑一整轮，太贵，所以静默模式仍然照旧重开票、给活着的 worker 推消息、把报告标已读，报告留给外部脚本去推——本仓库不带那个脚本，那是几行脚本加一个定时器（比如 `~/.dsh/dispatcher-notify.sh` 配 systemd timer）。
+巡检只负责提醒，不替 M 收尾：票还挂 `running` 也不改状态，W 死了也不会把票关掉。`quietSweep: true` 时僵尸这一步整段不推、也不记指纹，免得静默轮把第一次真推送吞掉。一次 `followup` 就是主会话带着全部上下文重跑一整轮，太贵，所以静默模式仍然照旧重开票、给活着的 worker 推消息、清掉已关票的积压报告；未结票的报告一条都不动，要发给主人就由外部脚本读日志去发——本仓库不带那个脚本，那是几行脚本加一个定时器（比如 `~/.dsh/dispatcher-notify.sh` 配 systemd timer）。
 
-这一段借的是原型的 `Passes` 心跳加 `evaluateDue`，投递那部分留下，评估整个省掉——巡检一次不向模型问任何问题。
+这一段借的是原型的 `Passes` 心跳加 `evaluateDue`，只留下排队消息的投递，评估整个省掉——巡检一次不向模型问任何问题。
 
 ## 开发
 

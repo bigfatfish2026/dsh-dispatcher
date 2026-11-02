@@ -14,7 +14,7 @@ The design follows the official prototype, [dsh-superagent-prototype](https://gi
 | Two-layer Eval + versioned Policy | Dropped: the main session decides whether to delegate |
 | Dedicated DSH session as Executor | A `subagent`, sharing the working directory |
 | Ticket lifecycle + panel + retries | Tickets, status, and a staleness mark |
-| Input queue + report delivery | Two queues in the log, plus a sweep that delivers them |
+| Input queue + report delivery | Two queues in the log; a sweep delivers the input queue only, reports are read by the main session |
 
 ## Compatibility
 
@@ -46,7 +46,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off and leaves only the manual `dispatch_sweep` |
 | `zombieMinutes` | number | `20` | Silence after which an `open` / `running` ticket is reported once as a suspected zombie. An owner whose agent is gone from the live registry is `worker-gone` regardless of this value |
 | `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
-| `quietSweep` | boolean | `false` | Never wake the main session on a sweep; reports stay in the log and an outside script pushes them to QQ |
+| `quietSweep` | boolean | `false` | Never wake the main session on a sweep, not even for a zombie ticket; tickets are still reopened, queued messages still reach live workers and closed tickets' reports are still cleared, and the main session reads reports itself |
 | `ownerSessionId` | string | empty | Session to wake; empty picks the c2c session from the QQ prefs file |
 | `qqPrefsPath` | string | `''` | Conversation-key to session-id map |
 | `ownerOpenId` | string | empty | Owner openid, used when more than one c2c session exists |
@@ -81,7 +81,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `dispatch_send` | Queue one more message for a ticket's worker |
 | `dispatch_report` | Record a report on a ticket without ending it |
 | `dispatch_close` | Close a ticket once the work is delivered |
-| `dispatch_sweep` | Run a sweep now instead of waiting for the timer |
+| `dispatch_sweep` | Run a sweep now instead of waiting for the timer: reopen tickets, push queued messages to live 小鱼, clear reports left on closed tickets, judge the zombie tickets. It does not deliver reports |
 | `progress_note` | Push one line of progress straight to the owner's QQ; wakes no session and writes nothing to disk — call it once per chunk on long work |
 
 Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot.
@@ -90,7 +90,7 @@ Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The fi
 
 A ticket carries two queues, both lines in the same log, so a restart loses nothing: messages waiting for the worker (`dispatch_send`) and reports the worker handed back (`dispatch_report`). Each entry has its own id and a `delivered` mark.
 
-`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone; the main session reads reports on the next turn or sweep. A sweep pushes undelivered messages to live workers, carries undelivered reports to the owner session in one message, and reopens a `done` ticket that received more mail — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut.
+`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone; the main session reads reports on its next turn with `dispatch_list`, where a ticket's `«n` counts the reports it has not read. A sweep does not collect reports for the main session: it pushes queued messages to live workers and reopens a `done` ticket that received more mail (status only, nobody is woken) — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut. Reports left on a closed ticket have no reader left, so a sweep clears them silently by appending a `delivered` mark; it never pushes one.
 
 ## The ticket lifecycle
 
@@ -136,20 +136,20 @@ Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is
 
 ## Sweeps and zombie tickets
 
-Every `sweepMinutes` (default 5; `0` turns the timer off and leaves only the manual `dispatch_sweep`) the plugin looks at its own tickets and does five things in order: reopen a `done` ticket that received more mail, push queued messages to workers that are still alive, judge the zombie tickets, carry undelivered reports and the zombie summary into the owner session as one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking), and mark what it delivered. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory.
+Every `sweepMinutes` (default 5; `0` turns the timer off and leaves only the manual `dispatch_sweep`) the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail (status only, the owner is not woken), push queued messages to workers that are still alive, clear the reports left on closed tickets, and judge the zombie tickets — one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking) only when a zombie is found. Reports are never pushed: an open ticket's reports stay pending and the main session reads them with `dispatch_list`. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory.
 
 Only `open` and `running` tickets are zombie candidates. `waiting` / `blocked` mean a person is holding the ticket and are skipped; `done` / `dropped` are over. There are two judgements:
 
 - `worker-gone`: when the owner is a uuid-shaped agent id (bare uuid or with a `session-` prefix) it is looked up in `AgentRegistry` — the registry keys on `agent.session.id`, the same id the ticket records. A missing agent is dead no matter how recently the ticket moved. A ticket younger than 2 minutes is spared, because `dispatch_open` writes the owner a few seconds before the subagent actually registers.
 - `silent`: an owner that is a short label (`重启小鱼`, say) cannot be looked up at all — short labels are not in the live registry, so a lookup would always miss. Those tickets are reported only after `zombieMinutes` (default 20) without progress, and progress means the last report, not a mere `dispatch_touch`.
 
-The throttle is an in-memory fingerprint, `${reports.length}|${lastActivity}|${status}`. It deliberately avoids `updatedAt`: a sweep's own report delivery appends a `delivered` event and refreshes that field, so an `updatedAt` key would announce the same ticket again on the next round. The last report's time and the status only move on a real report or a status change. With no new report and no status change a ticket is announced once; a process restart costs at most one repeat.
+The throttle is an in-memory fingerprint, `${reports.length}|${lastActivity}|${status}`. It deliberately avoids `updatedAt`: a sweep's own writes (steering a queued message to a live worker, clearing a closed ticket) append events and refresh that field, so an `updatedAt` key would announce the same ticket again on the next round. The last report's time and the status only move on a real report or a status change. With no new report and no status change a ticket is announced once; a process restart costs at most one repeat.
 
-A summary is pushed only when something is found. When nothing is found the sweep is completely silent — not a single character. The line carries the ticket id, how long it has been idle, which judgement fired, how many reports are unread, and the first 40 characters of the goal; at most three tickets are listed, and the rest are counted as "另有 N 张". Report bodies stay out: delivery is a separate path, and folding them in would make this a second copy of the reports.
+A summary is pushed only when something is found. When nothing is found the sweep is completely silent — not a single character. The line carries the ticket id, how long it has been idle, which judgement fired, how many reports are unread, and the first 40 characters of the goal; at most three tickets are listed, and the rest are counted as "另有 N 张". Report bodies stay out: a sweep does not deliver reports, and folding one in would make this a second copy of it.
 
-A sweep only reports; it never finishes a ticket for the main session. A ticket stays `running` even if its worker is dead, and nothing is closed on the ticket's behalf. With `quietSweep: true` the zombie step pushes nothing and remembers no fingerprints either, so a silent round cannot swallow the first real announcement. One `followup` costs a whole main-session turn with all of its context, so quiet mode still reopens tickets, steers live workers and marks reports delivered, and leaves the reports in the log for an outside script — this repository ships none, it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer).
+A sweep only reports; it never finishes a ticket for the main session. A ticket stays `running` even if its worker is dead, and nothing is closed on the ticket's behalf. With `quietSweep: true` the zombie step pushes nothing and remembers no fingerprints either, so a silent round cannot swallow the first real announcement. One `followup` costs a whole main-session turn with all of its context, so quiet mode still reopens tickets, steers live workers and clears the reports left on closed tickets; an open ticket's reports are left untouched, so an outside script can still read the log and push them — this repository ships none, it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer).
 
-This is the prototype's `Passes` heartbeat plus `evaluateDue`, with the delivery work kept and the evaluation dropped: nothing in a sweep asks a model anything.
+This is the prototype's `Passes` heartbeat plus `evaluateDue`, with the input delivery work kept and the evaluation dropped: nothing in a sweep asks a model anything.
 
 ## Development
 

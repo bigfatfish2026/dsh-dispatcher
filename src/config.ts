@@ -129,7 +129,7 @@ export interface Config {
   zombieMinutes: number
   /** Wake the owner's session when a ticket goes stale. */
   notifyOwner: boolean
-  /** Never wake the owner session from a sweep; reports stay in the log. */
+  /** Never wake the owner session from a sweep — not even for a zombie ticket. */
   quietSweep: boolean
   /** Session to wake; empty means "find the owner's c2c session in the QQ prefs file". */
   ownerSessionId: string
@@ -192,7 +192,9 @@ export const Config: Schema<Config> = Schema.object({
     .description('Wake the owner session on a stale ticket. Off means tickets are only reported when asked.'),
   quietSweep: Schema.boolean()
     .default(false)
-    .description('Do not wake the main session on a sweep: reports only go into the ticket log and an outside script pushes them to QQ.'),
+    .description(
+      'Do not wake the main session on a sweep, not even for a zombie ticket: the pass still reopens tickets, steers live workers and clears reports left on closed tickets, but it announces nothing. Read tickets with dispatch_list.',
+    ),
   ownerSessionId: Schema.string()
     .default('')
     .description('Session to wake. Empty: pick the owner c2c session from the QQ prefs file.'),

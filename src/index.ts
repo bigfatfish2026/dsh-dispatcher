@@ -92,6 +92,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const warn = (message: string): void => {
     ;(ctx as { logger?: { warn?: (message: string) => void } }).logger?.warn?.(message)
   }
+  // 重开票不再有推送，但也不能悄悄发生：留一条 info 日志，排「票怎么自己变 open 了」时能查。
+  const info = (message: string): void => {
+    ;(ctx as { logger?: { info?: (message: string) => void } }).logger?.info?.(message)
+  }
 
   // The wording comes from config; an empty block means "do not inject this
   // section at all", which is the same thing handoffPolicy: false does.
@@ -350,8 +354,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
   }
 
   // 僵尸票节流：票 id → 上次推送时的指纹（`报告条数|最后活动|状态`）。
-  // 故意不用 updatedAt：巡检自己投递报告时会往日志追加 delivered 事件、也刷 updatedAt，
-  // 拿它当指纹会让刚推过的票下一轮再推一遍。指纹细节见 ./zombie 的 ZombieHit。
+  // 故意不用 updatedAt：巡检把排队消息交给活着的 worker、给已关票清账时都会往日志
+  // 追加 delivered 事件、也刷 updatedAt，拿它当指纹会让刚推过的票下一轮再推一遍。
   // 没有新报告、状态也没动过，指纹就不变，同一张票只推一次。
   // 进程重启后这段记忆清空，同一张票最多重推一次，接受。
   const zombiePushed = new Map<string, string>()
@@ -391,28 +395,43 @@ export function apply(ctx: Context, config: ConfigShape): void {
   })
 
   interface SweepResult {
+    /** Zombie tickets the pass saw (before throttling), for the log line. */
     stale: number
+    /** Entries handed to a live worker this pass (queued inputs, nothing else). */
     delivered: number
+    /** Report entries cleared from closed tickets this pass; see the sweep body. */
+    cleared: number
     woke: boolean
     reason?: string
   }
 
   /**
    * One pass over the ticket log: revive tickets that ended but received more
-   * mail, push queued messages to workers that are still alive, then carry
-   * undelivered reports and quiet tickets to the owner session.
+   * mail, push queued messages to workers that are still alive, clear the report
+   * entries nobody can read any more, then report zombie tickets — one line,
+   * once — to the owner session.
    *
-   * This is the half of the prototype's `evaluateDue` that makes sense here.
-   * The prototype has an input queue and a report delivery queue per ticket and
+   * It does not deliver reports, and no other thing it does may wake the owner
+   * session. A worker hands its report back with `send_message`; the main
+   * session reads the log with `dispatch_list`, where a ticket's `«n` counts the
+   * reports it has not read. A sweep has no consumer for a report, and carrying
+   * one to the owner was the 2026-11-02 flood: the entries stayed `delivered:
+   * false` for the life of every ticket, so the first tick after `sweepMinutes`
+   * came back from 0 replayed a day of finished work as one message. Reports
+   * therefore stay put — pending on an open ticket, cleared from a closed one —
+   * and only a zombie ticket is worth a whole main-session turn.
+   *
+   * This is the half of the prototype's `evaluateDue` that makes sense here. The
+   * prototype has an input queue and a report delivery queue per ticket and
    * wakes an ended ticket that still has undelivered inputs; this plugin keeps
-   * the same two queues as log entries and does the same two things with them.
-   * What it does not do is any retry bookkeeping beyond "still pending, try on
-   * the next sweep".
+   * the same two queues as log entries but only the input queue is a queue with
+   * a consumer. What it does not do is any retry bookkeeping beyond "still
+   * pending, try on the next sweep".
    */
   async function sweep(): Promise<SweepResult> {
     const now = new Date()
     let delivered = 0
-    const notices: string[] = []
+    let cleared = 0
 
     // A ticket that ended but received more mail *after* it ended reopens — the
     // prototype's `tickets.wake`. A dropped ticket is a person's stop and stays
@@ -421,13 +440,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
     // (dispatch_send only hands it over to a live, idle agent), so it sits in the
     // log forever. Counting that as "new mail" is what used to flip finished
     // tickets back to open on the next sweep, with a fresh timestamp.
+    // 重开只改状态，不叫醒主会话：报告这条推送线撤掉之后，醒一次只值一条僵尸摘要。
     for (const ticket of store.list()) {
       if (ticket.status !== 'done') continue
       const since = Date.parse(ticket.closedAt ?? ticket.updatedAt)
       const fresh = pending(ticket.inputs).filter((entry) => Date.parse(entry.at) > since)
       if (fresh.length === 0) continue
       store.update(ticket.id, { status: 'open' })
-      notices.push(`${ticket.id}「${ticket.goal}」结束后又收到新消息，已重新打开`)
+      info(`[dispatcher] ${ticket.id}「${ticket.goal}」结束后又收到新消息，已重新打开（不推送）`)
     }
 
     // Queued messages go to the worker, if its session is still alive and idle.
@@ -444,10 +464,20 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }
     }
 
-    // Reports and zombie notices both need the owner session; one message carries both.
-    const reports = store
-      .list()
-      .flatMap((ticket) => pending(ticket.reports).map((entry) => ({ ticket, entry })))
+    // 账目清理：已关票上积压的报告没有消费者。小鱼交活走 send_message，巡检从来没
+    // 投递过它们的报告，所以 delivered 一直是 false；票一关，更没人会来读。这里只往
+    // 日志补一条 delivered（和 quietSweep 一样只动账本、不通知任何人），否则
+    // dispatch_list 每轮都报「未读报告 N 条」，日志里永远挂着一堆没人读的未读。
+    //
+    // 未结票的报告一律**不动**：留在 pending 上，由 dispatch_list 的 «n 显示出来，
+    // 主会话自己扫。巡检不替主会话收集报告——收集就是 2026-11-02 那次刷屏的起点。
+    for (const ticket of store.list()) {
+      if (isOpen(ticket.status)) continue
+      for (const entry of pending(ticket.reports)) {
+        store.markDelivered(ticket.id, 'report', entry.id)
+        cleared += 1
+      }
+    }
 
     // 僵尸巡检：只挑 open/running——waiting/blocked 是人按着没动，done/dropped 已结束。
     // 判定和摘要都在 ./zombie，这里只做两件事：注入活表查询、按指纹节流。
@@ -463,49 +493,32 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (!zombies.some((hit) => hit.ticket.id === id)) zombiePushed.delete(id)
     }
     const freshZombies = zombies.filter((hit) => shouldPush(hit, zombiePushed))
-    const wantReports = reports.length > 0
-    const wantZombies = freshZombies.length > 0
 
-    // Quiet sweep: never wake the owner session. One followup costs a whole
-    // session turn with all of its context, so when an outside script pushes the
-    // reports to QQ the sweep only keeps the log honest: mark the reports
-    // delivered so nothing is announced twice. Zombies are not pushed here at
-    // all, and not remembered either: a quiet sweep announcing nothing should
-    // not silence the first real announcement.
+    // Quiet sweep: 仍然守住「定时器不花主会话的 turn」这条线。报告这条推送线已经整个
+    // 撤掉，所以这个分支现在只剩上面那段账目清理的语义——它清的是已关票上没人会读的
+    // 报告，不是「替外部脚本先标已读」；未结票的报告一条都不动，外部脚本要发就照发。
+    // 僵尸不推、也不记指纹：安静的一轮什么都没宣布，不该把第一次真正的宣布压掉。
     if (config.quietSweep) {
-      for (const { ticket, entry } of reports) {
-        store.markDelivered(ticket.id, 'report', entry.id)
-        delivered += 1
-      }
-      return { stale: zombies.length, delivered, woke: false, reason: 'quiet' }
+      return { stale: zombies.length, delivered, cleared, woke: false, reason: 'quiet' }
     }
 
-    if (!wantReports && !wantZombies && notices.length === 0) {
-      return { stale: zombies.length, delivered, woke: false }
+    // 唯一会 followup 的条件：这一轮有没推过的僵尸票。没有就直接返回，一条消息不发。
+    if (freshZombies.length === 0) {
+      return { stale: zombies.length, delivered, cleared, woke: false }
     }
 
     const sessionId = resolveOwnerSession()
     const owner = agentFor(sessionId)
-    if (!owner?.followup) return { stale: zombies.length, delivered, woke: false, reason: 'no-session' }
-    if (isBusy(owner)) return { stale: zombies.length, delivered, woke: false, reason: 'busy' }
+    if (!owner?.followup) {
+      return { stale: zombies.length, delivered, cleared, woke: false, reason: 'no-session' }
+    }
+    if (isBusy(owner)) return { stale: zombies.length, delivered, cleared, woke: false, reason: 'busy' }
 
-    const lines: string[] = []
-    if (wantReports) {
-      for (const { ticket, entry } of reports) {
-        lines.push(`小鱼 交回 ${ticket.id}「${ticket.goal}」：${entry.text}`)
-      }
-    }
-    for (const notice of notices) lines.push(notice)
-    // 一句摘要，不带报告正文：正文要是也塞进来，这条消息就成了第二份报告。
-    if (wantZombies) lines.push(summarizeZombies(freshZombies))
-    const text = `（dispatcher 巡检，不是主人发的）${lines.join('；')}。用 dispatch_list 看一眼，收票或者继续派活。`
+    // 一句摘要，不带报告正文：报告不再由巡检送，正文进来这条消息就成了第二份报告。
+    const text = `（dispatcher 巡检，不是主人发的）${summarizeZombies(freshZombies)}。用 dispatch_list 看一眼，收票或者继续派活。`
     await owner.followup(message(text))
-    for (const { ticket, entry } of reports) {
-      store.markDelivered(ticket.id, 'report', entry.id)
-      delivered += 1
-    }
     for (const hit of freshZombies) zombiePushed.set(hit.ticket.id, hit.fingerprint)
-    return { stale: zombies.length, delivered, woke: true }
+    return { stale: zombies.length, delivered, cleared, woke: true }
   }
 
   if (config.sweepMinutes > 0) {
@@ -521,7 +534,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     defineTool({
       name: 'dispatch_sweep',
       description:
-        'Run one sweep now instead of waiting for the timer: deliver queued reports, report zombie tickets in one line, and push queued messages to live 小鱼.',
+        'Run one sweep now instead of waiting for the timer: reopen tickets that got mail after they ended, push queued messages to live 小鱼, clear report entries left on closed tickets, and report zombie tickets in one line. It does not deliver reports — read those with dispatch_list.',
       parameters: {},
       output: {
         schema: {
@@ -530,6 +543,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           properties: {
             stale: { type: 'number' },
             delivered: { type: 'number' },
+            cleared: { type: 'number' },
             woke: { type: 'boolean' },
             reason: { type: 'string' },
           },
@@ -537,13 +551,19 @@ export function apply(ctx: Context, config: ConfigShape): void {
         render: (_args, value) => [
           {
             type: 'text',
-            text: `sweep: ${value.stale} stale, ${value.delivered} delivered, woke=${value.woke}${value.reason ? ` (${value.reason})` : ''}`,
+            text: `sweep: ${value.stale} stale, ${value.delivered} delivered to 小鱼, ${value.cleared} cleared, woke=${value.woke}${value.reason ? ` (${value.reason})` : ''}`,
           },
         ],
       },
       async execute() {
         const result = await sweep()
-        return { stale: result.stale, delivered: result.delivered, woke: result.woke, reason: result.reason ?? '' }
+        return {
+          stale: result.stale,
+          delivered: result.delivered,
+          cleared: result.cleared,
+          woke: result.woke,
+          reason: result.reason ?? '',
+        }
       },
     }),
   )
