@@ -76,7 +76,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 | 工具 | 作用 |
 |---|---|
-| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话。可以带一句 `brief`（不传就从 `goal` 首句派生） |
+| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话。`brief` 必填：一句 34 列以内的短话 |
 | `dispatch_touch` | 改状态，可附一行进展说明（`status` 必填） |
 | `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告；每行都带 `brief` |
 | `dispatch_send` | 往票里追加一条给 worker 的消息 |
@@ -91,9 +91,11 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 每张票除了完整的 `goal`，还带一句 `brief`：给小屏桌宠第二行用的短摘要，不超过 `briefMaxColumns` 列（默认 34 列 = 17 个汉字，2026-11-02 display 实测第二行 10px 字号、可用宽 172px），超了截断并补一个「…」。
 
-`dispatch_open` 时可以直接传 `brief`；不传就从 `goal` 派生——取首句、去掉首尾标点、压掉多余空格，再按列宽截断。调用方传超了也照样截到上限，显示侧不用自己算宽度。
+`brief` 是**必填**的（2026-11-03 起）：`dispatch_open` 不传就被 schema 拦下，传空串、纯空白、纯标点也会直接报错，提示「brief 必填，写一句 34 列以内的短话」。不再从 `goal` 派生——实践下来不填的时候全走回落，第二行又变成被砍出省略号的 `goal`，字段等于白加。写的时候按一句话来，别写长句：汉字算 2 列，大约 17 个汉字就到顶。
 
-老票没有这个字段：`foldEvents` 读到没有 `brief` 的事件不会出错（字段留空），读取方用 `briefOf()` 从 `goal` 现算一遍当兜底，所以 `dispatch_list` 里任何一张票都能拿到一句能直接上屏的 `brief`。
+超长的 `brief` 照样被截：预算里先扣掉「…」这 2 列，正文切到 32 列，总宽正好 34，显示侧不用自己算宽度。
+
+老票没有这个字段：`foldEvents` 读到没有 `brief` 的事件不会出错（字段留空），读取方用 `briefOf()` 从 `goal` 现算一遍当兜底，所以 `dispatch_list` 里任何一张票都能拿到一句能直接上屏的 `brief`。写入必填、读取回落，是两条路径。
 
 ## 两条队列
 

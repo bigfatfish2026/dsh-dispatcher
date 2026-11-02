@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -140,17 +140,58 @@ describe('dispatch_open brief', () => {
     expect(new TicketStore(file).get(String(opened.id))?.brief).toBe('改插件字段')
   })
 
-  it('derives one from the goal when the caller passes none', async () => {
+  it('rejects a ticket opened with no brief at all', async () => {
     const file = tempFile()
     const tools = mount(file)
-    const opened = await tools
-      .get('dispatch_open')!
-      .execute({ goal: '在小屏第二行显示票的简短目标。整段任务书太长，塞不下。' })
+    // 2026-11-03 起 brief 必填：不传就是错误，不再从 goal 派生一句顶上来。
+    // 缺参数在 schema 那道关就被拦下（required 列表），空串之类才轮到 execute 里的
+    // 中文提示，两条路径都不许静默派生。
+    await expect(
+      tools.get('dispatch_open')!.execute({ goal: '在小屏第二行显示票的简短目标。整段任务书太长，塞不下。' }),
+    ).rejects.toThrow(/missing required property "brief"/)
+    // 一个事件都没写：错误发生在 store.open 之前。
+    expect(existsSync(file) ? readFileSync(file, 'utf8').trim() : '').toBe('')
+  })
 
-    const stored = new TicketStore(file).get(String(opened.id))
-    // 14 汉字 is 28 columns, inside the 34-column cap: the whole first sentence fits.
-    expect(stored?.brief).toBe('在小屏第二行显示票的简短目标')
-    expect(textColumns(stored!.brief!)).toBeLessThanOrEqual(BRIEF_MAX_COLUMNS)
+  it('rejects an empty, whitespace-only or punctuation-only brief', async () => {
+    const file = tempFile()
+    const tools = mount(file)
+    for (const brief of ['', '   ', '\n\t', '。', '…… ！？', '—— 、']) {
+      await expect(tools.get('dispatch_open')!.execute({ goal: 'g', brief })).rejects.toThrow(/brief 必填/)
+    }
+    // 一个都没落盘：写入侧压根没走 store.open。
+    expect(existsSync(file) ? readFileSync(file, 'utf8').trim() : '').toBe('')
+  })
+
+  it('names the column cap and the 汉字 count in the error', async () => {
+    const tools = mount(tempFile(), { briefMaxColumns: 20 })
+    await expect(tools.get('dispatch_open')!.execute({ goal: 'g', brief: ' ' })).rejects.toThrow(
+      'brief 必填，写一句 20 列以内的短话（汉字按 2 列算，约 10 个汉字）',
+    )
+  })
+
+  it('keeps a brief that is exactly at the cap untouched', async () => {
+    const file = tempFile()
+    const tools = mount(file)
+    const opened = await tools.get('dispatch_open')!.execute({ goal: 'g', brief: AT_CAP })
+
+    const stored = new TicketStore(file).get(String(opened.id))?.brief
+    expect(stored).toBe(AT_CAP)
+    expect(textColumns(stored!)).toBe(BRIEF_MAX_COLUMNS)
+    expect(stored!.endsWith('…')).toBe(false)
+  })
+
+  it('cuts a brief one column over the cap to 32 columns plus the ellipsis', async () => {
+    const file = tempFile()
+    const tools = mount(file)
+    // 34 列 + 一个半角字符 = 35 列，刚好越过上限一列。
+    const opened = await tools.get('dispatch_open')!.execute({ goal: 'g', brief: `${AT_CAP}a` })
+
+    const brief = new TicketStore(file).get(String(opened.id))?.brief!
+    expect(brief.endsWith('…')).toBe(true)
+    // 16 汉字 = 32 列，加上 2 列的省略号，总宽仍然正好是 34。
+    expect(brief).toBe('一二三四五六七八九十一二三四五六…')
+    expect(textColumns(brief)).toBe(BRIEF_MAX_COLUMNS)
   })
 
   it('caps a caller-supplied brief at the configured width', async () => {

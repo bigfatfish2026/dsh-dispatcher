@@ -9,8 +9,8 @@ import type { Config as ConfigShape } from './config'
 import {
   BRIEF_MAX_COLUMNS,
   TicketStore,
+  briefIsBlank,
   briefOf,
-  deriveBrief,
   truncateColumns,
   isOpen,
   minutesSince,
@@ -191,8 +191,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
         goal: { type: 'string', required: true, description: 'What the 小鱼 was asked to do, in one sentence.' },
         brief: {
           type: 'string',
+          required: true,
           description:
-            'One short line for the little screen, at most briefMaxColumns display columns (a 汉字 counts 2). Omit it and one is derived from the first sentence of goal.',
+            'Required. The one line the little screen shows under the ticket title — write a short phrase, not a sentence. At most briefMaxColumns display columns (34 by default), and a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected; nothing is derived from goal any more.',
         },
         dir: { type: 'string', description: 'Working directory the 小鱼 uses, if any.' },
         owner: { type: 'string', description: '小鱼 handle: subagent id or a short label.' },
@@ -216,12 +217,15 @@ export function apply(ctx: Context, config: ConfigShape): void {
             `too many open tickets (${openCount}/${config.maxOpen}); close one or raise maxOpen before handing out more work`,
           )
         }
-        // 调用方给了就用它，没给就从 goal 派生一句：票落盘时带着 brief，
-        // 显示侧不用自己猜该截多长。
-        const requested = args.brief?.trim()
-        const brief = requested
-          ? truncateColumns(requested, config.briefMaxColumns)
-          : deriveBrief(args.goal, config.briefMaxColumns)
+        // brief 是必填的：空着就报错，不再从 goal 派生。派生那条路只留给
+        // 老日志的读取侧（见 briefOf），写入侧一律要求调用方写一句给人看的短话。
+        if (briefIsBlank(args.brief)) {
+          const cap = config.briefMaxColumns
+          throw new Error(
+            `brief 必填，写一句 ${cap} 列以内的短话（汉字按 2 列算，约 ${Math.max(1, Math.floor(cap / 2))} 个汉字）：这是小屏第二行给人看的那行字，不要静默留空`,
+          )
+        }
+        const brief = truncateColumns(String(args.brief).trim(), config.briefMaxColumns)
         const ticket = store.open(args.goal, args.dir, brief)
         if (args.owner) store.update(ticket.id, { owner: args.owner, status: 'running' })
         return {

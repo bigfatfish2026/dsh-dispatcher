@@ -128,14 +128,29 @@ const SENTENCE_END = /[。！？!?；;…\n\r]/
 /** Punctuation and spaces trimmed off both ends of the brief. */
 const EDGE_PUNCTUATION = /^[\s，,、：:·\-—–]+|[\s，,、：:·\-—–]+$/g
 
+/** Only whitespace, punctuation or symbols: nothing a person can read. */
+const NO_WORDS = /^[\s\p{P}\p{S}]*$/u
+
+/**
+ * Whether a brief says nothing: not a string, empty, whitespace-only, or made
+ * only of punctuation and symbols. `dispatch_open` rejects all of these — since
+ * 2026-11-03 the field is required, and a "。" line is as blank as "".
+ */
+export function briefIsBlank(brief: unknown): boolean {
+  if (typeof brief !== 'string') return true
+  const trimmed = brief.trim()
+  return trimmed.length === 0 || NO_WORDS.test(trimmed)
+}
+
 /**
  * Derive a short summary from a goal: first sentence, no edge punctuation,
  * whitespace collapsed, truncated to the column cap.
  *
- * Two callers: `dispatch_open` when the caller passes no brief, and readers of
- * old tickets that never stored one. A goal that starts with punctuation ("！…
- * ") would split to an empty first sentence, so the cleaned whole goal is the
- * fallback — an empty string would blank the panel's second line.
+ * Since 2026-11-03 `dispatch_open` requires an explicit brief, so this has one
+ * caller left: readers of tickets written before the field existed (`briefOf`).
+ * A goal that starts with punctuation ("！… ") would split to an empty first
+ * sentence, so the cleaned whole goal is the fallback — an empty string would
+ * blank the panel's second line.
  */
 export function deriveBrief(goal: string, maxColumns: number = BRIEF_MAX_COLUMNS): string {
   const first = goal.trim().split(SENTENCE_END)[0] ?? ''
