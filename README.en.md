@@ -76,7 +76,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 
 | Tool | Purpose |
 |---|---|
-| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying. Takes an optional `brief`; omit it and one is derived from `goal` |
+| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying. `brief` is required: one short line within 34 columns |
 | `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
 | `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports. Every row carries `brief` |
 | `dispatch_send` | Queue one more message for a ticket's worker |
@@ -91,9 +91,11 @@ Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The fi
 
 Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` display columns (default 34 = 17 汉字, the second line measured at 10px / 172px on 2026-11-02). Anything longer is cut and closed with `…`.
 
-Pass a `brief` to `dispatch_open` when you have a better line than the goal's opening; otherwise one is derived from the first sentence of `goal`, with edge punctuation trimmed and whitespace collapsed. A caller-supplied line is capped the same way, so whoever renders it never has to measure it.
+`brief` is **required** (since 2026-11-03): `dispatch_open` rejects a missing one at the schema gate, and an empty, whitespace-only or punctuation-only one with "brief 必填，写一句 34 列以内的短话". Nothing is derived from `goal` any more — in practice the field was never filled in, every ticket fell back, and the second line was the goal cut off with an ellipsis again, which made the field pointless. Write a phrase, not a sentence: a 汉字 is 2 columns, so about 17 汉字 is the ceiling.
 
-Tickets written before the field existed simply have no `brief`: `foldEvents` leaves it unset instead of failing, and readers call `briefOf()` to derive one from `goal`. That means every row `dispatch_list` returns has a `brief` that fits, old tickets included.
+An over-long `brief` is still cut: the budget reserves 2 columns for the `…` and the body stops at 32, so the whole line is exactly 34 columns wide and whoever renders it never has to measure it.
+
+Tickets written before the field existed simply have no `brief`: `foldEvents` leaves it unset instead of failing, and readers call `briefOf()` to derive one from `goal`. That means every row `dispatch_list` returns has a `brief` that fits, old tickets included. Required on write, derived on read: two separate paths.
 
 ## Queues
 

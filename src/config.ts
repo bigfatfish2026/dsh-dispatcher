@@ -180,7 +180,7 @@ export const Config: Schema<Config> = Schema.object({
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)
     .description(
-      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字: 2026-11-02 the display side measured the second line at 10px / 172px wide, which holds 17 汉字 (or 28 ASCII characters). dispatch_open derives a brief from the goal when the caller passes none, and older tickets are derived on read with the same cap.',
+      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字: 2026-11-02 the display side measured the second line at 10px / 172px wide, which holds 17 汉字 (or 28 ASCII characters). dispatch_open requires the caller to pass a brief and rejects a blank one; tickets written before 2026-11-03 are derived on read with the same cap.',
     ),
   handoffPolicy: Schema.boolean()
     .default(true)
