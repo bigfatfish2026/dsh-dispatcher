@@ -66,15 +66,17 @@ export type EntryKind = 'input' | 'report'
 
 /**
  * Longest brief, measured in display columns: a CJK character is 2 columns, a
- * half-width one is 1. 20 columns = 10 汉字, which is what fits on the little
+ * half-width one is 1. 34 columns = 17 汉字, which is what fits on the little
  * screen's second line.
  *
- * This value is provisional: the main session is measuring the real panel
- * width and may hand back a different number. Adjust it here only — or set
- * `briefMaxColumns` in cordis.yml, whose schema default points at this
- * constant, so the two can never drift apart.
+ * 依据 2026-11-02 display 侧实测：第二行 10px 字号、可用宽 172px，能放 17 个汉字
+ * 或 28 个 ASCII 字符。汉字更宽，所以上限按汉字钉死在 17×2=34 列；纯 ASCII 的
+ * brief 会在 28 列左右就自然结束，不会顶到 34。
+ *
+ * Adjust it here only — or set `briefMaxColumns` in cordis.yml, whose schema
+ * default points at this constant, so the two can never drift apart.
  */
-export const BRIEF_MAX_COLUMNS = 20
+export const BRIEF_MAX_COLUMNS = 34
 
 /** The ellipsis is wide (U+2026), so it costs 2 columns of the budget. */
 const ELLIPSIS = '…'
@@ -91,6 +93,9 @@ function charColumns(char: string): number {
     (code >= 0xfe30 && code <= 0xfe4f) ||
     (code >= 0xff00 && code <= 0xff60) ||
     (code >= 0xffe0 && code <= 0xffe6)
+  // The ellipsis is what the cap reserves for it (see ELLIPSIS_COLUMNS); counting
+  // it as one column here would make the two disagree by half a glyph.
+  if (char === ELLIPSIS) return ELLIPSIS_COLUMNS
   return wide ? 2 : 1
 }
 
