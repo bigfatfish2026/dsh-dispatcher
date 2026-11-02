@@ -175,12 +175,12 @@ export const Config: Schema<Config> = Schema.object({
   maxOpen: Schema.natural()
     .default(4)
     .description('Maximum number of tickets that are not done or dropped.'),
-  // 小屏第二行的宽度：一个汉字占两列，默认 20 列 = 10 个汉字。
-  // 这个默认值就是 store.ts 里的常量，等主人给出屏宽实测值再改一处即可。
+  // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（2026-11-02 display 实测）。
+  // 这个默认值就是 store.ts 里的 BRIEF_MAX_COLUMNS，两处永远同步。
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)
     .description(
-      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (20) is 10 汉字, the little screen second line. dispatch_open derives a brief from the goal when the caller passes none, and older tickets are derived on read with the same cap.',
+      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字: 2026-11-02 the display side measured the second line at 10px / 172px wide, which holds 17 汉字 (or 28 ASCII characters). dispatch_open derives a brief from the goal when the caller passes none, and older tickets are derived on read with the same cap.',
     ),
   handoffPolicy: Schema.boolean()
     .default(true)
