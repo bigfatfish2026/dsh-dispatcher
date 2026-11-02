@@ -3,3 +3,4 @@ lib/
 *.tgz
 *.log
 .env
+__pycache__/
