@@ -122,6 +122,11 @@ export interface Config {
   handoffPolicyText: string
   /** Minutes between sweeps that look for stale tickets. */
   sweepMinutes: number
+  /**
+   * A ticket with no progress for this many minutes counts as a suspected
+   * zombie and is reported once. Only open/running tickets are candidates.
+   */
+  zombieMinutes: number
   /** Wake the owner's session when a ticket goes stale. */
   notifyOwner: boolean
   /** Never wake the owner session from a sweep; reports stay in the log. */
@@ -177,6 +182,11 @@ export const Config: Schema<Config> = Schema.object({
   sweepMinutes: Schema.natural()
     .default(5)
     .description('Minutes between sweeps; a sweep wakes the owner session about tickets that have gone quiet.'),
+  zombieMinutes: Schema.natural()
+    .default(20)
+    .description(
+      'A ticket with no progress for this many minutes is reported once as a suspected zombie. Only open/running tickets count: waiting/blocked mean a person is holding it. When the owner is a real subagent session id and that agent is no longer in the live registry, the ticket is reported as worker-gone regardless of this value.',
+    ),
   notifyOwner: Schema.boolean()
     .default(true)
     .description('Wake the owner session on a stale ticket. Off means tickets are only reported when asked.'),
