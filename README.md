@@ -41,7 +41,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票的日志路径，相对路径按 `DSH_HOME` 解析 |
 | `staleMinutes` | number | `30` | 列表里 `!` 的阈值：多久没更新算「卡住」。只影响 `dispatch_list` 的标记，不再驱动提醒 |
 | `maxOpen` | number | `4` | 同时开着的票上限，`done` / `dropped` 不占名额 |
-| `briefMaxColumns` | number | `20` | 票摘要 `brief` 的长度上限，单位是显示列宽：汉字算 2 列、半角算 1 列，20 列 = 10 个汉字，正好是小屏第二行 |
+| `briefMaxColumns` | number | `34` | 票摘要 `brief` 的长度上限，单位是显示列宽：汉字算 2 列、半角算 1 列。34 列 = 17 个汉字，是 2026-11-02 display 侧实测的小屏第二行宽度（10px 字号、可用宽 172px，能放 17 汉字或 28 ASCII） |
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
 | `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
@@ -89,7 +89,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 ### 票的 `brief`
 
-每张票除了完整的 `goal`，还带一句 `brief`：给小屏桌宠第二行用的短摘要，不超过 `briefMaxColumns` 列（默认 20 列 = 10 个汉字），超了截断并补一个「…」。
+每张票除了完整的 `goal`，还带一句 `brief`：给小屏桌宠第二行用的短摘要，不超过 `briefMaxColumns` 列（默认 34 列 = 17 个汉字，2026-11-02 display 实测第二行 10px 字号、可用宽 172px），超了截断并补一个「…」。
 
 `dispatch_open` 时可以直接传 `brief`；不传就从 `goal` 派生——取首句、去掉首尾标点、压掉多余空格，再按列宽截断。调用方传超了也照样截到上限，显示侧不用自己算宽度。
 

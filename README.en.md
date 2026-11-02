@@ -41,7 +41,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
 | `staleMinutes` | number | `30` | Silence after which a ticket counts as stale in `dispatch_list` (the `!` mark). It no longer drives any announcement |
 | `maxOpen` | number | `4` | Cap on concurrently open tickets; `done` / `dropped` do not take a slot |
-| `briefMaxColumns` | number | `20` | Length cap for a ticket's `brief`, in display columns: a CJK character counts 2, a half-width one 1. 20 columns is 10 汉字, the little screen's second line |
+| `briefMaxColumns` | number | `34` | Length cap for a ticket's `brief`, in display columns: a CJK character counts 2, a half-width one 1. 34 columns is 17 汉字 — the little screen's second line as measured by the display side on 2026-11-02 (10px type, 172px usable width, 17 汉字 or 28 ASCII characters) |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
 | `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string (or whitespace only) means "do not inject" |
 | `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off and leaves only the manual `dispatch_sweep` |
@@ -89,7 +89,7 @@ Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The fi
 
 ### The ticket `brief`
 
-Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` display columns (default 20 = 10 汉字). Anything longer is cut and closed with `…`.
+Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` display columns (default 34 = 17 汉字, the second line measured at 10px / 172px on 2026-11-02). Anything longer is cut and closed with `…`.
 
 Pass a `brief` to `dispatch_open` when you have a better line than the goal's opening; otherwise one is derived from the first sentence of `goal`, with edge punctuation trimmed and whitespace collapsed. A caller-supplied line is capped the same way, so whoever renders it never has to measure it.
 
