@@ -28,7 +28,7 @@
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-1.1.1.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-1.2.0.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
@@ -39,11 +39,12 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票的日志路径，相对路径按 `DSH_HOME` 解析 |
-| `staleMinutes` | number | `30` | 多久没更新算「卡住」 |
+| `staleMinutes` | number | `30` | 列表里 `!` 的阈值：多久没更新算「卡住」。只影响 `dispatch_list` 的标记，不再驱动提醒 |
 | `maxOpen` | number | `4` | 同时开着的票上限，`done` / `dropped` 不占名额 |
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
 | `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
+| `zombieMinutes` | number | `20` | 多久没有任何进展算疑似僵尸票，只推一次。只查 `open` / `running`；owner 是能查活的 agent id 且已不在活表时判 `worker-gone`，不受这个值约束 |
 | `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
 | `quietSweep` | boolean | `false` | 巡检时不叫醒主会话；报告只入票日志，由外部脚本直发 QQ |
 | `ownerSessionId` | string | 空 | 叫醒哪个会话；空则从 QQ 偏好文件里认 c2c 会话 |
@@ -54,10 +55,10 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `maxWaitMs` | number | `5000` | `job_output` 最多占用主会话多久 |
 | `routerRestrict` | boolean | `true` | 给每个非 worker 会话装 `routerTools` 白名单 |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | 这个文件存在时，任何会话都不装白名单 |
-| `routerTools` | string[] | 37 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` |
+| `routerTools` | string[] | 36 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` |
 | `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从每个 worker subagent 的工具 schema 里摘掉；跟 `routerRestrict` 各自独立 |
 | `workerDenyTools` | string[] | 7 个名字 | worker 看不见的工具名：写记忆那七个，`DEFAULT_WORKER_DENY_TOOLS` |
-| `notifyScript` | string | `/home/julia/fatfish/notify.sh` | `progress_note` 推送用的脚本，openid 在脚本里，插件不存第二份 |
+| `notifyScript` | string | 安装环境里的 `notify.sh` | `progress_note` 推送用的脚本，openid 在脚本里，插件不存第二份 |
 | `notifyTimeoutMs` | number | `5000` | 一次推送最多等多久，超时杀掉子进程并返回 `sent: false` |
 
 ```yaml
@@ -91,6 +92,16 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 `dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，主会话下一轮或下次巡检读到。巡检会把没送到的消息推给活着的 worker、把没读的报告合成一条消息交给主人会话，还会把「已经 `done` 却又收到新消息」的票重新打开——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。
 
+## 票的生命周期
+
+![worker / ticket 生命周期（中文版）](docs/worker-ticket-lifecycle.zh.png)
+
+这张图把一条票从 `dispatch_open` 到归档画在一起：左边 M（主会话）开票、起 W、回话，中间 W（worker）干活、写报告、喊 M，右边票按 `open → running → done` 走，最右一列是巡检怎么把僵尸票挑出来。
+
+票的终点只看两件事：W 交付完成，M 调 `dispatch_close`。M 的会话还在不在都不改变票的状态——`/new` 换掉会话、宿主重启、M 自己忘了关，票都不会自己变成 `done`。复活闸门也只有一个：`done` 之后又冒出新 input，票才会被巡检重开；`dropped` 是人叫停的，不再开。
+
+图由 `docs/worker-ticket-lifecycle-i18n.py` 生成，改完文案跑 `python3 docs/worker-ticket-lifecycle-i18n.py zh`（英文跑 `en`）重画；`CHECK=1` 会跑一遍文字越框自检。
+
 ## 给主会话的用法
 
 一句话：**先开票，再派活，马上回话。** 票是写给半小时后的自己看的——回头 `dispatch_list` 一眼就知道哪些还没消息，不必翻聊天记录。
@@ -123,11 +134,20 @@ worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`�
 
 两条退路。`mkdir -p ~/.dsh && touch ~/.dsh/no-restrict`，任何会话都不装白名单；删掉文件就恢复。`routerRestrict: false` 是彻底关掉。escape 文件每个会话读一次，所以改它要重启（已经存在的会话则是重载插件）。
 
-## 巡检
+## 巡检与僵尸票
 
-每 `sweepMinutes` 分钟看一遍票，按顺序做四件事：把「结束后又收到消息」的票重开、把排队消息推给还活着的 worker、把没读的报告和卡住的票合成一条 `followup` 交给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）、给送出去的打上已读。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。同一张票没动过只叫一次，动过了才再叫。
+每 `sweepMinutes` 分钟（默认 5；设 `0` 关掉定时器，只剩手动 `dispatch_sweep`）看一遍票，按顺序做五件事：把「结束后又收到消息」的票重开、把排队消息推给还活着的 worker、把僵尸票查一遍、把没读的报告和僵尸摘要合成一条 `followup` 交给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）、给送出去的打上已读。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。
 
-`quietSweep: true` 把第三步整个省掉。一次 `followup` 就是主会话带着全部上下文重跑一整轮，太贵；开了这个开关，巡检照旧重开票、给活着的 worker 推消息、把报告标已读、刷新卡住快照，但不叫醒任何会话，报告留在日志里等脚本来读。本仓库不带那个脚本——那是几行脚本加一个定时器（比如 `~/.dsh/dispatcher-notify.sh` 配 systemd timer），退避节奏跟进度心跳同一套，有新报告就推出去。
+僵尸票只查 `open` 和 `running`。`waiting` / `blocked` 是人按着没动，跳过；`done` / `dropped` 已经结束，也不算。判据两档：
+
+- `worker-gone`：owner 是 uuid 形态的 agent id（裸 uuid 或带 `session-` 前缀）时，拿它去 `AgentRegistry` 查活表——registry 的 key 就是 `agent.session.id`，跟票里记的是同一个。查不到就判死，票多久没动都救不回来。新票留 2 分钟宽限，避开 `dispatch_open` 写 owner 与 subagent 真正注册之间那几秒。
+- `silent`：owner 是「重启小鱼」这种短标签时无从查活——短标签不在活表里，拿它查必然查不到，所以只走这一档。`zombieMinutes`（默认 20）分钟内没有任何进展才判疑似；进展看最后一条报告的时间，不只看 `dispatch_touch`。
+
+节流用内存里的指纹 `${reports.length}|${lastActivity}|${status}`。故意不用 `updatedAt`：巡检自己投递报告时会往日志追加 `delivered` 事件、也刷新 `updatedAt`，拿它当指纹会让刚推过的票下一轮再推一遍；最后一条报告的时间与状态只有真·新报告或状态变化才会动。没有新报告、状态也没变，同一张票只推一次，进程重启最多多推一次。
+
+只在检出僵尸时推一条摘要，没检出就完全静默，一个字都不发。摘要一句：票号、多久没动、哪一档、未读报告几条、goal 前 40 字，最多列三张，多的只说「另有 N 张」。不带报告正文——正文由报告投递那条路单独送，不然这条消息就成了第二份报告。
+
+巡检只负责提醒，不替 M 收尾：票还挂 `running` 也不改状态，W 死了也不会把票关掉。`quietSweep: true` 时僵尸这一步整段不推、也不记指纹，免得静默轮把第一次真推送吞掉。一次 `followup` 就是主会话带着全部上下文重跑一整轮，太贵，所以静默模式仍然照旧重开票、给活着的 worker 推消息、把报告标已读，报告留给外部脚本去推——本仓库不带那个脚本，那是几行脚本加一个定时器（比如 `~/.dsh/dispatcher-notify.sh` 配 systemd timer）。
 
 这一段借的是原型的 `Passes` 心跳加 `evaluateDue`，投递那部分留下，评估整个省掉——巡检一次不向模型问任何问题。
 
