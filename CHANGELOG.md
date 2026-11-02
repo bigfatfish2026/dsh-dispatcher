@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 - 2026-11-02
+
+### Added
+
+2026-11-02 — 票多了一个可选字段 `brief`：给小屏桌宠第二行用的一句短摘要，因为完整的 `goal` 是一段任务书，屏上塞不下。
+
+长度上限是显示列宽而不是字符数：一个汉字算 2 列、半角算 1 列，默认 20 列 = 10 个汉字，超出的部分截断并补一个「…」（省略号自己也占 2 列，算在预算里）。这个数字是 `src/store.ts` 的 `BRIEF_MAX_COLUMNS` 常量，`briefMaxColumns` 配置项的默认值引用它，改一处就动全局；主会话量出屏宽后可能要调，注释里写明了这一点。
+
+`dispatch_open` 新增 `brief` 参数，调用方可以直接给一句；不传就从 `goal` 派生——取首句、去掉首尾标点、压掉多余空格、按列宽截断。传进来的 `brief` 也按当前上限再截一次，所以上限调小以后老日志里的长句不会把第二行撑破。`TicketSnapshot`、`TicketEvent`、`TicketView` 与 `dispatch_list` 的输出都带上这个字段。
+
+旧日志里没有 `brief` 的行照旧能读：`foldEvents` 折叠时字段留空、不报错，读取侧用 `briefOf(ticket)` 现算一遍当兜底，`dispatch_list` 返回的每一行都有一句能直接上屏的 `brief`。两份 README 各加了一节说明和配置项。
+
+Tests: `tests/brief.test.ts` 13 条——首句提取与标点清理、短 goal 原样保留、10 汉字刚好顶格、超长截断成 9 汉字 + 省略号、半角文本按 1 列计、`briefMaxColumns` 变小时截得更短、`dispatch_open` 传了 `brief` 落盘、没传自动派生、传超了被截、老票无字段折叠不崩、老票派生兜底、老票通过 `dispatch_list` 拿到派生值、后续事件补字段不丢。
+
 ## 1.2.1 - 2026-11-02
 
 ### Fixed

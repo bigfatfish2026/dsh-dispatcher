@@ -30,6 +30,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     stateFile: join(dir, 'tickets.jsonl'),
     staleMinutes: 30,
     maxOpen: 4,
+    briefMaxColumns: 20,
     handoffPolicy: true,
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
     sweepMinutes: 0,

@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+import { BRIEF_MAX_COLUMNS } from './store'
 
 // Tunable configuration must be a Schemastery Schema, never a plain object:
 // the harness validates it at load time and fails loud on invalid values, and
@@ -116,6 +117,11 @@ export interface Config {
   staleMinutes: number
   /** How many tickets may be open (not done, not dropped) at once. */
   maxOpen: number
+  /**
+   * Longest ticket brief, in display columns (a 汉字 is 2). What the little
+   * screen's second line can hold; defaults to BRIEF_MAX_COLUMNS.
+   */
+  briefMaxColumns: number
   /** Append the hand-off rules to the main session's system prompt. */
   handoffPolicy: boolean
   /** The hand-off rules themselves. Empty string turns the section off. */
@@ -169,6 +175,13 @@ export const Config: Schema<Config> = Schema.object({
   maxOpen: Schema.natural()
     .default(4)
     .description('Maximum number of tickets that are not done or dropped.'),
+  // 小屏第二行的宽度：一个汉字占两列，默认 20 列 = 10 个汉字。
+  // 这个默认值就是 store.ts 里的常量，等主人给出屏宽实测值再改一处即可。
+  briefMaxColumns: Schema.natural()
+    .default(BRIEF_MAX_COLUMNS)
+    .description(
+      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (20) is 10 汉字, the little screen second line. dispatch_open derives a brief from the goal when the caller passes none, and older tickets are derived on read with the same cap.',
+    ),
   handoffPolicy: Schema.boolean()
     .default(true)
     .description('Append the hand-off rules to the main session system prompt; subagent sessions are never touched.'),

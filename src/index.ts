@@ -6,7 +6,17 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Config, DEFAULT_HANDOFF_POLICY } from './config'
 import type { Config as ConfigShape } from './config'
-import { TicketStore, isOpen, minutesSince, pending, resolveStateFile } from './store'
+import {
+  BRIEF_MAX_COLUMNS,
+  TicketStore,
+  briefOf,
+  deriveBrief,
+  truncateColumns,
+  isOpen,
+  minutesSince,
+  pending,
+  resolveStateFile,
+} from './store'
 import type { TicketSnapshot, TicketStatus } from './store'
 import { evaluateZombies, shouldPush, summarizeZombies } from './zombie'
 import { isWorkerSession, noWaitReason } from './no-wait'
@@ -26,6 +36,8 @@ const STATUSES = ['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as
 export interface TicketView {
   id: string
   goal: string
+  /** Short summary for the little screen's second line; capped at briefMaxColumns. */
+  brief: string
   status: TicketStatus
   dir?: string
   note?: string
@@ -38,11 +50,18 @@ export interface TicketView {
   pendingReports: number
 }
 
-export function toView(ticket: TicketSnapshot, staleMinutes: number, now: Date = new Date()): TicketView {
+export function toView(
+  ticket: TicketSnapshot,
+  staleMinutes: number,
+  now: Date = new Date(),
+  briefMaxColumns: number = BRIEF_MAX_COLUMNS,
+): TicketView {
   const ageMinutes = minutesSince(ticket.updatedAt, now)
   const view: TicketView = {
     id: ticket.id,
     goal: ticket.goal,
+    // 老票没有存 brief：这里现算一遍，显示侧拿到的永远是能直接上屏的一句。
+    brief: briefOf(ticket, briefMaxColumns),
     status: ticket.status,
     ageMinutes,
     stale: isOpen(ticket.status) && ageMinutes >= staleMinutes,
@@ -68,6 +87,7 @@ export const HANDOFF_POLICY = DEFAULT_HANDOFF_POLICY
 
 const ticketProperties = {  id: { type: 'string' },
   goal: { type: 'string' },
+  brief: { type: 'string' },
   status: { type: 'string' },
   dir: { type: 'string' },
   note: { type: 'string' },
@@ -169,6 +189,11 @@ export function apply(ctx: Context, config: ConfigShape): void {
         'Open a ticket for work handed to a 小鱼. Call this right after spawning the 小鱼, before answering the person.',
       parameters: {
         goal: { type: 'string', required: true, description: 'What the 小鱼 was asked to do, in one sentence.' },
+        brief: {
+          type: 'string',
+          description:
+            'One short line for the little screen, at most briefMaxColumns display columns (a 汉字 counts 2). Omit it and one is derived from the first sentence of goal.',
+        },
         dir: { type: 'string', description: 'Working directory the 小鱼 uses, if any.' },
         owner: { type: 'string', description: '小鱼 handle: subagent id or a short label.' },
       },
@@ -191,7 +216,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
             `too many open tickets (${openCount}/${config.maxOpen}); close one or raise maxOpen before handing out more work`,
           )
         }
-        const ticket = store.open(args.goal, args.dir)
+        // 调用方给了就用它，没给就从 goal 派生一句：票落盘时带着 brief，
+        // 显示侧不用自己猜该截多长。
+        const requested = args.brief?.trim()
+        const brief = requested
+          ? truncateColumns(requested, config.briefMaxColumns)
+          : deriveBrief(args.goal, config.briefMaxColumns)
+        const ticket = store.open(args.goal, args.dir, brief)
         if (args.owner) store.update(ticket.id, { owner: args.owner, status: 'running' })
         return {
           id: ticket.id,
@@ -281,7 +312,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           .filter((ticket) =>
             args.status ? ticket.status === args.status : args.includeClosed || isOpen(ticket.status),
           )
-          .map((ticket) => toView(ticket, staleMinutes, now))
+          .map((ticket) => toView(ticket, staleMinutes, now, config.briefMaxColumns))
         return {
           tickets,
           openCount: tickets.filter((ticket) => isOpen(ticket.status)).length,

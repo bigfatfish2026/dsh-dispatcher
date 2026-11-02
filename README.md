@@ -41,6 +41,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票的日志路径，相对路径按 `DSH_HOME` 解析 |
 | `staleMinutes` | number | `30` | 列表里 `!` 的阈值：多久没更新算「卡住」。只影响 `dispatch_list` 的标记，不再驱动提醒 |
 | `maxOpen` | number | `4` | 同时开着的票上限，`done` / `dropped` 不占名额 |
+| `briefMaxColumns` | number | `20` | 票摘要 `brief` 的长度上限，单位是显示列宽：汉字算 2 列、半角算 1 列，20 列 = 10 个汉字，正好是小屏第二行 |
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
 | `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
@@ -75,9 +76,9 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 | 工具 | 作用 |
 |---|---|
-| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话 |
+| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话。可以带一句 `brief`（不传就从 `goal` 首句派生） |
 | `dispatch_touch` | 改状态，可附一行进展说明（`status` 必填） |
-| `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告 |
+| `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告；每行都带 `brief` |
 | `dispatch_send` | 往票里追加一条给 worker 的消息 |
 | `dispatch_report` | 记一份报告，不结束这张票 |
 | `dispatch_close` | 交付了就关票 |
@@ -85,6 +86,14 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `progress_note` | 把一行进度直接推到主人 QQ 上；不叫醒会话、不写盘，长活每出一段就报一次 |
 
 状态只有六个：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算「还开着」，占 `maxOpen` 名额。
+
+### 票的 `brief`
+
+每张票除了完整的 `goal`，还带一句 `brief`：给小屏桌宠第二行用的短摘要，不超过 `briefMaxColumns` 列（默认 20 列 = 10 个汉字），超了截断并补一个「…」。
+
+`dispatch_open` 时可以直接传 `brief`；不传就从 `goal` 派生——取首句、去掉首尾标点、压掉多余空格，再按列宽截断。调用方传超了也照样截到上限，显示侧不用自己算宽度。
+
+老票没有这个字段：`foldEvents` 读到没有 `brief` 的事件不会出错（字段留空），读取方用 `briefOf()` 从 `goal` 现算一遍当兜底，所以 `dispatch_list` 里任何一张票都能拿到一句能直接上屏的 `brief`。
 
 ## 两条队列
 

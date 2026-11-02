@@ -21,6 +21,13 @@ export interface TicketEntry {
 export interface TicketSnapshot {
   id: string
   goal: string
+  /**
+   * One-line summary of the goal, for the little screen's second line: at most
+   * `BRIEF_MAX_COLUMNS` display columns. Optional because tickets written before
+   * 2026-11-02 have no such field — readers fall back to `briefOf()`, which
+   * derives the same thing from `goal`.
+   */
+  brief?: string
   status: TicketStatus
   dir?: string
   note?: string
@@ -45,6 +52,7 @@ interface TicketEvent {
   id: string
   at: string
   goal?: string
+  brief?: string
   status?: TicketStatus
   dir?: string
   note?: string
@@ -55,6 +63,95 @@ interface TicketEvent {
 }
 
 export type EntryKind = 'input' | 'report'
+
+/**
+ * Longest brief, measured in display columns: a CJK character is 2 columns, a
+ * half-width one is 1. 20 columns = 10 汉字, which is what fits on the little
+ * screen's second line.
+ *
+ * This value is provisional: the main session is measuring the real panel
+ * width and may hand back a different number. Adjust it here only — or set
+ * `briefMaxColumns` in cordis.yml, whose schema default points at this
+ * constant, so the two can never drift apart.
+ */
+export const BRIEF_MAX_COLUMNS = 20
+
+/** The ellipsis is wide (U+2026), so it costs 2 columns of the budget. */
+const ELLIPSIS = '…'
+const ELLIPSIS_COLUMNS = 2
+
+/** Wide (East Asian) characters take two columns: CJK, kana, hangul, full-width punctuation. */
+function charColumns(char: string): number {
+  const code = char.codePointAt(0) ?? 0
+  const wide =
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6)
+  return wide ? 2 : 1
+}
+
+/** Display width of a string, in columns. */
+export function textColumns(text: string): number {
+  let total = 0
+  for (const char of text) total += charColumns(char)
+  return total
+}
+
+/** Cut to `maxColumns` display columns, adding an ellipsis when anything was dropped. */
+export function truncateColumns(text: string, maxColumns: number = BRIEF_MAX_COLUMNS): string {
+  if (textColumns(text) <= maxColumns) return text
+  // The ellipsis has to fit inside the cap too, otherwise a "10 汉字" brief
+  // renders 11 and the panel clips the last glyph.
+  const budget = Math.max(0, maxColumns - ELLIPSIS_COLUMNS)
+  let out = ''
+  let width = 0
+  for (const char of text) {
+    const next = charColumns(char)
+    if (width + next > budget) break
+    out += char
+    width += next
+  }
+  return `${out}${ELLIPSIS}`
+}
+
+/** Sentence ends for "take the first sentence"; the separator itself is dropped. */
+const SENTENCE_END = /[。！？!?；;…\n\r]/
+/** Punctuation and spaces trimmed off both ends of the brief. */
+const EDGE_PUNCTUATION = /^[\s，,、：:·\-—–]+|[\s，,、：:·\-—–]+$/g
+
+/**
+ * Derive a short summary from a goal: first sentence, no edge punctuation,
+ * whitespace collapsed, truncated to the column cap.
+ *
+ * Two callers: `dispatch_open` when the caller passes no brief, and readers of
+ * old tickets that never stored one. A goal that starts with punctuation ("！…
+ * ") would split to an empty first sentence, so the cleaned whole goal is the
+ * fallback — an empty string would blank the panel's second line.
+ */
+export function deriveBrief(goal: string, maxColumns: number = BRIEF_MAX_COLUMNS): string {
+  const first = goal.trim().split(SENTENCE_END)[0] ?? ''
+  const cleaned = (first || goal).replace(/\s+/g, ' ').replace(EDGE_PUNCTUATION, '').trim()
+  return truncateColumns(cleaned, maxColumns)
+}
+
+/**
+ * The brief to show for a ticket: what the log stored, or — for a ticket opened
+ * before the field existed — one derived from its goal. An empty stored string
+ * counts as absent.
+ */
+export function briefOf(
+  ticket: { goal: string; brief?: string },
+  maxColumns: number = BRIEF_MAX_COLUMNS,
+): string {
+  const own = ticket.brief?.trim()
+  // 调用方给的 brief 也按当前上限再截一次：上限调小以后，老日志里存的那句
+  // 不该把第二行撑破。
+  return own ? truncateColumns(own, maxColumns) : deriveBrief(ticket.goal, maxColumns)
+}
 
 const OPEN: ReadonlySet<TicketStatus> = new Set(['open', 'running', 'waiting', 'blocked'])
 
@@ -101,6 +198,7 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
       state.set(event.id, {
         id: event.id,
         goal: event.goal ?? '',
+        brief: event.brief,
         status: event.status ?? 'open',
         dir: event.dir,
         note: event.note,
@@ -116,6 +214,9 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
     state.set(event.id, {
       ...previous,
       goal: event.goal ?? previous.goal,
+      // Old lines have no brief at all: `??` keeps whatever the ticket already
+      // had, so a fold never turns a present brief into undefined.
+      brief: event.brief ?? previous.brief,
       status: event.status ?? previous.status,
       dir: event.dir ?? previous.dir,
       note: event.note ?? previous.note,
@@ -190,10 +291,13 @@ export class TicketStore {
     appendFileSync(this.file, `${JSON.stringify(event)}\n`, 'utf8')
   }
 
-  open(goal: string, dir?: string): TicketSnapshot {
+  open(goal: string, dir?: string, brief?: string): TicketSnapshot {
     const now = new Date()
     const id = newTicketId(now)
-    this.append({ id, at: now.toISOString(), goal, status: 'open', dir })
+    // An empty brief is not written at all: absent and empty should read the
+    // same, and leaving it out keeps the log line as short as it used to be.
+    const trimmed = brief?.trim()
+    this.append({ id, at: now.toISOString(), goal, status: 'open', dir, ...(trimmed ? { brief: trimmed } : {}) })
     return this.get(id)!
   }
 
