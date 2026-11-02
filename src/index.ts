@@ -8,6 +8,7 @@ import { Config, DEFAULT_HANDOFF_POLICY } from './config'
 import type { Config as ConfigShape } from './config'
 import { TicketStore, isOpen, minutesSince, pending, resolveStateFile } from './store'
 import type { TicketSnapshot, TicketStatus } from './store'
+import { evaluateZombies, shouldPush, summarizeZombies } from './zombie'
 import { isWorkerSession, noWaitReason } from './no-wait'
 import { sendProgress } from './progress'
 import { bindRouter } from './router'
@@ -348,8 +349,12 @@ export function apply(ctx: Context, config: ConfigShape): void {
     inject?: (message: unknown) => Promise<unknown>
   }
 
-  // 票 id → 上次提醒时的更新时间。票没动过就不再叫第二遍。
-  const notified = new Map<string, number>()
+  // 僵尸票节流：票 id → 上次推送时的指纹（`报告条数|最后活动|状态`）。
+  // 故意不用 updatedAt：巡检自己投递报告时会往日志追加 delivered 事件、也刷 updatedAt，
+  // 拿它当指纹会让刚推过的票下一轮再推一遍。指纹细节见 ./zombie 的 ZombieHit。
+  // 没有新报告、状态也没动过，指纹就不变，同一张票只推一次。
+  // 进程重启后这段记忆清空，同一张票最多重推一次，接受。
+  const zombiePushed = new Map<string, string>()
   const BUSY = new Set(['running', 'streaming', 'thinking', 'tool', 'tool-call', 'cancelling'])
 
   const agentFor = (id: string | undefined): WakeableAgent | undefined => {
@@ -357,6 +362,25 @@ export function apply(ctx: Context, config: ConfigShape): void {
     const agents = (ctx as unknown as { agents?: { get?: (id: string) => WakeableAgent | undefined } }).agents
     return agents?.get?.(id)
   }
+
+  /**
+   * owner 的 agent 还在不在活表里。
+   *
+   * AgentRegistry.get(agent.session.id) 是唯一可靠的判活入口（dsh-agent 的
+   * registry key 就是 session id），但票里的 owner 是主会话随手填的：可能裸 uuid、
+   * 可能带 session- 前缀、也可能是「重启小鱼」这种短标签。短标签查不到活不等于
+   * 小鱼死了，所以那种情况返回 undefined，交给静默阈值兜底。
+   */
+  const agentAlive = (owner: string): boolean | undefined => {
+    const agents = (ctx as unknown as { agents?: { get?: (id: string) => unknown } }).agents
+    if (!agents?.get) return undefined
+    const bare = owner.replace(/^session-/, '')
+    for (const id of new Set([owner, bare, `session-${bare}`])) {
+      if (agents.get(id)) return true
+    }
+    return false
+  }
+
   const isBusy = (agent: WakeableAgent | undefined): boolean =>
     agent?.status !== undefined && BUSY.has(String(agent.status))
   const message = (text: string) => ({
@@ -420,38 +444,50 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }
     }
 
-    // Reports and quiet tickets both need the owner session; one message carries both.
+    // Reports and zombie notices both need the owner session; one message carries both.
     const reports = store
       .list()
       .flatMap((ticket) => pending(ticket.reports).map((entry) => ({ ticket, entry })))
-    const stale = store
-      .list()
-      .filter((ticket) => isOpen(ticket.status) && minutesSince(ticket.updatedAt, now) >= staleMinutes)
-      .filter((ticket) => notified.get(ticket.id) !== Date.parse(ticket.updatedAt))
+
+    // 僵尸巡检：只挑 open/running——waiting/blocked 是人按着没动，done/dropped 已结束。
+    // 判定和摘要都在 ./zombie，这里只做两件事：注入活表查询、按指纹节流。
+    const zombies = config.notifyOwner
+      ? evaluateZombies(store.list(), {
+          now,
+          zombieMinutes: config.zombieMinutes,
+          isAlive: agentAlive,
+        })
+      : []
+    // 不再僵尸的票（活了、关了）把指纹扔掉，下次真僵尸时还能再推一次。
+    for (const id of [...zombiePushed.keys()]) {
+      if (!zombies.some((hit) => hit.ticket.id === id)) zombiePushed.delete(id)
+    }
+    const freshZombies = zombies.filter((hit) => shouldPush(hit, zombiePushed))
     const wantReports = reports.length > 0
-    const wantStale = config.notifyOwner && stale.length > 0
+    const wantZombies = freshZombies.length > 0
 
     // Quiet sweep: never wake the owner session. One followup costs a whole
     // session turn with all of its context, so when an outside script pushes the
     // reports to QQ the sweep only keeps the log honest: mark the reports
-    // delivered and refresh the stale snapshot so nothing is announced twice.
+    // delivered so nothing is announced twice. Zombies are not pushed here at
+    // all, and not remembered either: a quiet sweep announcing nothing should
+    // not silence the first real announcement.
     if (config.quietSweep) {
       for (const { ticket, entry } of reports) {
         store.markDelivered(ticket.id, 'report', entry.id)
         delivered += 1
       }
-      for (const ticket of stale) notified.set(ticket.id, Date.parse(ticket.updatedAt))
-      return { stale: stale.length, delivered, woke: false, reason: 'quiet' }
+      return { stale: zombies.length, delivered, woke: false, reason: 'quiet' }
     }
 
-    if (!wantReports && !wantStale && notices.length === 0) {
-      return { stale: stale.length, delivered, woke: false }
+    if (!wantReports && !wantZombies && notices.length === 0) {
+      return { stale: zombies.length, delivered, woke: false }
     }
 
     const sessionId = resolveOwnerSession()
     const owner = agentFor(sessionId)
-    if (!owner?.followup) return { stale: stale.length, delivered, woke: false, reason: 'no-session' }
-    if (isBusy(owner)) return { stale: stale.length, delivered, woke: false, reason: 'busy' }
+    if (!owner?.followup) return { stale: zombies.length, delivered, woke: false, reason: 'no-session' }
+    if (isBusy(owner)) return { stale: zombies.length, delivered, woke: false, reason: 'busy' }
 
     const lines: string[] = []
     if (wantReports) {
@@ -460,19 +496,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }
     }
     for (const notice of notices) lines.push(notice)
-    if (wantStale) {
-      for (const ticket of stale) {
-        lines.push(`${ticket.id}「${ticket.goal}」${ticket.status}，${minutesSince(ticket.updatedAt, now)} 分钟没动静`)
-      }
-    }
+    // 一句摘要，不带报告正文：正文要是也塞进来，这条消息就成了第二份报告。
+    if (wantZombies) lines.push(summarizeZombies(freshZombies))
     const text = `（dispatcher 巡检，不是主人发的）${lines.join('；')}。用 dispatch_list 看一眼，收票或者继续派活。`
     await owner.followup(message(text))
     for (const { ticket, entry } of reports) {
       store.markDelivered(ticket.id, 'report', entry.id)
       delivered += 1
     }
-    for (const ticket of stale) notified.set(ticket.id, Date.parse(ticket.updatedAt))
-    return { stale: stale.length, delivered, woke: true }
+    for (const hit of freshZombies) zombiePushed.set(hit.ticket.id, hit.fingerprint)
+    return { stale: zombies.length, delivered, woke: true }
   }
 
   if (config.sweepMinutes > 0) {
@@ -488,7 +521,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     defineTool({
       name: 'dispatch_sweep',
       description:
-        'Run one sweep now instead of waiting for the timer: deliver queued reports and quiet tickets to the owner session, and push queued messages to live 小鱼.',
+        'Run one sweep now instead of waiting for the timer: deliver queued reports, report zombie tickets in one line, and push queued messages to live 小鱼.',
       parameters: {},
       output: {
         schema: {

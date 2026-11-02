@@ -33,6 +33,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     handoffPolicy: true,
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
     sweepMinutes: 0,
+    zombieMinutes: 20,
     notifyOwner: true,
     quietSweep: false,
     ownerSessionId: '',
