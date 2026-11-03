@@ -116,7 +116,7 @@ T = {
         "rule3": "③ sweep 复活只认晚于 closedAt 的未送达 input，且只复活 done —— index.ts:541-545 + store.ts:247",
         "rule3b": "   dropped 是人叫停，永远不复活；closedAt 由那次 status 事件钉住（store.ts:247）",
         "rule4": "④ 巡检另有独立一档 noReportMinutes（默认 5 分钟），只盯 waiting 且 0 条报告的票 —— zombie.ts:101-114",
-        "rule4b": "   补上报告就不再提醒，指纹随巡检清掉；这类票在列表上显示 waiting?",
+        "rule4b": "   补上报告就不再提醒，指纹随巡检清掉。",
         "cardB_title": "显示标记 / 边的样式 / 没画出来的边",
         "mark": "»n 有 n 条消息小鱼还没收到（index.ts:302）　«n 有 n 条报告主会话还没读（index.ts:303）　"
                 "! 这张票静默了（index.ts:307）",
@@ -162,11 +162,11 @@ T = {
         "rule3": "(3) sweep revives only on undelivered input newer than closedAt, and only from done — index.ts:541-545 + store.ts:247",
         "rule3b": "    dropped is a person's stop and never revives; closedAt is pinned by that status event (store.ts:247)",
         "rule4": "(4) the sweep has its own noReportMinutes tier (default 5 min) watching only waiting tickets with 0 reports — zombie.ts:101-114",
-        "rule4b": "   a report landing ends the watch and its fingerprint is dropped; such rows print waiting?",
-        "cardB_title": "Display marks / edge styles / edges not drawn",
+        "rule4b": "   a report landing ends the watch and its fingerprint is dropped.",
+        "cardB_title": "List marks / edge styles / edges not drawn",
         "mark": "»n n messages the worker has not received (index.ts:302)　«n n reports unread (index.ts:303)　"
                 "! quiet ticket (index.ts:307)",
-        "mark2": "all three are display marks in dispatch_list, not statuses, not log lines of their own.",
+        "mark2": "all three are list marks in dispatch_list, not statuses, not log lines of their own.",
         "style": "solid = written by a tool or an event; grey dashed = dispatch_touch (all 30 directed pairs exist, "
                  "one sample drawn). a way back such as waiting→running is touch-only: dispatch_send never "
                  "pulls a ticket back to running.",

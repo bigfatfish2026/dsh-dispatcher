@@ -6,6 +6,12 @@
     python3 worker-ticket-lifecycle-i18n.py zh   -> worker-ticket-lifecycle.zh.png
     python3 worker-ticket-lifecycle-i18n.py en   -> worker-ticket-lifecycle.en.png
 
+v4（2026-11-03）相对 v3 的改动：
+  - T 列补 status = waiting：W 结束（subagent/end）把 open/running 落成 waiting，
+    并加一条 W -> waiting 的边，标明「通知，不是交付」；A/B 卡改成「事件没到才靠巡检」。
+  - 每个状态节点第二行标出写入者（M / 插件 / 巡检 / W），中列「判定权」换成「谁写 status」。
+  - 巡检面板的 owner 判据改成「子会话 id」，short-label 那一档写清事件也对不上。
+
 v3（2026-11-02）相对 v2 的改动：
   - 全图不再出现美元符号，指纹改纯文本（修复 mathtext 把它当公式起始的转义残渣）。
   - 右侧「巡检层」改名「巡检」，内部流程改为自上而下：
@@ -39,42 +45,48 @@ TEXTS = {
     "zh": {
         "title": "Worker / Ticket 生命周期",
         "subtitle": "M = 主会话（一个 session）· W = 小鱼 / subagent（独立 session）· "
-                    "T = 票（~/.dsh/dispatcher/tickets.jsonl）",
+                    "T = 票（~/.dsh/dispatcher/tickets.jsonl）· status 只由 M / 插件 / 巡检写",
         "lane_m": "M · 主 agent", "lane_m_sub": "主会话，一个人一个 session",
         "lane_w": "W · worker / 小鱼", "lane_w_sub": "subagent 起的独立 session，可能先死",
         "lane_t": "T · ticket 票", "lane_t_sub": "id / goal / owner / status",
 
         "m1": "dispatch_open(goal)",
         "m2": "subagent(...)\n起一个 W 会话",
-        "m3": "dispatch_touch\n或自己推进",
+        "m3": "dispatch_touch\n（改 status）",
         "m4": "被 send_message\n唤醒，读票",
         "m5": "dispatch_close",
         "w1": "W 会话创建\norigin=subagent",
         "w2": "干活：读文件 / 跑命令",
         "w3": "dispatch_report\n往票里写进展",
         "w4": "send_message 喊 M",
-        "w5": "W 结束（可能比 M 先死）",
-        "t1": "status = open\nowner = W",
-        "t2": "status = running",
-        "t3": "票里 + 一条 report",
-        "t4": "status = done / dropped",
-        "t5": "归档 archived",
+        "w5": "W 结束\nsubagent/end 事件",
+        "t1": "status = open\nM · dispatch_open",
+        "t2": "status = running\nM · open(带 owner)",
+        "t3": "票里 + 一条 report\nW · dispatch_report",
+        "tw": "status = waiting\n插件 · subagent/end",
+        "t4": "status = done / dropped\nM · dispatch_close",
+        "t5": "归档 archived\n不再占名额",
 
         "a1": "① 建票", "a2": "② 起 W", "a3": "③ 推 running",
         "a4": "④ 写报告", "a5": "⑤ 唤醒 M", "a6": "⑥ close = 收尾",
         "wait_w": "等 W 交付",
         "crash_w": "W 崩 /\n被 interrupt",
-        "forgot_close": "W 结束，M 忘了 close",
-        "m_replaced": "M 会话被换掉\n/new · host restart",
+        "end_wait": "subagent/end\n→ waiting\n（通知，不是交付）",
+        "m_replaced": "M 会话被换掉\n/new · 宿主重启",
         "any_time": "任何时候",
 
         "card_cd": "C / D · 孤儿票\nW 的报告没人收\n票不会自己变状态",
-        "card_ab": "A / B · 僵尸票\nT 停在 running，没人认领",
+        "card_ab": "A / B · 巡检兜底\n事件没到，票还挂 running\n只提醒，不改 status",
         "gate": "sweep 复活闸门\n仅 done 后又有新 input",
 
-        "authority_title": "判定权",
-        "authority_body": "票的终点只看两件事：\nW 交付完成，\nM 调了 dispatch_close。\n\n"
-                          "M 的会话还在不在，\n都不改变票的状态。",
+        "authority_title": "谁写 status",
+        "authority_body": "ticket 日志只追加：\nstatus 是某次 append 的 payload。\n\n"
+                          "M 写 open · running · done / dropped\n"
+                          "（dispatch_touch 能改任意状态）\n"
+                          "插件写 subagent/end → waiting\n"
+                          "巡检写 done 后再来消息 → open\n\n"
+                          "W 一个字节都不写。\n\n"
+                          "终点仍只有一条：\nM 调 dispatch_close。",
         "legend_normal": "正常主流程",
         "legend_bad": "异常 / 卡死 / 孤儿",
         "legend_terminal": "票的终态",
@@ -83,13 +95,14 @@ TEXTS = {
         "sweep_sub": "每 5 分钟一轮：只查出来提醒 M，不改票状态",
         "cycle_label": "5min",
         "sweep_pick": "每轮取 status = open / running 的票\n"
-                      "waiting / blocked 是人守着，不算",
-        "sweep_diamond": "owner 是 uuid 形态的\nagent id 吗？",
+                      "waiting 且票内 0 条报告：另有 no-report 一档\n"
+                      "blocked 人按着、waiting 有报告等人看，都不算",
+        "sweep_diamond": "owner 是 uuid 形态的\n子会话 id 吗？",
         "sweep_yes": "是", "sweep_no": "否",
         "gw_title": "worker-gone",
-        "gw_body": "AgentRegistry 能按\nagent id 查存活\n（get / list，\nkey = agent.session.id）\n查不到 ⇒ 僵尸",
+        "gw_body": "AgentRegistry 按\nagent.session.id 查活\n查不到 ⇒ 僵尸\n（W 结束事件漏了，\n才会走到这一档）",
         "sl_title": "silent",
-        "sl_body": "owner 不是 uuid\n（多是「重启小鱼」这种短标签）\n查不了存活，退化成超时：\n"
+        "sl_body": "owner 不是 uuid（短标签）\n事件对不上、也查不了存活\n只能按时间兜底：\n"
                    "20 分钟没动静算疑似，\n新建票 2 分钟宽限",
         "thr_title": "节流：指纹没变就不重推",
         "thr_fp": "报告条数 ｜ 最后活动时间 ｜ 状态",
@@ -100,48 +113,54 @@ TEXTS = {
                      "没检出 → 完全静默，一个字都不发",
         "note1": "注：sweep 定时器在 cordis.patch.yml 里从 sweepMinutes 0 改回 5（每 5 分钟一轮）；"
                  "复活闸门不变——只认 status=done 之后又冒出来的新 input。",
-        "note2": "巡检每轮只把「不会自己再动的票」查出来提醒 M，不替 M 收尾；"
-                 "W 可能比 M 先死，M 挂了票也不会自己变状态。",
+        "note2": "巡检命中只节流 + 推一条 followup，不写 status；"
+                 "状态只由 M 的工具调用、subagent/end、巡检重开改写，W 一个字节都不写。",
     },
     "en": {
         "title": "Worker / Ticket Lifecycle",
         "subtitle": "M = main session (one conversation) · W = worker / subagent session · "
-                    "T = ticket (~/.dsh/dispatcher/tickets.jsonl)",
+                    "T = ticket (~/.dsh/dispatcher/tickets.jsonl) · status is written by M / plugin / sweep",
         "lane_m": "M · main agent", "lane_m_sub": "the main session, one per conversation",
         "lane_w": "W · worker / subagent", "lane_w_sub": "its own session, started by subagent, may die first",
         "lane_t": "T · ticket", "lane_t_sub": "id / goal / owner / status",
 
         "m1": "dispatch_open(goal)",
         "m2": "subagent(...)\nstarts a W session",
-        "m3": "dispatch_touch\nor self-advance",
+        "m3": "dispatch_touch\n(sets status)",
         "m4": "woken by send_message,\nreads the ticket",
         "m5": "dispatch_close",
         "w1": "W session created\norigin=subagent",
         "w2": "work: read files,\nrun commands",
         "w3": "dispatch_report\nwrites progress to the ticket",
         "w4": "send_message pings M",
-        "w5": "W ends (may die before M)",
-        "t1": "status = open\nowner = W",
-        "t2": "status = running",
-        "t3": "ticket gains one report",
-        "t4": "status = done / dropped",
-        "t5": "archived",
+        "w5": "W ends\nsubagent/end event",
+        "t1": "status = open\nM · dispatch_open",
+        "t2": "status = running\nM · open with owner",
+        "t3": "ticket gains one report\nW · dispatch_report",
+        "tw": "status = waiting\nplugin · subagent/end",
+        "t4": "status = done / dropped\nM · dispatch_close",
+        "t5": "archived\nno longer takes a slot",
 
         "a1": "1 open ticket", "a2": "2 spawn W", "a3": "3 set running",
         "a4": "4 write report", "a5": "5 wake M", "a6": "6 close = wrap up",
         "wait_w": "waiting for W",
         "crash_w": "W crashes /\ninterrupted",
-        "forgot_close": "W finished,\nM forgot to close",
+        "end_wait": "subagent/end\n-> waiting\n(notice, not delivery)",
         "m_replaced": "M session replaced\n/new · host restart",
         "any_time": "at any time",
 
         "card_cd": "C / D · orphan ticket\nnobody collects W's report\nthe ticket never changes state",
-        "card_ab": "A / B · zombie ticket\nstuck in running, no one owns it",
+        "card_ab": "A / B · sweep backstop\nno end event, still running\nit reports, never writes status",
         "gate": "sweep resurrection gate\nonly on new input after done",
 
-        "authority_title": "Who ends a ticket",
-        "authority_body": "A ticket ends on two things only:\nW has delivered,\nand M called dispatch_close.\n\n"
-                          "Whether M's session is still\nalive does not affect the ticket.",
+        "authority_title": "Who writes status",
+        "authority_body": "the log is append-only;\nstatus is the payload of one append.\n\n"
+                          "M writes open · running · done / dropped\n"
+                          "(dispatch_touch can set any status)\n"
+                          "plugin writes subagent/end -> waiting\n"
+                          "sweep writes mail-after-done -> open\n\n"
+                          "W writes nothing at all.\n\n"
+                          "the ending rule is unchanged:\nM calls dispatch_close.",
         "legend_normal": "normal path",
         "legend_bad": "failure / stalled / orphaned",
         "legend_terminal": "terminal state",
@@ -150,14 +169,15 @@ TEXTS = {
         "sweep_sub": "every 5 min: detect only, never changes ticket state",
         "cycle_label": "5min",
         "sweep_pick": "each round: tickets with status = open / running\n"
-                      "waiting / blocked are held by a human, so they are skipped",
-        "sweep_diamond": "Is owner a uuid-shaped\nagent id?",
+                      "waiting with 0 reports has its own no-report tier\n"
+                      "blocked is held by a person, waiting with reports is not",
+        "sweep_diamond": "Is owner a uuid-shaped\nsub-session id?",
         "sweep_yes": "yes", "sweep_no": "no",
         "gw_title": "worker-gone",
-        "gw_body": "AgentRegistry can query\nliveness by agent id\n(get / list,\nkey = agent.session.id)\nno entry = zombie",
+        "gw_body": "AgentRegistry looks up\nagent.session.id\nno entry = zombie\n(only reached when the\nend event was missed)",
         "sl_title": "silent",
-        "sl_body": "owner is not a uuid\n(usually a short label\nsuch as \"restart the fish\")\n"
-                   "liveness is not queryable,\nso it falls back to a timeout:\n"
+        "sl_body": "owner is not a uuid (short label)\nthe event cannot match it\nand liveness is unqueryable,\n"
+                   "so only time is left:\n"
                    "20 min idle = suspect,\n2 min grace for a new ticket",
         "thr_title": "Throttle: unchanged fingerprint, no re-push",
         "thr_fp": "report count | last activity | status",
@@ -168,8 +188,8 @@ TEXTS = {
                      "nothing detected = complete silence",
         "note1": "Note: the sweep timer is set back to 5 minutes (sweepMinutes 0 -> 5) in cordis.patch.yml; "
                  "the resurrection gate is unchanged — only new input after status=done revives a ticket.",
-        "note2": "Each sweep round only surfaces tickets that will not move again and reports them to M; "
-                 "it never closes them for M. W may die before M, and a dead M does not change ticket state either.",
+        "note2": "A sweep hit is throttle plus one followup and writes no status; "
+                 "status is written only by M's tool calls, subagent/end and the sweep's reopen. W writes none of it.",
     },
 }
 T = TEXTS[LANG]
@@ -177,11 +197,14 @@ T = TEXTS[LANG]
 # 个别文案长度差异大，单独收字号
 FS = {"zh": {"gw_body": 9.2, "sl_body": 9.2, "thr_fp": 10.5, "push_body": 9.2,
              "note1": 10.5, "note2": 10.5, "sweep_pick": 10.0,
-             "m4": 12.0, "w2": 11.5, "w3": 11.5, "t4": 12.5, "t3": 12.0},
+             "m4": 12.0, "w2": 11.5, "w3": 11.5, "t4": 12.5, "t3": 12.0,
+             "tw": 11.4, "t2": 11.0, "t1": 11.6, "t5": 11.2,
+             "authority_body": 10.4},
       "en": {"gw_body": 8.8, "sl_body": 8.6, "thr_fp": 10.5, "push_body": 9.0,
              "note1": 10.2, "note2": 10.2, "sweep_pick": 9.8,
              "m4": 10.4, "w2": 11.4, "w3": 10.4, "t4": 11.6, "t3": 11.4,
-             "w4": 10.6}}[LANG]
+             "w4": 10.6, "tw": 11.0, "t2": 10.6, "t1": 11.0, "t5": 10.8,
+             "authority_body": 9.8}}[LANG]
 
 
 def t(key):
@@ -316,7 +339,7 @@ NW, NH = 220, 72
 
 m1, m2, m3, m4, m5 = 970, 855, 745, 470, 375
 w1, w2, w3, w4, w5 = 855, 660, 565, 470, 300
-t1, t2, t3, t4, t5 = 970, 745, 660, 375, 290
+t1, t2, t3, tw, t4, t5 = 970, 745, 660, 500, 375, 290
 
 # ---------- 节点 ----------
 box(MX, m1, NW, NH, t("m1"), C_M_BG, C_M_ED, bold=True)
@@ -334,6 +357,7 @@ box(WX, w5, NW, 64, t("w5"), C_W_BG, C_W_ED, fs_=11.5)
 box(TX, t1, NW, NH, t("t1"), C_T_BG, C_T_ED, bold=True)
 box(TX, t2, NW, NH, t("t2"), C_T_BG, C_T_ED, bold=True)
 box(TX, t3, NW, NH, t("t3"), C_T_BG, C_T_ED, fs_=fs("t3", 12))
+box(TX, tw, NW, NH, t("tw"), C_NOTE_BG, C_NOTE_ED, fs_=fs("tw", 11.6), bold=True)
 box(TX, t4, NW, NH, t("t4"), C_OK_BG, C_OK_ED, fs_=fs("t4", 12.5), bold=True)
 box(TX, t5, NW, 70, t("t5"), C_ARC_BG, C_ARC_ED, fs_=12)
 
@@ -351,7 +375,8 @@ arrow([(WX, w4 - NH / 2), (WX, w5 + 32)])
 
 arrow([(TX, t1 - NH / 2), (TX, t2 + NH / 2)], color=C_T_ED)
 arrow([(TX, t2 - NH / 2), (TX, t3 + NH / 2)], color=C_T_ED)
-arrow([(TX, t3 - NH / 2), (TX, t4 + NH / 2)], color=C_T_ED)
+arrow([(TX, t3 - NH / 2), (TX, tw + NH / 2)], color=C_T_ED)
+arrow([(TX, tw - NH / 2), (TX, t4 + NH / 2)], color=C_T_ED)
 arrow([(TX, t4 - NH / 2), (TX, t5 + 35)], color=C_T_ED)
 
 # ---------- 跨泳道箭头 ----------
@@ -387,9 +412,10 @@ seg([(470, 360), (470, 180)], C_BAD_ED, DASH)
 arrow([(470, 180), (WX - 150 - 4, 180)], color=C_BAD_ED, ls=DASH, lw=2.0)
 tag(508, 558, t("crash_w"), fs_=9.6, color=C_BAD_ED, rot=90, bold=True)
 
-# B：W 正常结束但 M 忘了关
-arrow([(WX, w5 - 32), (WX, 228)], color=C_BAD_ED, ls=DASH, lw=2.0)
-tag(672, 250, t("forgot_close"), fs_=10.5, color=C_BAD_ED, ha="left", bold=True)
+# B：W 一结束，事件把票落成 waiting（通知，不是交付）
+arrow([(WX + NW / 2, w5), (930, w5), (930, tw), (TX - NW / 2 - 4, tw)],
+      color=C_W_ED, lw=2.2)
+tag(965, 572, t("end_wait"), fs_=9.0, color=C_W_ED, bold=True)
 
 # C / D：M 会话重建
 box(MX, 285, 220, 58, t("m_replaced"), C_BAD_BG, C_BAD_ED, fs_=10.5, ls=DASH, lw=2.0)
@@ -401,11 +427,11 @@ arrow([(MX, 256), (MX, 223)], color=C_BAD_ED, ls=DASH, lw=2.0)
 # ======================================================================
 # 中列：判定权 + 图例
 # ======================================================================
-box(1415, 690, 300, 300, "", C_NOTE_BG, C_NOTE_ED, lw=2.6)
-tag(1415, 800, t("authority_title"), fs_=15, color="#b45309", bold=True)
-ax.text(1415, 672, t("authority_body"),
-        ha="center", va="center", fontsize=11.8, color="#7c2d12",
-        linespacing=1.62, zorder=5)
+box(1415, 725, 300, 390, "", C_NOTE_BG, C_NOTE_ED, lw=2.6)
+tag(1415, 878, t("authority_title"), fs_=15, color="#b45309", bold=True)
+ax.text(1415, 700, t("authority_body"),
+        ha="center", va="center", fontsize=fs("authority_body", 10.4), color="#7c2d12",
+        linespacing=1.55, zorder=5)
 
 box(1415, 430, 300, 140, "", "white", "#cbd5e1", lw=1.2)
 ax.plot([1290, 1335], [465, 465], color="#2563eb", lw=2.2, zorder=5)
@@ -433,10 +459,10 @@ tag(CX, 1002, t("sweep_sub"), fs_=10.2, color="#9a3412")
 cycle(2152, 1024, 24, C_SW_ED, lw=2.6, label=t("cycle_label"), label_fs=8.4)
 
 # 1 取票
-box(CX, 930, 530, 78, t("sweep_pick"), C_SW_BG, C_SW_ED,
+box(CX, 930, 530, 88, t("sweep_pick"), C_SW_BG, C_SW_ED,
     fs_=fs("sweep_pick", 10.0), lw=1.6, ls_sp=1.5)
-arrow([(CX, 993), (CX, 971)], color=C_SW_ED, lw=1.8, head=12)
-arrow([(CX, 891), (CX, 862)], color=C_SW_ED, lw=1.8, head=13)
+arrow([(CX, 993), (CX, 977)], color=C_SW_ED, lw=1.8, head=12)
+arrow([(CX, 882), (CX, 862)], color=C_SW_ED, lw=1.8, head=13)
 
 # 2 菱形
 diamond(CX, 800, 350, 118, t("sweep_diamond"), "#ffedd5", C_SW_ED, fs_=10.5, lw=1.8)

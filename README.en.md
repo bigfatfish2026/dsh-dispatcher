@@ -41,15 +41,16 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
 | `staleMinutes` | number | `30` | Silence after which a ticket counts as stale in `dispatch_list` (the `!` mark). It no longer drives any announcement |
 | `maxOpen` | number | `4` | Cap on concurrently open tickets; `done` / `dropped` do not take a slot |
-| `briefMaxColumns` | number | `34` | Length cap for a ticket's `brief`, in display columns: a CJK character counts 2, a half-width one 1. 34 columns is 17 汉字 — the little screen's second line as measured by the display side on 2026-11-02 (10px type, 172px usable width, 17 汉字 or 28 ASCII characters) |
+| `briefMaxColumns` | number | `34` | Length cap for a ticket's `brief`, in character columns: a CJK character counts 2, a half-width one 1. 34 columns is 17 汉字 — the little screen's second line as measured on 2026-11-02 (10px type, 172px usable width, 17 汉字 or 28 ASCII characters) |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
 | `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string (or whitespace only) means "do not inject" |
 | `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off and leaves only the manual `dispatch_sweep` |
-| `zombieMinutes` | number | `20` | Silence after which an `open` / `running` ticket is reported once as a suspected zombie. An owner whose agent is gone from the live registry is `worker-gone` regardless of this value |
+| `zombieMinutes` | number | `20` | Silence after which an `open` / `running` ticket is reported once as a suspected zombie. An owner that is a uuid-shaped session id and no longer in the live registry is `worker-gone` regardless of this value. A short-label owner blinds `worker-gone` and leaves only this timeout as a backstop |
+| `noReportMinutes` | number | `5` | A `waiting` ticket carrying no report at all is announced once after sitting that long (the worker left without handing anything back). A threshold of its own, not `zombieMinutes`: the worker is already gone, so there is nothing left to wait for. A report landing ends the watch |
 | `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
 | `quietSweep` | boolean | `false` | Never wake the main session on a sweep, not even for a zombie ticket; tickets are still reopened, queued messages still reach live workers and closed tickets' reports are still cleared, and the main session reads reports itself |
 | `ownerSessionId` | string | empty | Session to wake; empty picks the c2c session from the QQ prefs file |
-| `qqPrefsPath` | string | `''` | Conversation-key to session-id map |
+| `qqPrefsPath` | string | path to the QQ prefs file | Conversation-key to session-id map; the default lives in `src/config.ts` |
 | `ownerOpenId` | string | empty | Owner openid, used when more than one c2c session exists |
 | `noWaitGuard` | boolean | `true` | Refuse main-session calls that would wait; workers are unaffected |
 | `maxCommandMs` | number | `30000` | Longest a single command may hold the main session |
@@ -76,20 +77,20 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 
 | Tool | Purpose |
 |---|---|
-| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying. `brief` is required: one short line within 34 columns |
+| `dispatch_open` | Open a ticket. Call it right after spawning the worker, before replying. `brief` is required: one short line within 34 columns; `owner` is the sub-session's real id (see "owner must be the sub-session's real id") |
 | `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
 | `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports. Every row carries `brief` |
 | `dispatch_send` | Queue one more message for a ticket's worker |
 | `dispatch_report` | Record a report on a ticket without ending it |
 | `dispatch_close` | Close a ticket once the work is delivered |
 | `dispatch_sweep` | Run a sweep now instead of waiting for the timer: reopen tickets, push queued messages to live 小鱼, clear reports left on closed tickets, judge the zombie tickets. It does not deliver reports |
-| `progress_note` | Push one line of progress straight to the owner's QQ; wakes no session and writes nothing to disk — call it once per chunk on long work |
+| `progress_note` | Push one line of progress straight to the owner's QQ while the main session itself is on a long job; wakes no session and writes nothing to disk. Workers do not call it — a worker's progress goes into the ticket with `dispatch_report` |
 
-Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot.
+Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four count as open and take a `maxOpen` slot. `waiting` is what the plugin records when it sees `subagent/end` (the worker session ended): it says the session stopped, not that anything was delivered. `done` still comes only from `dispatch_close`.
 
 ### The ticket `brief`
 
-Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` display columns (default 34 = 17 汉字, the second line measured at 10px / 172px on 2026-11-02). Anything longer is cut and closed with `…`.
+Besides the full `goal`, every ticket carries a `brief`: a one-line summary for the little screen's second line, at most `briefMaxColumns` character columns (default 34 = 17 汉字, the second line measured at 10px / 172px on 2026-11-02). Anything longer is cut and closed with `…`.
 
 `brief` is **required** (since 2026-11-03): `dispatch_open` rejects a missing one at the schema gate, and an empty, whitespace-only or punctuation-only one with "brief 必填，写一句 34 列以内的短话". Nothing is derived from `goal` any more — in practice the field was never filled in, every ticket fell back, and the second line was the goal cut off with an ellipsis again, which made the field pointless. Write a phrase, not a sentence: a 汉字 is 2 columns, so about 17 汉字 is the ceiling.
 
@@ -107,9 +108,47 @@ A ticket carries two queues, both lines in the same log, so a restart loses noth
 
 ![worker / ticket lifecycle (English)](docs/worker-ticket-lifecycle.en.png)
 
-The figure puts one ticket's whole life on one page: on the left M (the main session) opens the ticket, starts W and goes back to talking; in the middle W (the worker) does the work, reports and pings M; on the right the ticket walks `open → running → done`, and the far right column is how a sweep picks zombie tickets out.
+The figure puts one ticket's whole life on one page: on the left M (the main session) opens the ticket, starts W and goes back to talking; in the middle W (the worker) does the work, reports and pings M; on the right the ticket walks `open → running → waiting → done`, each state naming who is allowed to write it, and the far right column is how a sweep picks zombie tickets out.
 
 A ticket ends on two facts only: W delivered, and M called `dispatch_close`. Whether M's session still exists changes nothing — `/new` replacing the session, a host restart, or M simply forgetting does not turn a ticket into `done` on its own. There is exactly one revive gate: new input arriving after `done`, which the sweep reopens. `dropped` is a person's stop and stays shut.
+
+### Who writes status
+
+The ticket log is append-only: `status` is not a mutable field of a record but the payload of one append, folded into the latest value by `foldEvents`. Only these paths write it, and no worker path exists:
+
+- `dispatch_open` writes `open`, then one `running` when an owner is given
+- `dispatch_touch` — the main session's own edit
+- `dispatch_close` — writes `done` or `dropped`
+- the sweep — only reopens a `done` ticket that got mail after closing, and touches nothing else
+- the plugin — on `subagent/end` it turns a ticket still in `open` / `running` into `waiting`
+
+A worker holds only `dispatch_report` and `dispatch_send`, and both merely append queue rows. So "why is this ticket still running" is a question for the main session, the sweep, or the host event — never for the worker: it has neither the right nor the code path.
+
+![Ticket state machine (English)](docs/ticket-state-machine.en.png)
+
+This one is only about status: six statuses, who writes each transition, which edges the code pins down, and a legend that also carries "waiting is not delivery" plus the sweep's own `noReportMinutes` tier.
+
+### A worker ending means waiting, not delivery
+
+The host emits `subagent/end`: the payload carries the sub-session `id` and a `stopReason` (`completed` / `aborted` / `error` / `max-tokens` / `refusal`), and `agent/disposed` is the agent-recycling event. The dispatcher subscribes to `subagent/end`: when the owner matches that id and the ticket is still `open` / `running`, it appends `waiting` (the `note` carries the `stopReason` plus how many reports the ticket already held, e.g. "worker 结束（completed），票内无报告" or "worker 结束（error），票内 2 条报告"), and **never `done`**.
+
+The split is deliberate: the event says the session stopped, not that the work was finished and handed back. A worker may have finished a round and be waiting for a reply, or died halfway; the event looks the same either way. `done` has exactly one source — `dispatch_close`. `waiting` only puts "someone should look at this" onto `dispatch_list`; do not read it as delivery, it does not even guarantee a report exists.
+
+### Waiting is not delivery
+
+There are two kinds of `waiting`: one where the worker handed work back and one where it walked off mid-task. Exactly one fact tells them apart — whether the ticket holds any report: the event that lands a ticket in `waiting` writes the count into its `note` (with zero reports the note says 「票内无报告」), and the `reports` array `dispatch_list` reads carries the same number. That event is the dotted arrow in the figure.
+
+The sweep watches the report-less kind: once a ticket has sat in `waiting` for `noReportMinutes` (default 5) without a single report arriving, it is announced once, and the line says what to do — `dispatch_send` the worker to ask for a report, or go look at what it actually did. As soon as a report lands the ticket stops being a candidate and its fingerprint is dropped by the sweep, so it never fires twice. That branch reads only "is there a report", never `zombieMinutes`: the worker is already gone, there is nothing left to wait for.
+
+That write still calms the `open` / `running` sweep: once W exits, the ticket no longer sits in `running`, so `silent` / `worker-gone` stop firing and only the "nothing handed back" branch takes over. `worker-gone` is left for tickets whose event never arrived — a plugin restart, a ticket opened before the subscription existed, or an owner that is not a real id.
+
+### owner must be the sub-session's real id
+
+`dispatch_open`'s `owner` must be the session id `subagent` returned (a uuid; bare or with the `session-` prefix), **not a short label** like "restart the fish".
+
+`worker-gone` recognises only the uuid shape (`looksLikeSessionId`) and looks the owner up in `AgentRegistry`, whose key is `agent.session.id`. A short label is not in the live registry; a miss there does not mean dead, so the plugin can only conclude "cannot tell", and the whole `worker-gone` check goes blind. It falls back to `silent`: one announcement once the last report is `zombieMinutes` old (default 20). And the fingerprint is announced once — a main session that misses that followup never hears about the ticket again.
+
+The event side is the same: when the id in `subagent/end` does not match the owner, the ticket never turns `waiting`. One short label switches off both safety nets at once, and the ticket then depends on somebody remembering it.
 
 The figure is generated by `docs/worker-ticket-lifecycle-i18n.py`: after editing the wording run `python3 docs/worker-ticket-lifecycle-i18n.py en` (or `zh`), and `CHECK=1` runs the text-overflow self-check.
 
@@ -119,7 +158,7 @@ Open the ticket, hand off, reply. That order. The ticket is a note to your futur
 
 When a worker needs a decision, it writes the question into `note`, switches the ticket to `blocked`, and lets the main session answer it, ask the person, or drop the work.
 
-Two things belong in every task you hand off: the ticket id (so the worker reports back with `dispatch_report`) and the progress duty (call `progress_note` once per chunk). Long work without progress notes leaves the person staring at a silent chat. Anything the person adds halfway through goes into the ticket with `dispatch_send`; do not paraphrase it away.
+Four things belong in every task you hand off: the ticket id, the progress duty (one `dispatch_report` per chunk — never send a worker after `progress_note`, which pushes straight to the phone and leaves the ticket empty), the two-step hand-back (report into the ticket, then `send_message` to ping the main session), and `owner` as the real id `subagent` returned rather than a label. Long work without progress leaves the person staring at a silent chat. Anything the person adds halfway through goes into the ticket with `dispatch_send`; do not paraphrase it away.
 
 ## The waiting guard
 
@@ -149,16 +188,17 @@ Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is
 
 Every `sweepMinutes` (default 5; `0` turns the timer off and leaves only the manual `dispatch_sweep`) the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail (status only, the owner is not woken), push queued messages to workers that are still alive, clear the reports left on closed tickets, and judge the zombie tickets — one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking) only when a zombie is found. Reports are never pushed: an open ticket's reports stay pending and the main session reads them with `dispatch_list`. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory.
 
-Only `open` and `running` tickets are zombie candidates. `waiting` / `blocked` mean a person is holding the ticket and are skipped; `done` / `dropped` are over. There are two judgements:
+Two pools of candidates. The main one is `open` and `running`; `blocked` is held by a person and skipped, and `done` / `dropped` are over. The second is a `waiting` ticket that carries **no report at all** — the worker left without handing anything back, and nothing looked at such a ticket once it landed in `waiting`. That branch runs on `noReportMinutes` (default 5) and never on `zombieMinutes`. A `waiting` ticket that already holds a report is not a candidate: that is work for the main session to collect, not a lost ticket. The main pool has two judgements:
 
-- `worker-gone`: when the owner is a uuid-shaped agent id (bare uuid or with a `session-` prefix) it is looked up in `AgentRegistry` — the registry keys on `agent.session.id`, the same id the ticket records. A missing agent is dead no matter how recently the ticket moved. A ticket younger than 2 minutes is spared, because `dispatch_open` writes the owner a few seconds before the subagent actually registers.
-- `silent`: an owner that is a short label (`重启小鱼`, say) cannot be looked up at all — short labels are not in the live registry, so a lookup would always miss. Those tickets are reported only after `zombieMinutes` (default 20) without progress, and progress means the last report, not a mere `dispatch_touch`.
+- `worker-gone`: when the owner is a uuid-shaped sub-session id (bare uuid or with a `session-` prefix) it is looked up in `AgentRegistry` — the registry keys on `agent.session.id`, the same id the ticket records. A missing agent is dead no matter how recently the ticket moved. A ticket younger than 2 minutes is spared, because `dispatch_open` writes the owner a few seconds before the subagent actually registers. A ticket whose owner is a short label never reaches this branch.
+- `silent`: an owner that is not a uuid cannot be looked up at all, so only time is left — the one branch a short-label ticket can still trip, and only after `zombieMinutes` (default 20) without progress, where progress means the last report rather than a mere `dispatch_touch`.
+- `no-report`: `waiting` with `reports.length === 0`, announced once it has sat in `waiting` for `noReportMinutes` (default 5). The live registry is not consulted — `waiting` already means the worker is gone. One report ending up in the log removes it from the pool, and the sweep drops its fingerprint on the way out.
 
-The throttle is an in-memory fingerprint, `${reports.length}|${lastActivity}|${status}`. It deliberately avoids `updatedAt`: a sweep's own writes (steering a queued message to a live worker, clearing a closed ticket) append events and refresh that field, so an `updatedAt` key would announce the same ticket again on the next round. The last report's time and the status only move on a real report or a status change. With no new report and no status change a ticket is announced once; a process restart costs at most one repeat.
+The throttle is an in-memory fingerprint, `${reports.length}|${lastActivity}|${status}`. It deliberately avoids `updatedAt`: a sweep's own writes (steering a queued message to a live worker, clearing a closed ticket) append events and refresh that field, so an `updatedAt` key would announce the same ticket again on the next round. The last report's time and the status only move on a real report or a status change. The `no-report` branch rides the same key: the count moves from 0 to 1 exactly when the ticket stops being a candidate, and the sweep never flips a ticket back to `open` (only a `done` ticket reopens), so the key cannot go stale in a way that re-fires. With no new report and no status change a ticket is announced once; a process restart costs at most one repeat.
 
-A summary is pushed only when something is found. When nothing is found the sweep is completely silent — not a single character. The line carries the ticket id, how long it has been idle, which judgement fired, how many reports are unread, and the first 40 characters of the goal; at most three tickets are listed, and the rest are counted as "另有 N 张". Report bodies stay out: a sweep does not deliver reports, and folding one in would make this a second copy of it.
+A summary is pushed only when something is found. When nothing is found the sweep is completely silent — not a single character. The line carries the ticket id, how long it has been idle, which judgement fired, how many reports are unread, and the first 40 characters of the goal; at most three tickets are listed, and the rest are counted as "另有 N 张". A `no-report` hit is worded to be acted on directly — "ticket X's worker left but the ticket holds no report; `dispatch_send` it for one, or go look at what it did". Report bodies stay out: a sweep does not deliver reports, and folding one in would make this a second copy of it.
 
-A sweep only reports; it never finishes a ticket for the main session. A ticket stays `running` even if its worker is dead, and nothing is closed on the ticket's behalf. With `quietSweep: true` the zombie step pushes nothing and remembers no fingerprints either, so a silent round cannot swallow the first real announcement. One `followup` costs a whole main-session turn with all of its context, so quiet mode still reopens tickets, steers live workers and clears the reports left on closed tickets; an open ticket's reports are left untouched, so an outside script can still read the log and push them — this repository ships none, it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer).
+A sweep only reports; it keeps no books. A `worker-gone` / `silent` / `no-report` hit means throttle plus one followup — no status, no note; the ticket stays exactly where it was. The only writes a round makes are delivery marks: queued messages handed to a live worker, and reports on closed tickets cleared with `delivered`. A dead W does not close the ticket either; that is the plugin's `subagent/end` write, and it lands on `waiting`, not `done`. With `quietSweep: true` the zombie step pushes nothing and remembers no fingerprints either, so a silent round cannot swallow the first real announcement. One `followup` costs a whole main-session turn with all of its context, so quiet mode still reopens tickets, steers live workers and clears the reports left on closed tickets; an open ticket's reports are left untouched, so an outside script can still read the log and push them — this repository ships none, it is a small script plus a timer (say `~/.dsh/dispatcher-notify.sh` on a `systemd` timer).
 
 This is the prototype's `Passes` heartbeat plus `evaluateDue`, with the input delivery work kept and the evaluation dropped: nothing in a sweep asks a model anything.
 
