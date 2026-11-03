@@ -120,4 +120,36 @@ describe('TicketStore', () => {
     appendFileSync(file, '{"id":"t-broken"')
     expect(store.list()).toHaveLength(1)
   })
+
+  // 崩溃留下的半行没有换行符：下一次 append 直接粘上去的话，粘出来的整行会被当坏行丢掉，
+  // 被丢的可能正是 done 或 delivered。
+  it('does not glue the next event onto a torn last line', () => {
+    const file = tempFile()
+    const warnings: string[] = []
+    const store = new TicketStore(file, (message) => warnings.push(message))
+    const first = store.open('first')
+    appendFileSync(file, '{"id":"t-torn","at":"2026-11-01T00:00:00.000Z"')
+
+    const second = store.open('second')
+    const listed = store.list()
+    expect(listed.map((ticket) => ticket.id)).toEqual([first.id, second.id])
+    // 坏行不是悄悄消失的：跳过之后留一条 warn。
+    expect(warnings.join('\n')).toMatch(/skipped 1 line/)
+  })
+
+  // 一行能 parse 但不是事件（null）：readEvents 跳过它，foldEvents 也不许在 event.id 上抛，
+  // 否则一次脏行就把整套 dispatch_* 打死。
+  it('skips a null line and still reads the events after it', () => {
+    const file = tempFile()
+    const store = new TicketStore(file)
+    const first = store.open('first')
+    appendFileSync(file, 'null\n')
+    const second = store.open('second')
+
+    const listed = store.list()
+    expect(listed.map((ticket) => ticket.id)).toEqual([first.id, second.id])
+    expect(() =>
+      foldEvents([null as never, { id: 't-1', at: '2026-11-01T00:00:00.000Z', goal: 'still folds' }]),
+    ).not.toThrow()
+  })
 })

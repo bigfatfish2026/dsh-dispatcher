@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
 import type { Config } from '../src/config'
-import { apply } from '../src/index'
+import { WORKER_FORBIDDEN_TOOLS, apply } from '../src/index'
 
 const tempDirs: string[] = []
 
@@ -188,10 +188,28 @@ describe('apply', () => {
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
 
-    expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS]])
+    // 配置里的记忆写工具 + 代码里那份不可覆盖的票工具。
+    expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
     // A worker never gets an allow list, and never reaches `restrict` twice.
     expect(host.restricted).toHaveLength(1)
-    expect(host.infos.join('\n')).toContain('worker subagents hide 7')
+    expect(host.infos.join('\n')).toContain('worker subagents hide 12')
+  })
+
+  // README「谁写 status」：worker 手上只该有 dispatch_report 和 dispatch_send，
+  // 票的 status 只归主会话和巡检。这份名单写死在代码里，operator 改
+  // workerDenyTools 也不该把 dispatch_close 之类的放回 worker 手里。
+  it('keeps the ticket tools away from a worker whatever the config says', () => {
+    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
+    apply(host.ctx as never, testConfig({ workerDenyTools: ['memory_save'] }))
+
+    // 主会话侧一个不少：白名单里那几个名字照样在。
+    expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
+    for (const name of WORKER_FORBIDDEN_TOOLS) expect(host.restricted[0]).toContain(name)
+
+    for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
+    expect(host.denied).toHaveLength(1)
+    for (const name of WORKER_FORBIDDEN_TOOLS) expect(host.denied[0]).toContain(name)
+    expect(host.denied[0]).toContain('memory_save')
   })
 
   // Two switches, two rules: trimming the main session and taking memory writes
@@ -202,7 +220,7 @@ describe('apply', () => {
 
     expect(host.restricted).toEqual([])
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
-    expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS]])
+    expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
   })
 
   it('leaves the worker alone when workerToolDeny is off', () => {
