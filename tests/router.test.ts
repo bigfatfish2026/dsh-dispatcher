@@ -94,11 +94,11 @@ describe('installRouter', () => {
     expect(filters).toEqual([[...DEFAULT_ROUTER_TOOLS]])
   })
 
-  it('never touches a worker session', () => {
+  it('never touches a worker session tool schema', () => {
     const { agent, filters, hooks } = fakeAgent({ origin: 'subagent', registered: [...DEFAULT_ROUTER_TOOLS] })
     const outcome = installRouter(
       agent,
-      { allow: DEFAULT_ROUTER_TOOLS, escapeFile: join(tempDir(), 'no-restrict') },
+      { allow: DEFAULT_ROUTER_TOOLS, escapeFile: join(tempDir(), 'no-restrict'), pruneWorkerPrompt: false },
       new WeakSet(),
     )
     expect(outcome).toBe('worker')
@@ -244,11 +244,12 @@ describe('bindRouter', () => {
     expect(hookStops).toEqual([0])
   })
 
-  it('leaves a worker session alone, on every pass', () => {
+  it('leaves a worker session alone, on every pass, when the prompt prune is off', () => {
     const { agent, filters, hooks } = fakeAgent({ origin: 'subagent', registered: ['dispatch_open'] })
     const binding = bindRouter(agent, {
       allow: ALLOW,
       escapeFile: join(tempDir(), 'no-restrict'),
+      pruneWorkerPrompt: false,
       log: () => {},
     })
     expect(binding.outcome()).toBe('worker')
@@ -558,6 +559,115 @@ describe('worker deny list', () => {
     expect(binding.outcome()).toBe('denied')
     expect(fake.denies).toEqual([[...DEFAULT_WORKER_DENY_TOOLS]])
     expect(fake.filters).toEqual([])
+  })
+})
+
+describe('worker prompt prune', () => {
+  /**
+   * A worker prompt as the plugins assemble it: every tool plugin wrote its own
+   * guidance section, and the worker can actually call most of those tools. The
+   * section still goes, because a worker's tool set comes from its preset and
+   * the static list can never be trusted to match it.
+   */
+  function workerAssembly() {
+    return {
+      // Deliberately visible: `pruneWorkerPrompt` must not depend on this.
+      tools: [{ name: 'bash' }, { name: 'browser_navigate' }, { name: 'read_mcp_resource' }],
+      sections: [
+        { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.' },
+        { name: 'deployment:persona-prefix', text: '你是蓝色大肥鱼。' },
+        { name: 'dispatcher:handoff', text: '【派活规矩 · dispatcher】' },
+        { name: 'tool:browser', text: 'Use browser_navigate to open a page.' },
+        { name: 'tool:bash', text: 'Check the exit code on every bash result.' },
+        { name: 'mcp:github', text: 'Use mcp__github__search_code to find code.' },
+        { name: 'mcp-resource-servers', text: 'Use read_mcp_resource with one of these names.' },
+      ],
+    }
+  }
+
+  it('drops every tool section from a worker prompt, visible tools or not', async () => {
+    const fake = fakeAgent({ origin: 'subagent', registered: ['memory_save', 'bash'] })
+    bindWorkerDeny(fake.agent, {
+      allow: DEFAULT_ROUTER_TOOLS,
+      deny: ['memory_save'],
+      escapeFile: join(tempDir(), 'no-restrict'),
+      log: fake.log,
+    })
+    expect(fake.hooks).toHaveLength(1)
+    const assembly = workerAssembly()
+    const pruned = await fake.hooks[0](assembly, undefined, async () => assembly)
+    expect(pruned.sections.map((section) => section.name)).toEqual([
+      'harness:identity',
+      'deployment:persona-prefix',
+      'dispatcher:handoff',
+    ])
+  })
+
+  it('installs the pass once and disposes it with the scope', async () => {
+    const fake = fakeAgent({ origin: 'subagent', registered: ['memory_save', 'bash'] })
+    const binding = bindWorkerDeny(fake.agent, {
+      allow: DEFAULT_ROUTER_TOOLS,
+      deny: ['memory_save'],
+      escapeFile: join(tempDir(), 'no-restrict'),
+      log: fake.log,
+    })
+    expect(fake.hooks).toHaveLength(1)
+    binding.sync()
+    binding.sync()
+    // The verdict never changes, so there is nothing to reinstall.
+    expect(fake.hooks).toHaveLength(1)
+    binding.dispose()
+    expect(fake.hookStops).toEqual([0])
+  })
+
+  it('trims the prompt even with no deny list at all', () => {
+    // The two switches are independent: an operator who turns workerToolDeny off
+    // still gets the prompt trimmed unless they turn this one off too.
+    const fake = fakeAgent({ origin: 'subagent', registered: ['bash'] })
+    const binding = bindWorkerDeny(fake.agent, {
+      allow: DEFAULT_ROUTER_TOOLS,
+      escapeFile: join(tempDir(), 'no-restrict'),
+      log: fake.log,
+    })
+    expect(binding.outcome()).toBe('worker')
+    expect(fake.hooks).toHaveLength(1)
+  })
+
+  it('leaves the worker prompt alone when pruneWorkerPrompt is false', async () => {
+    const fake = fakeAgent({ origin: 'subagent', registered: ['memory_save', 'bash'] })
+    const binding = bindWorkerDeny(fake.agent, {
+      allow: DEFAULT_ROUTER_TOOLS,
+      deny: ['memory_save'],
+      pruneWorkerPrompt: false,
+      escapeFile: join(tempDir(), 'no-restrict'),
+      log: fake.log,
+    })
+    expect(binding.outcome()).toBe('denied')
+    expect(fake.denies).toEqual([['memory_save']])
+    expect(fake.hooks).toEqual([])
+  })
+
+  it('still prunes nothing but hidden tools on the main session', async () => {
+    // The main session keeps the old verdict: a section stays while one of its
+    // tools is visible. Same assembly, opposite answer on `tool:bash`.
+    const registered = ['bash', 'dispatch_open']
+    const fake = fakeAgent({ origin: undefined, registered })
+    bindRouter(fake.agent, {
+      allow: ['bash', 'dispatch_open'],
+      escapeFile: join(tempDir(), 'no-restrict'),
+      log: fake.log,
+    })
+    expect(fake.hooks).toHaveLength(1)
+    const assembly = workerAssembly()
+    const pruned = await fake.hooks[0](assembly, undefined, async () => assembly)
+    expect(pruned.sections.map((section) => section.name)).toEqual([
+      'harness:identity',
+      'deployment:persona-prefix',
+      'dispatcher:handoff',
+      'tool:browser',
+      'tool:bash',
+      'mcp-resource-servers',
+    ])
   })
 })
 

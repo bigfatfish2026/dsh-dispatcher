@@ -409,4 +409,57 @@ describe('installPromptFilter', () => {
     expect(installed).toBe(false)
     expect(messages[0]).toContain('system-prompt/assemble')
   })
+
+  it('drops every tool section when asked to, and only those', async () => {
+    // The worker verdict: it does not ask whether a tool is visible, because a
+    // worker's tool set is the preset's business and the prompt can only be
+    // wrong about it. Persona, hand-off rules and policy stay.
+    const { scope, hooks } = fakeScope()
+    installPromptFilter(scope, { allow: [], dropAllToolSections: true })
+    const assembly: PromptAssembly = {
+      tools: [{ name: 'bash' }, { name: 'browser_navigate' }],
+      sections: [
+        { name: 'harness:identity', text: 'You are an AI agent.' },
+        { name: 'deployment:persona-suffix', text: '说话短一点。' },
+        { name: 'dispatcher:handoff', text: '派完立刻 dispatch_open 记票。' },
+        { name: 'mcp-server-notice', text: 'not a tool section' },
+        { name: 'tool:bash', text: 'Check the exit code.' },
+        { name: 'tool:browser', text: 'Use browser_navigate.' },
+        { name: 'mcp:github', text: 'Use mcp__github__search_code.' },
+        { name: 'mcp-resource-servers', text: 'Use read_mcp_resource.' },
+      ],
+    }
+    const out = await hooks[0](assembly, {}, () => Promise.resolve(assembly))
+    expect(names(out)).toEqual([
+      'harness:identity',
+      'deployment:persona-suffix',
+      'dispatcher:handoff',
+      'mcp-server-notice',
+    ])
+  })
+})
+
+describe('pruneToolSections with dropAllToolSections', () => {
+  it('takes every tool section, even one whose tools are still visible', () => {
+    const assembly: PromptAssembly = {
+      tools: [{ name: 'bash' }],
+      sections: [
+        { name: 'harness:identity', text: 'You are an AI agent.' },
+        { name: 'tool:bash', text: 'Check the exit code.' },
+      ],
+    }
+    const pruned = pruneToolSections(assembly, [], { dropAllToolSections: true })
+    expect(pruned.removed).toEqual(['tool:bash'])
+    expect(names(pruned.assembly)).toEqual(['harness:identity'])
+  })
+
+  it('hands back the same assembly when there was nothing to drop', () => {
+    const assembly: PromptAssembly = {
+      tools: [],
+      sections: [{ name: 'harness:identity', text: 'You are an AI agent.' }],
+    }
+    const pruned = pruneToolSections(assembly, [], { dropAllToolSections: true })
+    expect(pruned.removed).toEqual([])
+    expect(pruned.assembly).toBe(assembly)
+  })
 })

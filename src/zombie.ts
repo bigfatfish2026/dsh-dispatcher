@@ -1,3 +1,4 @@
+import { hasIdFragment } from './ids'
 import { minutesSince, pending } from './store'
 import type { TicketSnapshot } from './store'
 
@@ -40,7 +41,12 @@ export interface ZombieHit {
   fingerprint: string
 }
 
-export type AliveLookup = (owner: string) => boolean | undefined
+/**
+ * 查活：`exact` 为真时按票里的 `ownerId`（会话 id 原文）精确比对，查不到就是
+ * `false`，不再用「抽不出 hex 片段就当没法比」那道兜底；为假时还是老的 owner
+ * 规则（裸 uuid / `session-` / 短标签都认）。
+ */
+export type AliveLookup = (id: string, exact?: boolean) => boolean | undefined
 
 export interface ZombieOptions {
   now?: Date
@@ -51,24 +57,14 @@ export interface ZombieOptions {
   /** 新建票宽限（分钟）。 */
   freshMinutes?: number
   /**
-   * 按 owner 查活。返回 true/false 表示真查到了；返回 undefined 表示查不到
-   * （owner 是短标签，或者运行环境没有 agents 服务）。
+   * 按 owner 查活。三态：
+   *
+   * - `true`  活表里有这个会话；
+   * - `false` 查得到、里面确实没这个会话 → 可以走 worker-gone 快路；
+   * - `undefined` 没法判断（没有 agents 服务、或者 owner 是「小丙」这种抽不出
+   *   id 片段的纯文字标签）→ 只走 silent 慢路。
    */
   isAlive?: AliveLookup
-}
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/**
- * owner 是不是一个能拿去查活表的 session id。
- *
- * 票的 owner 是主会话随手填的：现场既有裸 uuid（和 sessions 目录同名），也有
- * 「重启小鱼」这种短标签。短标签根本不在活表里，拿它查必然查不到，所以那种票
- * 只能走 silent 档，不能判 worker-gone——否则每张短标签票都会被误杀。
- */
-export function looksLikeSessionId(owner: string | undefined): boolean {
-  if (!owner) return false
-  return UUID.test(owner) || UUID.test(owner.replace(/^session-/, ''))
 }
 
 /**
@@ -124,11 +120,28 @@ export function evaluateZombies(tickets: readonly TicketSnapshot[], options: Zom
 
     if (!isCandidate(ticket)) continue
     const ageMinutes = minutesSince(ticket.createdAt, now)
-    const alive = ticket.owner && looksLikeSessionId(ticket.owner) ? options.isAlive?.(ticket.owner) : undefined
+    // 有 ownerId 就用它精确查（main session 抄的是 spawn 原文，不会填错）；
+    // 老票没有这个字段，照旧拿人话 owner 去碰运气抽 hex 片段。
+    const exact = Boolean(ticket.ownerId)
+    const key = ticket.ownerId ?? ticket.owner
+    const alive = key ? options.isAlive?.(key, exact) : undefined
+    // 有 ownerId 就说明「这个 id 是能拿来比的」，不用再抽片段。
+    const identified = exact || hasIdFragment(ticket.owner)
 
     let reason: ZombieReason | undefined
-    // 前者优先：owner 确实查不到活了，票多久没动静都救不回来。
-    if (alive === false && ageMinutes >= freshMinutes) reason = 'worker-gone'
+    // 快路：owner 带着 id 片段（裸 uuid、`session-xxx`、`subagent 34b183b9`）或者
+    // 票里存了 ownerId，活表扫完确实没这个会话 → 立刻判死，不用等二十分钟静默。
+    //
+    // 三道门槛缺一不可：
+    //   1. `isAlive` 返回的必须是明确的 false，undefined（没有 agents 服务、
+    //      活表空着、或者「小丙」这种纯文字标签无从比对）一律不算；
+    //   2. 手上有能拿去比对的标识：有 ownerId，或者 owner 自己抽得出 id 片段——
+    //      纯文字标签对不上活表不等于会话没了，否则刚派出去的活当场变僵尸；
+    //   3. 票已经过了新建宽限，给 owner 落日志和 agent 注册之间那几秒留余量。
+    //
+    // 命中不了并不可惜：慢路还在，长时间没动静照样按 silent 报。
+    // 反过来「匹配不上就当成活着」是错的——那会把真僵尸一直挂着。
+    if (alive === false && identified && ageMinutes >= freshMinutes) reason = 'worker-gone'
     else if (idleMinutes >= zombieMinutes) reason = 'silent'
     if (!reason) continue
 

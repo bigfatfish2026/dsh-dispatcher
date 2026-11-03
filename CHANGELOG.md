@@ -2,6 +2,22 @@
 
 ## 未发布 - 2026-11-03
 
+### Added
+
+2026-11-03 — 票的 owner 拆成两栏：`owner` 是人话标签（屏幕上显示的就是它，「t4 查qqbot PR」这种），新增可选 `ownerId` 存 spawn 返回的会话 id（uuid，`session-` 前缀也行）。背景是旧规矩：巡检只能从自由文本 owner 里抽 ≥6 位 hex 片段去活表比对，主会话写中文标签就抽不出来，`worker-gone` 永远不触发，票只能等 20 分钟 `silent`。
+
+`dispatch_open` 带 `ownerId` 时开票前先查一次活表：不在表里直接拒绝开票（提示「ownerId 不在活表，可能是填错了或小鱼已经结束」），一个事件都不写；查不到 agents 服务（没 get、或活表空着）时放行并记一条 warn。巡检那侧 `agentAlive` 多一个 `exact` 档：`ownerId` 存在就只按 `idVariants` 的几种写法精确比对，扫完没有就是 `false`，不再受 `hasIdFragment` 那道门限制；`worker-gone` 的其它条件（2 分钟新建宽限）原样。`subagent/end` 对票、以及把排队消息递回 worker 也优先用 `ownerId`。老票没有这个字段，`foldEvents` 读到就是 undefined，完全走旧路径。巡检仍然只推提醒、绝不写票状态。
+
+Tests: 新增 `tests/owner-id.test.ts` 10 条（fold 认字段、ownerId 命中活表开票、带前缀、不在活表拒开票且不落盘、没有 get 时放行并记日志、3 分钟 worker-gone、命中不推、老票中文标签仍 silent、老票短 hex 仍 worker-gone、subagent/end 按 ownerId 落 waiting）。全量 19 个文件 216 条全绿，typecheck 干净。
+
+2026-11-03 — worker subagent 的提示词也过一遍剪枝。原来只有主会话走 `bindPromptFilter`（`bindWorkerDeny` 那条分支没装），所以各插件无条件写进提示词的工具说明段（`tool:*`、`mcp:*`、`mcp-resource-servers`）在每条小鱼会话里都吃满：browser 329 字、bilibili 370、bili_notify 379、jobs 384、goal 530、workflow 327、mcp-resource-servers 165、mcp:github 1828，合计 4312 字 ≈ 940 token。
+
+口径跟主会话反着：worker 手上有什么工具由档位决定，静态清单一定对不上，所以**整族全剪**，不判断某个工具还在不在。判据没另写一套，`pruneToolSections` / `sectionToolFamily` 原样复用，只加一个 `dropAllToolSections` 开关；persona、plan policy、手递手规程这些非工具段照旧不碰。剪枝一次装、不跟着 `tools/change` 重装（结论跟 deny 名单无关），disposer 挂在 agent scope 上（`dsh-dispatcher.worker-prompt`），跟 `bindWorkerDeny` 一样撤得干净。
+
+新增配置 `workerPromptPrune`（boolean，默认 `true`），关掉就回退到插件自己装配的原样；它跟 `workerToolDeny` 独立，一个管手上有什么工具，一个管提示词里还写不写。主会话路径一个字没改。
+
+Tests: `tests/prompt.test.ts` 加 3 条（全剪、非工具段留着、无可剪时原样返回），`tests/router.test.ts` 加 worker prompt prune 一组 5 条（全剪、只装一次并随 scope 撤掉、没 deny 名单也剪、`pruneWorkerPrompt: false` 不剪、主会话同一份 assembly 仍旧只剪被藏起来的段），`tests/apply.test.ts` 加 2 条把开关独立性钉在 `apply` 那层（`workerToolDeny: false` 时提示词照样剪、`workerPromptPrune: false` 时 deny 照装但提示词不碰）。全量 16 个文件 185 条全绿，typecheck 干净。
+
 ### Changed
 
 2026-11-03 — 主会话白名单里不再写死别的插件注册的工具名。`DEFAULT_ROUTER_TOOLS` 摘掉四项（一个发文件的、三个小屏的），32 项；`qqPrefsPath` 的默认值也从一串路径改成空字符串。这个仓库只讲自己的口径：谁家的工具该留在主会话、会话映射文件放在哪，都由 operator 在 cordis.yml 里点名。
@@ -11,6 +27,16 @@
 行为等价靠配置：装它的那份 profile 的 `cordis.patch.yml` 里，dispatcher 那块补上 `extraRouterTools` 四项和 `qqPrefsPath` 的原路径，主会话拿到的工具和以前一样。
 
 Tests: `tests/router-allow-list.test.ts` 9 条——缺省时白名单等于 `DEFAULT_ROUTER_TOOLS`、配了 extras 原样接在后面、重复不出现两次、空串不进表、两段都空就是空、`Config({})` 的 `extraRouterTools` / `qqPrefsPath` 缺省值、给了值原样读进来。全量 15 个文件 164 条全绿，typecheck 干净。
+
+### Fixed
+
+2026-11-03 — 短标签 owner 的僵尸票不再得等满 20 分钟。原来 `zombie.ts` 先拿 `looksLikeSessionId` 卡一道：owner 不像 uuid 就连活表都不查，`worker-gone` 整条快路被跳过，`subagent 34b183b9` 这种短标签票只能退到 `silent` 慢路。
+
+现在判活不看形态，看「owner 里有没有能拿去比对的东西」：`idVariants` / `matchesId` / `hexFragments` 从 `src/index.ts` 抽到新文件 `src/ids.ts`（`subagent/end` 收票和判活共用同一份，不再各留一套），`agentAlive` 拿 owner 逐个比对活表——先按 `session-` 前缀归一，再拿 ≥6 位 uuid 片段做前缀比对。扫完确实没有这个会话才判 `worker-gone`，短标签票也能立刻判死。慢路原样保留：匹配不上但长时间没动静的，照样按 `silent` 推。
+
+「对不上」和「没有这个会话」分开：`hasIdFragment()` 抽不出片段的纯文字标签（`小丙`、`重启小鱼`、`fix-check-1`）不再当成 dead——活表里没有它只说明没法比，否则刚派出去的活当场变僵尸。`agentAlive` 在活表为空（服务还没就绪）时也返回 `undefined`，不判死。sweep 不写票 status 这条一个字没动。
+
+Tests: 新增 `tests/ids.test.ts` 11 条（前缀归一、片段前缀、大小写、6 位阈值、纯中文不匹配、`hasIdFragment`），`tests/zombie-owner-match.test.ts` 10 条（短标签命中活会话不判、扫不到立刻 `worker-gone`、中文标签不误判、挂久了仍走 `silent`、full uuid 行为不变、新建 2 分钟宽限、活表空不判死、纯中文防住手滑的 `false`，外加两条 `apply` 端到端：sweep 只推该死的那张、活表里都在就一条不推）。全量 18 个文件 206 条全绿，`tsc --noEmit` 干净。README 中英两份和 `docs/worker-ticket-lifecycle` 图同步。
 
 ## 1.4.0 - 2026-11-03
 

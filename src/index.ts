@@ -18,6 +18,7 @@ import {
   resolveStateFile,
 } from './store'
 import type { TicketSnapshot, TicketStatus } from './store'
+import { hasIdFragment, idVariants, matchesId } from './ids'
 import { evaluateZombies, shouldPush, summarizeZombies } from './zombie'
 import { isWorkerSession, noWaitReason } from './no-wait'
 import { sendProgress } from './progress'
@@ -61,7 +62,10 @@ export interface TicketView {
   status: TicketStatus
   dir?: string
   note?: string
+  /** Human label for the worker; what the little screen shows. */
   owner?: string
+  /** The worker's session id, when the ticket was opened with one. */
+  ownerId?: string
   ageMinutes: number
   stale: boolean
   /** Messages queued for the worker that have not reached it yet. */
@@ -93,6 +97,7 @@ export function toView(
   if (ticket.dir) view.dir = ticket.dir
   if (ticket.note) view.note = ticket.note
   if (ticket.owner) view.owner = ticket.owner
+  if (ticket.ownerId) view.ownerId = ticket.ownerId
   return view
 }
 
@@ -112,6 +117,7 @@ const ticketProperties = {  id: { type: 'string' },
   dir: { type: 'string' },
   note: { type: 'string' },
   owner: { type: 'string' },
+  ownerId: { type: 'string' },
   ageMinutes: { type: 'number' },
   stale: { type: 'boolean' },
   pendingInputs: { type: 'number' },
@@ -232,7 +238,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
             'Required. The one line the little screen shows under the ticket title — write a short phrase, not a sentence. At most briefMaxColumns character columns (34 by default), and a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected; nothing is derived from goal any more.',
         },
         dir: { type: 'string', description: 'Working directory the 小鱼 uses, if any.' },
-        owner: { type: 'string', description: '小鱼 handle: subagent id or a short label.' },
+        owner: {
+          type: 'string',
+          description:
+            'The 小鱼 in plain words — this is the label the little screen shows, e.g. 「t4 查qqbot PR」. Human label, not an id.',
+        },
+        ownerId: {
+          type: 'string',
+          description:
+            'Optional but strongly recommended: the raw session id `spawn` returned for this 小鱼 (uuid, a leading session- is fine). Copy it verbatim — do not retype it from memory. Only with ownerId can the zombie sweep tell worker-gone right away; without it a dead worker is only noticed after the 20 minute silent threshold, and a Chinese label can never be matched at all. If the id is not in the live agent table the ticket is refused.',
+        },
       },
       output: {
         schema: {
@@ -262,11 +277,31 @@ export function apply(ctx: Context, config: ConfigShape): void {
           )
         }
         const brief = truncateColumns(String(args.brief).trim(), config.briefMaxColumns)
+        const owner = typeof args.owner === 'string' ? args.owner.trim() : ''
+        const ownerId = typeof args.ownerId === 'string' ? args.ownerId.trim() : ''
+        // ownerId 是拿来判活的，填错了比不填更坏：巡检会立刻把这票当 worker-gone。
+        // 所以开票前先问一次活表。查不到 agents 服务（还没就绪）时放行 + 记日志，
+        // 不能因为服务没起来就把活堵死。
+        if (ownerId) {
+          const alive = agentAlive(ownerId, true)
+          if (alive === false) {
+            throw new Error(
+              `ownerId 不在活表，可能是填错了或小鱼已经结束：${ownerId}。填 spawn 返回的原始 session id，或者去掉 ownerId 只留人话 owner`,
+            )
+          }
+          if (alive === undefined) {
+            warn(`[dispatcher] 查不到 agents 活表，ownerId 没校验就开票了（服务可能还没就绪）：${ownerId}`)
+          }
+        }
         const ticket = store.open(args.goal, args.dir, brief)
-        if (args.owner) store.update(ticket.id, { owner: args.owner, status: 'running' })
+        if (owner) {
+          store.update(ticket.id, { owner, ...(ownerId ? { ownerId } : {}), status: 'running' })
+        } else if (ownerId) {
+          store.update(ticket.id, { ownerId })
+        }
         return {
           id: ticket.id,
-          status: args.owner ? 'running' : 'open',
+          status: owner ? 'running' : 'open',
           openCount: openCount + 1,
         }
       },
@@ -435,6 +470,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const zombiePushed = new Map<string, string>()
   const BUSY = new Set(['running', 'streaming', 'thinking', 'tool', 'tool-call', 'cancelling'])
 
+  /** 票里能和真 session id 比对的那一栏：新票是 ownerId，老票退回人话 owner。 */
+  const ownerKey = (ticket: { owner?: string; ownerId?: string }): string | undefined =>
+    ticket.ownerId ?? ticket.owner
+
   const agentFor = (id: string | undefined): WakeableAgent | undefined => {
     if (!id) return undefined
     const agents = (ctx as unknown as { agents?: { get?: (id: string) => WakeableAgent | undefined } }).agents
@@ -442,14 +481,23 @@ export function apply(ctx: Context, config: ConfigShape): void {
   }
 
   /**
-   * owner 的 agent 还在不在活表里。
+   * owner 的 agent 还在不在活表里。三态：
+   *
+   * - `true`  活表里有这个会话；
+   * - `false` 活表查得到、里面确实没有这个会话 → 可以判 worker-gone；
+   * - `undefined` 没法判断（没有 agents 服务、活表还是空的、owner 是「小丙」
+   *   这种抽不出 id 片段的纯文字标签）→ 只能退回静默阈值。
    *
    * AgentRegistry.get(agent.session.id) 是唯一可靠的判活入口（dsh-agent 的
-   * registry key 就是 session id），但票里的 owner 是主会话随手填的：可能裸 uuid、
-   * 可能带 session- 前缀、也可能是「重启小鱼」这种短标签。短标签查不到活不等于
-   * 小鱼死了，所以这里只回答「查到了吗」，判死交给调用方的门槛。
+   * registry key 就是 session id）。
+   *
+   * `exact` 为真表示传进来的是票里的 ownerId（spawn 原文，主会话照抄，不会填错）：
+   * 只认 idVariants 那几种写法，查不到就是 false，不再走「抽不出片段 = 没法比」
+   * 那道兜底——开票时已经校验过一次，落到这儿的 ownerId 就是能比对的。
+   * 为假时是老路径：owner 是随手填的，可能裸 uuid、带 session- 前缀，也可能只写
+   * `subagent 34b183b9` 这种 uuid 前缀。前两种走 get，最后一种扫 list 用 matchesId 比。
    */
-  const agentAlive = (owner: string): boolean | undefined => {
+  const agentAlive = (owner: string, exact = false): boolean | undefined => {
     const agents = (ctx as unknown as {
       agents?: {
         get?: (id: string) => unknown
@@ -461,57 +509,28 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (agents.get(id)) return true
     }
     // 短标签兜底：票里的 owner 可能只写了 uuid 前缀（`subagent 34b183b9`），
-    // 活表的 key 才是完整的 session id。查活宁可宽松——命中了就算活；
-    // 扫不到也不把这里的 false 改成 undefined，判死仍由调用方的
-    // looksLikeSessionId 门槛把关。
-    for (const agent of agents.list?.() ?? []) {
-      const live = agent?.session?.id ?? agent?.id
-      if (typeof live === 'string' && matchesId(owner, live)) return true
-    }
-    return false
-  }
-
-  /**
-   * owner / 子 session id 的前缀变体。票里的 owner 是主会话随手填的：可能裸
-   * uuid、可能带 `session-` 前缀；`subagent/end` 给的 id 也可能是这两种写法。
-   * 精确比对走这组变体，短标签兜底在 matchesId 里。
-   */
-  function idVariants(id: string): Set<string> {
-    const bare = id.replace(/^session-/, '')
-    return new Set([id, bare, `session-${bare}`])
-  }
-
-  /**
-   * owner 和子 session id 是不是同一路小鱼。判活和收票共用这一份。
-   *
-   * 先按 idVariants 一比一判；不中再走短标签兜底：主会话开票时可能只写
-   * `subagent 34b183b9`（前缀 + 8 位 uuid 前缀），而 `subagent/end` 给的是完整
-   * `34b183b9-5d77-...`。两边各抽出 uuid 形态的片段（连续 [0-9a-f]、至少 6 位），
-   * 一方是另一方的前缀就算命中。
-   *
-   * 边界是有意的：只做前缀、不做任意子串（`deadbeef` 不该匹配到中间某段）；
-   * 片段至少 6 位（`abc` 太容易撞）；两边都抽不到片段（`重启小鱼` 这种纯中文
-   * 标签）就返回不匹配，交给静默阈值兜底，不报错。
-   */
-  function matchesId(a: string, b: string): boolean {
-    const left = idVariants(a)
-    for (const candidate of idVariants(b)) {
-      if (left.has(candidate)) return true
-    }
-    const aliases = hexFragments(a)
-    const ends = hexFragments(b)
-    if (aliases.length === 0 || ends.length === 0) return false
-    for (const alias of aliases) {
-      for (const end of ends) {
-        if (alias.startsWith(end) || end.startsWith(alias)) return true
+    // 活表的 key 才是完整的 session id。查活宁可宽松——命中了就算活。
+    const live = agents.list?.() ?? []
+    // 活表空着基本只会是服务还没就绪（主会话自己也在表里），这时候「扫不到」
+    // 说明不了任何事，不能拿去判死。
+    if (live.length === 0) return undefined
+    // ownerId：idVariants 都试过了，活表非空还没命中 → 会话真没了。精确比对
+    // 不借 matchesId 的前缀兜底，也不看片段——id 是原文抄的，不需要猜。
+    if (exact) {
+      const variants = idVariants(owner)
+      for (const agent of live) {
+        const id = agent?.session?.id ?? agent?.id
+        if (typeof id === 'string' && variants.has(id)) return true
       }
+      return false
     }
-    return false
-  }
-
-  /** id 里的 uuid 形态片段：去 `session-` 前缀后连续 [0-9a-f]、至少 6 位。 */
-  function hexFragments(id: string): string[] {
-    return id.replace(/^session-/, '').toLowerCase().match(/[0-9a-f]{6,}/g) ?? []
+    for (const agent of live) {
+      const id = agent?.session?.id ?? agent?.id
+      if (typeof id === 'string' && matchesId(owner, id)) return true
+    }
+    // 扫完了确实没有。但这个结论只对「有 id 片段、能拿来比」的 owner 成立：
+    // `小丙` 抽不出片段，扫不到只意味着没法比，刚派出去的活不能被这一下判死。
+    return hasIdFragment(owner) ? false : undefined
   }
 
   // 小鱼退出后票不能空挂：宿主在子 session 收尾时广播 `subagent/end`，payload
@@ -539,8 +558,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (!finished) return undefined
       for (const ticket of store.list()) {
         if (ticket.status !== 'open' && ticket.status !== 'running') continue
-        if (!ticket.owner) continue
-        if (!matchesId(ticket.owner, finished)) continue
+        const known = ownerKey(ticket)
+        if (!known) continue
+        if (!matchesId(known, finished)) continue
         // 票里的 reports 在这张快照上已经 fold 好了（store.ts 那段 fold），
         // 顺手数一下写进 note：主会话光看备注就知道小鱼到底交没交活，
         // 不用为这个再翻一遍报告。只写 note，status 还是 waiting、绝不写 done。
@@ -634,7 +654,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (!isOpen(ticket.status)) continue
       const queued = pending(ticket.inputs)
       if (queued.length === 0) continue
-      const worker = agentFor(ticket.owner)
+      const worker = agentFor(ownerKey(ticket))
       if (!worker?.steer || isBusy(worker)) continue
       for (const entry of queued) {
         await worker.steer(message(entry.text))
@@ -778,7 +798,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       },
       async execute(args) {
         const { ticket, entry } = store.appendInput(args.id, args.text)
-        const worker = agentFor(ticket.owner)
+        const worker = agentFor(ownerKey(ticket))
         let delivered = false
         if (worker?.steer && !isBusy(worker)) {
           await worker.steer(message(args.text))
@@ -874,7 +894,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 名字当时还不存在。所以每个 agent 留一个 binding，listen `tools/change`
   // 补装——白名单的最终内容按「加载完成后注册表里真实有的名字」算，不是
   // 按第一次安装那一刻。
-  if (config.routerRestrict || config.workerToolDeny) {
+  if (config.routerRestrict || config.workerToolDeny || config.workerPromptPrune) {
     const routerSeen = new WeakSet<object>()
     const bindings = new Set<RouterBinding>()
     const bound = new WeakMap<object, RouterBinding>()
@@ -919,17 +939,21 @@ export function apply(ctx: Context, config: ConfigShape): void {
       deny: config.workerToolDeny
         ? [...new Set([...config.workerDenyTools, ...WORKER_FORBIDDEN_TOOLS])]
         : [],
+      // 提示词剪枝跟 deny 名单是两件事：deny 决定手上有什么工具，剪枝决定
+      // 提示词里还写不写那些静态说明。两个开关，各关各的。
+      pruneWorkerPrompt: config.workerPromptPrune,
       escapeFile: config.routerEscapeFile,
       log,
       info,
       registry,
     }
     const install = (agent: RouterAgent): void => {
-      // Two independent switches: routerRestrict decides whether the main
-      // session is trimmed, workerToolDeny whether a subagent loses the
-      // memory-writing tools. Turning one off must not turn the other off.
+      // Independent switches: routerRestrict decides whether the main session is
+      // trimmed, workerToolDeny whether a subagent loses the memory-writing
+      // tools, workerPromptPrune whether its prompt keeps the static tool
+      // sections. Turning one off must not turn another off.
       const worker = isWorkerSession(agent.session.header.origin)
-      if (worker ? !config.workerToolDeny : !config.routerRestrict) return
+      if (worker ? !config.workerToolDeny && !config.workerPromptPrune : !config.routerRestrict) return
       let binding = bound.get(agent)
       if (binding === undefined) {
         if (routerSeen.has(agent)) return

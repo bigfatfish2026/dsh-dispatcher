@@ -172,6 +172,8 @@ export interface Config {
   workerToolDeny: boolean
   /** Tool names a worker subagent does not see; write-side memory tools. */
   workerDenyTools: string[]
+  /** Drop every tool-guidance prompt section from a worker subagent's prompt. */
+  workerPromptPrune: boolean
   /** Script that pushes one line of text to the person on QQ. */
   notifyScript: string
   /** Hard cap on one push, in milliseconds. */
@@ -279,6 +281,15 @@ export const Config: Schema<Config> = Schema.object({
     .default([...DEFAULT_WORKER_DENY_TOOLS])
     .description(
       'Tool names a worker subagent does not see: the write-side memory tools (memory_save, memory_archive, memory_merge, memory_reflect, memory_split, memory_consolidate, memory_sleep). memory_recall and the read-only lookup tools stay. Unknown names are dropped with a warning instead of failing the restrict call.',
+    ),
+  // 2026-11-03：小鱼的工具面由档位决定，提示词里静态写的工具说明一定跟手上
+  // 工具表对不上——插件注册工具时 description 已经说清了，重复那段只是白烧
+  // token（实测 4312 字 ≈ 940 token/每条会话）。剪掉 tool:* / mcp:* /
+  // mcp-resource-servers 三类整段，主会话那条路径一个字不动。
+  workerPromptPrune: Schema.boolean()
+    .default(true)
+    .description(
+      'Drop every tool-guidance section (tool:*, mcp:*, mcp-resource-servers) from a worker subagent system prompt. A worker tool set comes from its preset, so a static section can never match it; the tools own descriptions already say how to use them. Main sessions are untouched, and the escape file still turns it off. Set false to fall back to the plugins own prompt.',
     ),
   // progress_note 的推送脚本：openid 和 token 都在脚本里，插件不存第二份。
   notifyScript: Schema.string()

@@ -45,7 +45,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
 | `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
-| `zombieMinutes` | number | `20` | 多久没有任何进展算疑似僵尸票，只推一次。只查 `open` / `running`；owner 是 uuid 形态的子会话 id 且已不在活表时判 `worker-gone`，不受这个值约束。owner 写成「重启小鱼」这类短标签会让 `worker-gone` 失明，只剩这一档兜底 |
+| `zombieMinutes` | number | `20` | 多久没有任何进展算疑似僵尸票，只推一次。只查 `open` / `running`；票里有 `ownerId`（会话 id）且活表里已经没这个会话，或者 owner 带 uuid 片段（裸 uuid、`session-` 前缀、`subagent 34b183b9` 这类短标签）而扫不到，就判 `worker-gone`，不受这个值约束。`小丙` 这种抽不出片段的纯文字标签只能等这一档兜底 |
 | `noReportMinutes` | number | `5` | `waiting` 但票里一条报告都没有的票，落下来多久就推一次（「小鱼退了但没交活」）。单独一项、不吃 `zombieMinutes`：小鱼已经退了，没有值得再等的东西。补上报告之后就不再盯 |
 | `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
 | `quietSweep` | boolean | `false` | 巡检时不叫醒主会话，连僵尸票也不推；票照旧重开、排队消息照旧推给活着的 worker、已关票的积压报告照旧清账，报告留给主会话自己看 |
@@ -61,6 +61,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `extraRouterTools` | string[] | 空 | 别的插件注册、也该留在主会话的工具名。接在 `routerTools` 后面，原样透传；没注册的名字由 router 丢掉并告警。默认空＝本仓库不替任何外部插件点名 |
 | `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从每个 worker subagent 的工具 schema 里摘掉；跟 `routerRestrict` 各自独立 |
 | `workerDenyTools` | string[] | 7 个名字 | worker 看不见的工具名：写记忆那七个，`DEFAULT_WORKER_DENY_TOOLS` |
+| `workerPromptPrune` | boolean | `true` | 把 worker subagent 提示词里所有 `tool:*` / `mcp:*` / `mcp-resource-servers` 段整段剪掉；跟 `workerToolDeny` 各自独立，主会话一个字不动 |
 | `notifyScript` | string | 安装环境里的 `notify.sh` | `progress_note` 推送用的脚本，openid 在脚本里，插件不存第二份 |
 | `notifyTimeoutMs` | number | `5000` | 一次推送最多等多久，超时杀掉子进程并返回 `sent: false` |
 
@@ -78,7 +79,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 | 工具 | 作用 |
 |---|---|
-| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话。`brief` 必填：一句 34 列以内的短话；`owner` 填子会话的真 id（见「owner 要写子会话的真 id」） |
+| `dispatch_open` | 开一张票。派完 worker 立刻调，然后才回话。`brief` 必填：一句 34 列以内的短话；`owner` 写人话标签（屏幕上显示的就是它），`ownerId` 填 spawn 返回的原始会话 id（见「owner 与 ownerId」） |
 | `dispatch_touch` | 改状态，可附一行进展说明（`status` 必填） |
 | `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告；每行都带 `brief` |
 | `dispatch_send` | 往票里追加一条给 worker 的消息 |
@@ -141,15 +142,17 @@ worker 手上只有 `dispatch_report` 和 `dispatch_send`，两条都只往队�
 
 没报告的 `waiting` 巡检会盯：落 `waiting` 满 `noReportMinutes`（默认 5 分钟）还没补上一条报告，就推一次，文案直接写着「去 `dispatch_send` 叫它补报，或者自己看它干了什么」。补上报告之后它就不再是候选，指纹也随巡检清理消失，不会再响第二遍。这一档只看「有没有报告」，不看 `zombieMinutes`：小鱼已经退了，没有值得再等的东西。
 
-这一笔写下去，巡检对 `open` / `running` 的催命也就轻了：W 一退出，票就不在 `running` 上挂着，`silent` / `worker-gone` 那两档自然停，只剩「没交活」这一档接手。`worker-gone` 从此留给「事件没到」的票——插件重启过、票是订事件之前开的，或者 owner 不是真 id。
+这一笔写下去，巡检对 `open` / `running` 的催命也就轻了：W 一退出，票就不在 `running` 上挂着，`silent` / `worker-gone` 那两档自然停，只剩「没交活」这一档接手。`worker-gone` 从此留给「事件没到」的票——插件重启过、票是订事件之前开的，或者 owner 里根本抽不出 id 片段。
 
-### owner 要写子会话的真 id
+### owner 与 ownerId
 
-`dispatch_open` 的 `owner` 必须是 subagent 返回的那个会话 id（uuid；裸的或带 `session-` 前缀都认），**不要写「重启小鱼」这类短标签**。
+票里有两栏：`owner` 是给人看的标签（「t4 查qqbot PR」），`ownerId` 是给机器比的会话 id（spawn 返回的原文，uuid；带 `session-` 前缀也认）。两栏可以一起填，也可以只填 `owner`。
 
-`worker-gone` 的判据只认 uuid 形态（`looksLikeSessionId`），拿 owner 去 `AgentRegistry` 查活表，key 就是 `agent.session.id`。短标签不在活表里，查不到也不等于死了，插件只能判「查不了」，整条 `worker-gone` 检测就此失明，退到 `silent`：最后一条报告距今满 `zombieMinutes`（默认 20 分钟）才提醒一次。而同一指纹只推一次——主会话错过那一行 followup，这张票就再也不会响。
+填了 `ownerId` 的好处是巡检能立刻判 `worker-gone`：开票时先拿它查一次活表，不在表里就直接拒绝开票（提示「ownerId 不在活表，可能是填错了或小鱼已经结束」），不写票；查不到 agents 服务时放行并记一条日志。巡检那侧按 `idVariants`（裸 uuid / `session-` 两种写法）精确比对，扫完确实没有就判死，不用等 `zombieMinutes`。`ownerId` 也优先用于 `subagent/end` 对票、以及把排队消息递回 worker。
 
-事件这边同理：`subagent/end` 带的 id 对不上 owner，票也不会落 `waiting`。写一个短标签等于同时关掉两道保险，票就只能靠人自己想起来。
+老票没有 `ownerId`，照旧走 `owner` 那套：能抽出 ≥6 位连续 hex 片段（裸 uuid、`session-`、`subagent 34b183b9` 这种短标签）就拿去活表逐个比对，比对走 `matchesId`——先按 `session-` 前缀归一，再把两边的 uuid 片段抽出来（`hexFragments`，连续 `[0-9a-f]`、至少 6 位），一方是另一方的前缀就算同一路。抽不出片段的纯文字标签（`小丙`、`重启小鱼`）没法和活表比，扫不到只说明「没法比」，不是「会话没了」——这种票退回 `silent`：最后一条报告距今满 `zombieMinutes`（默认 20 分钟）才提醒一次。而同一指纹只推一次，所以老写法下 owner 还是尽量写真 id。
+
+事件这边走同一份 `matchesId`：`subagent/end` 带的 id 对不上 `ownerId`（老票对 `owner`），票也不会落 `waiting`。
 
 图由 `docs/worker-ticket-lifecycle-i18n.py` 生成，改完文案跑 `python3 docs/worker-ticket-lifecycle-i18n.py zh`（英文跑 `en`）重画；`CHECK=1` 会跑一遍文字越框自检。
 
@@ -159,7 +162,7 @@ worker 手上只有 `dispatch_report` 和 `dispatch_send`，两条都只往队�
 
 worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`，由主会话决定自己答、来问人，还是拒掉。
 
-派的时候把这几件事写进任务里：票号、打点义务（每出一段进度就 `dispatch_report` 进票——别让小鱼调 `progress_note`，那会绕过会话直接推手机，票里反而什么都没有）、交活两条（先 `dispatch_report` 记结论，再 `send_message` 喊一声）。不打点的长活就是让主人干等。`owner` 填 subagent 返回的真 id，别写标签。主人中途追加的话用 `dispatch_send` 进票，别转述丢了。
+派的时候把这几件事写进任务里：票号、打点义务（每出一段进度就 `dispatch_report` 进票——别让小鱼调 `progress_note`，那会绕过会话直接推手机，票里反而什么都没有）、交活两条（先 `dispatch_report` 记结论，再 `send_message` 喊一声）。不打点的长活就是让主人干等。`owner` 写人话标签，`ownerId` 填 spawn 返回的真 id——两栏都填，巡检才不用猜。主人中途追加的话用 `dispatch_send` 进票，别转述丢了。
 
 ## 别在中枢等
 
@@ -183,6 +186,14 @@ worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`�
 
 `workerToolDeny` 跟 `routerRestrict` 分开，是因为两件事：一个是主会话能干什么，一个是谁能改这屋子记住的东西；关一个不该顺手关掉另一个。escape 文件两个一起关。
 
+### worker 提示词剪枝
+
+2026-11-03 起，worker subagent 的提示词也过一道 `system-prompt/assemble` 钩子，跟主会话那个同一套判据，只是口径反着：**所有** `tool:*` / `mcp:*` / `mcp-resource-servers` 段一律剪掉，不看这个 worker 还能不能调那些工具。理由是 worker 的工具面由档位（preset）决定，提示词里静态写死的那份清单一定跟它手上的工具表对不上——同一段话对 t2 是多余、对 t4 是错的，而且工具注册时 `description` 已经说清了怎么用。凡是「只能是错的」的说明，留着就是白烧 token：实测这八段（browser / bilibili / bili_notify / jobs / goal / workflow / mcp-resource-servers / mcp:github）合计 4312 字，约 940 token，每条小鱼会话都要吃一遍。
+
+persona、plan policy、手递手规程这些非工具段一概不碰，判据还是 `src/prompt.ts` 的 `sectionToolFamily`。剪枝是**一次装、装完不动**：结论跟 deny 名单无关，所以不跟着 `tools/change` 重装，只在这个 agent 的 scope 销毁时撤掉（`dsh-dispatcher.worker-prompt` effect）。`workerPromptPrune: false` 一键回退到插件自己装配的原样；它跟 `workerToolDeny` 各管一头——一个管手上有什么工具，一个管提示词里还写不写。
+
+主会话那条路一个字没改：它仍旧只剪「工具全被藏起来」的段，`tool:bash` 该留还留。
+
 两条退路。`mkdir -p ~/.dsh && touch ~/.dsh/no-restrict`，任何会话都不装白名单；删掉文件就恢复。`routerRestrict: false` 是彻底关掉。escape 文件每个会话读一次，所以改它要重启（已经存在的会话则是重载插件）。
 
 ## 巡检与僵尸票
@@ -191,8 +202,8 @@ worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`�
 
 僵尸票查两类。主池是 `open` 和 `running`；`blocked` 是人按着没动，跳过；`done` / `dropped` 已经结束，也不算。另一类是 `waiting` 但票里**一条报告都没有**——小鱼退了没交活，票落 `waiting` 之后就没人看了，所以单独盯这一档，阈值是 `noReportMinutes`（默认 5），跟 `zombieMinutes` 互不影响。`waiting` 且已经有报告的票不进池：那是主会话该收的活，不是失联。主池判据两档：
 
-- `worker-gone`：owner 是 uuid 形态的子会话 id（裸 uuid 或带 `session-` 前缀）时，拿它去 `AgentRegistry` 查活表——registry 的 key 就是 `agent.session.id`，跟票里记的是同一个。查不到就判死，票多久没动都救不回来。新票留 2 分钟宽限，避开 `dispatch_open` 写 owner 与 subagent 真正注册之间那几秒。owner 写成短标签的票根本走不到这一档。
-- `silent`：owner 不是 uuid 时无从查活，只能按时间兜底——短标签票唯一还会响的就是这一档，而且要等满 `zombieMinutes`。`zombieMinutes`（默认 20）分钟内没有任何进展才判疑似；进展看最后一条报告的时间，不只看 `dispatch_touch`。
+- `worker-gone`：票里有 `ownerId` 时直接拿它精确比对（`idVariants` 的裸 uuid / `session-` 两种写法都试），活表里没有就判死，不再受「owner 抽得出片段」那道门限制。老票没有 `ownerId`，退回老规则：owner 里带 ≥6 位连续 hex 片段时（裸 uuid、`session-` 前缀、`subagent 34b183b9` 这类短标签），拿它去 `AgentRegistry` 活表逐个比对——registry 的 key 就是 `agent.session.id`，跟票里记的是同一个。比对走 `matchesId`：先按 `session-` 前缀归一，再比 uuid 片段前缀，命中了就是还活着；扫完确实没有才判死，票多久没动都救不回来。新票留 2 分钟宽限，避开 `dispatch_open` 写 owner 与 subagent 真正注册之间那几秒。
+- `silent`：owner 抽不出 id 片段（`小丙`、`重启小鱼`）、或者活表空着 / 没有 agents 服务时，无从查活，只能按时间兜底，等满 `zombieMinutes`（默认 20）没有任何进展才判疑似；进展看最后一条报告的时间，不只看 `dispatch_touch`。
 - `no-report`：`waiting` 且 `reports.length === 0`，落 `waiting` 满 `noReportMinutes`（默认 5）就报。不看活表——票是 `waiting` 就意味着 worker 已经不在。补上一条报告就不再是候选，巡检顺手把它的指纹删掉。
 
 节流用内存里的指纹 `${reports.length}|${lastActivity}|${status}`。故意不用 `updatedAt`：巡检自己也会往日志追加事件（给活着的 worker 推消息、给已关票清账），那也刷新 `updatedAt`，拿它当指纹会让刚推过的票下一轮再推一遍；最后一条报告的时间与状态只有真·新报告或状态变化才会动。`no-report` 这档也吃这套：报告条数从 0 变 1 指纹就变，可它同时也不再是候选；而状态不会被巡检翻回 `open`（重开只认 `done` 票），所以指纹不会糊掉。没有新报告、状态也没变，同一张票只推一次，进程重启最多多推一次。

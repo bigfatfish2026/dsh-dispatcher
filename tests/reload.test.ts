@@ -44,6 +44,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     extraRouterTools: [],
     workerToolDeny: true,
     workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
+    workerPromptPrune: true,
     notifyScript: '',
     notifyTimeoutMs: 5000,
     ...overrides,

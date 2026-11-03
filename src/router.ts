@@ -63,6 +63,15 @@ export interface RouterOptions {
   allow: readonly string[]
   /** Tool names a worker subagent must not see; the main session ignores it. */
   deny?: readonly string[]
+  /**
+   * Prune the tool-guidance sections out of a worker subagent's prompt.
+   *
+   * A worker's tool set is decided by its preset, so a section that spells the
+   * tools out statically can only be right by accident; the plugins' own tool
+   * descriptions already say how to use them. Default on: pass `false` to leave
+   * every worker prompt exactly as the plugins assembled it.
+   */
+  pruneWorkerPrompt?: boolean
   /** An existing file here skips the whitelist entirely. `~` is expanded. */
   escapeFile: string
   /** Where the warnings go; omitted means quietly. */
@@ -232,14 +241,24 @@ function inertBinding(outcome: RouterOutcome): RouterBinding {
  *
  * The real refusal still lives in the memory plugin: this only trims the schema
  * so the model never reads a tool it may not call.
+ *
+ * Two independent passes ride on this binding. The deny list trims the schema;
+ * the prompt pass ({@link RouterOptions.pruneWorkerPrompt}) drops every
+ * tool-guidance section, because a worker's tool set comes from its preset and a
+ * statically written section can never be trusted to match it. The prompt pass
+ * is one-shot — its verdict does not depend on which names were denied — so it
+ * is installed once and only disposed with the scope.
  */
 export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): RouterBinding {
   const wanted = [...new Set(options.deny ?? [])]
-  if (wanted.length === 0) return inertBinding('worker')
+  const prunePrompt = options.pruneWorkerPrompt !== false
+  if (wanted.length === 0 && !prunePrompt) return inertBinding('worker')
 
   let current: readonly string[] = []
   let first: RouterOutcome | undefined
   let stopRestrict: (() => void) | undefined
+  let promptBinding: PromptFilterBinding | undefined
+  let promptTried = false
   let armed = false
   let disposed = false
   let syncing = false
@@ -261,6 +280,8 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
     disposed = true
     stopRestrict?.()
     stopRestrict = undefined
+    promptBinding?.dispose()
+    promptBinding = undefined
     current = []
   }
 
@@ -270,11 +291,40 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
     agent.ctx.effect(() => () => dispose(), 'dsh-dispatcher.worker-deny')
   }
 
+  /**
+   * Install the one-shot prompt pass, at most once.
+   *
+   * `promptTried` is not the same as `promptBinding !== undefined`: a host with
+   * no scoped hook answers `undefined`, and retrying that on every `tools/change`
+   * would only repeat the warning.
+   */
+  const installPrompt = (): void => {
+    if (!prunePrompt || promptTried || disposed) return
+    promptTried = true
+    promptBinding = bindPromptFilter(agent.ctx, {
+      // Nothing to keep alive: every tool section goes, so the vocabulary is
+      // never consulted.
+      allow: [],
+      dropAllToolSections: true,
+      effectLabel: 'dsh-dispatcher.worker-prompt',
+      log: options.log,
+    })
+  }
+
   const sync = (): RouterOutcome => {
     if (disposed) return first ?? 'unchanged'
     if (syncing) return first ?? 'unchanged'
     syncing = true
     try {
+      installPrompt()
+      arm()
+      // The prompt pass stands on its own: with no deny list there is still a
+      // worker prompt to trim.
+      if (wanted.length === 0) {
+        first ??= 'worker'
+        return 'worker'
+      }
+
       const lookup = registryLookup(agent, options)
       const confirmed = lookup.confirmed
       const names = wanted.filter((name) => known(confirmed, name))

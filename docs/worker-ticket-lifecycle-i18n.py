@@ -6,6 +6,11 @@
     python3 worker-ticket-lifecycle-i18n.py zh   -> worker-ticket-lifecycle.zh.png
     python3 worker-ticket-lifecycle-i18n.py en   -> worker-ticket-lifecycle.en.png
 
+v5（2026-11-03）相对 v4 的改动：
+  - owner 判据不再要求 uuid 形态：只要 owner 里有 ≥6 位 uuid 片段（裸 uuid、
+    session- 前缀、`subagent 34b183b9` 这类短标签）就扫活表，扫不到才算僵尸；
+    纯文字标签抽不出片段，退回 silent。
+
 v4（2026-11-03）相对 v3 的改动：
   - T 列补 status = waiting：W 结束（subagent/end）把 open/running 落成 waiting，
     并加一条 W -> waiting 的边，标明「通知，不是交付」；A/B 卡改成「事件没到才靠巡检」。
@@ -97,12 +102,12 @@ TEXTS = {
         "sweep_pick": "每轮取 status = open / running 的票\n"
                       "waiting 且票内 0 条报告：另有 no-report 一档\n"
                       "blocked 人按着、waiting 有报告等人看，都不算",
-        "sweep_diamond": "owner 是 uuid 形态的\n子会话 id 吗？",
+        "sweep_diamond": "owner 里有\n≥6 位 uuid 片段吗？",
         "sweep_yes": "是", "sweep_no": "否",
         "gw_title": "worker-gone",
-        "gw_body": "AgentRegistry 按\nagent.session.id 查活\n查不到 ⇒ 僵尸\n（W 结束事件漏了，\n才会走到这一档）",
+        "gw_body": "按 matchesId 扫活表\n裸 uuid / session- / 短标签都认\n扫不到 ⇒ 僵尸\n（W 结束事件漏了，\n才会走到这一档）",
         "sl_title": "silent",
-        "sl_body": "owner 不是 uuid（短标签）\n事件对不上、也查不了存活\n只能按时间兜底：\n"
+        "sl_body": "owner 抽不出 id 片段\n（小丙这类纯文字标签）\n查不了存活，只能按时间兜底：\n"
                    "20 分钟没动静算疑似，\n新建票 2 分钟宽限",
         "thr_title": "节流：指纹没变就不重推",
         "thr_fp": "报告条数 ｜ 最后活动时间 ｜ 状态",
@@ -171,12 +176,12 @@ TEXTS = {
         "sweep_pick": "each round: tickets with status = open / running\n"
                       "waiting with 0 reports has its own no-report tier\n"
                       "blocked is held by a person, waiting with reports is not",
-        "sweep_diamond": "Is owner a uuid-shaped\nsub-session id?",
+        "sweep_diamond": "Does owner carry a\n≥6-digit uuid fragment?",
         "sweep_yes": "yes", "sweep_no": "no",
         "gw_title": "worker-gone",
-        "gw_body": "AgentRegistry looks up\nagent.session.id\nno entry = zombie\n(only reached when the\nend event was missed)",
+        "gw_body": "matchesId scans the registry\nbare uuid / session- / short label\nno hit = zombie\n(only reached when the\nend event was missed)",
         "sl_title": "silent",
-        "sl_body": "owner is not a uuid (short label)\nthe event cannot match it\nand liveness is unqueryable,\n"
+        "sl_body": "owner yields no id fragment\n(a plain-text label, not an id)\nthe event cannot match it\nand liveness is unqueryable,\n"
                    "so only time is left:\n"
                    "20 min idle = suspect,\n2 min grace for a new ticket",
         "thr_title": "Throttle: unchanged fingerprint, no re-push",

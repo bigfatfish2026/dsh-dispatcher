@@ -50,6 +50,7 @@ function testConfig(stateFile: string): Config {
     extraRouterTools: [],
     workerToolDeny: false,
     workerDenyTools: [],
+    workerPromptPrune: true,
     notifyScript: '',
     notifyTimeoutMs: 5000,
   }
