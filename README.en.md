@@ -50,14 +50,15 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
 | `quietSweep` | boolean | `false` | Never wake the main session on a sweep, not even for a zombie ticket; tickets are still reopened, queued messages still reach live workers and closed tickets' reports are still cleared, and the main session reads reports itself |
 | `ownerSessionId` | string | empty | Session to wake; empty picks the c2c session from the QQ prefs file |
-| `qqPrefsPath` | string | path to the QQ prefs file | Conversation-key to session-id map; the default lives in `src/config.ts` |
+| `qqPrefsPath` | string | empty | Conversation-key to session-id map. Empty (the default) reads no file at all, so the owner session has to come from `ownerSessionId`; the path belongs to another plugin and is set in the yml |
 | `ownerOpenId` | string | empty | Owner openid, used when more than one c2c session exists |
 | `noWaitGuard` | boolean | `true` | Refuse main-session calls that would wait; workers are unaffected |
 | `maxCommandMs` | number | `30000` | Longest a single command may hold the main session |
 | `maxWaitMs` | number | `5000` | Longest a `job_output` wait may hold the main session |
 | `routerRestrict` | boolean | `true` | Give every non-worker session the `routerTools` whitelist |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | While this file exists the whitelist is not installed on any session |
-| `routerTools` | string[] | 36 names | Global tool names the main session keeps; the default list is `DEFAULT_ROUTER_TOOLS` in `src/config.ts` |
+| `routerTools` | string[] | 32 names | Global tool names the main session keeps; the default list is `DEFAULT_ROUTER_TOOLS` in `src/config.ts`, and holds only this package's own tools plus the host's built-ins |
+| `extraRouterTools` | string[] | empty | Tool names registered by other plugins that should stay on the main session. Appended after `routerTools`, passed through as written; names nothing registered are dropped with a warning. Empty by default: this repo names no external plugin |
 | `workerToolDeny` | boolean | `true` | Take `workerDenyTools` out of every worker subagent's tool schema; independent of `routerRestrict` |
 | `workerDenyTools` | string[] | 7 names | Tool names a worker does not see: the seven write-side memory tools, `DEFAULT_WORKER_DENY_TOOLS` in `src/config.ts` |
 | `notifyScript` | string | the `notify.sh` on the host | Script `progress_note` runs to push one line to QQ; it owns the openid, the plugin keeps no second copy |
@@ -168,7 +169,7 @@ This is upstream dsh-superagent's `noWait` guard, which caps the router shell at
 
 ## The router whitelist
 
-The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers keep the whole surface, so heavy work has somewhere to go; only the seven write-side memory tools are trimmed (see the next section).
+The waiting guard stops a session from blocking on one call; the whitelist stops it from having the call at all. With `routerRestrict` on — the default — every session that is not a worker gets `tools.restrict({ allow: routerTools + extraRouterTools })` when it appears. The main session keeps the ticket tools, delegation, memory, the ways it talks to the person, the read-only file tools (`read`, `glob`) and the read-only host checks; the writing, shell and waiting tools are gone, so "delegate it" stops competing with "just run it here". Workers keep the whole surface, so heavy work has somewhere to go; only the seven write-side memory tools are trimmed (see the next section).
 
 The default list is 36 names and lives in `DEFAULT_ROUTER_TOOLS` in `src/config.ts`. `grep` is deliberately not one of them: a single `-rn` has no ceiling on output size, and the main session's long-context cost is almost entirely cache read (measured at 98.6%), so one uncapped search means paying for the whole log on every later turn. Searching is a worker's job — it brings back a few lines. Names must match the registered global tool exactly. `tools.restrict` throws on an unknown one, and `ctx.effect` hands a throw from its callback to cordis' error handling rather than back to the caller, so the plugin checks the list against the registry first: it warns with the names nothing answers to and drops just those from the filter. A typo costs a log line, not the whitelist.
 

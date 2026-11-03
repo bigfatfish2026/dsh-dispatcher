@@ -45,6 +45,7 @@ function testConfig(stateFile: string, overrides: Partial<Config> = {}): Config 
     routerRestrict: false,
     routerEscapeFile: join(stateFile, '..', 'no-restrict'),
     routerTools: [],
+    extraRouterTools: [],
     workerToolDeny: false,
     workerDenyTools: [],
     notifyScript: '',
