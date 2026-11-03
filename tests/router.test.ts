@@ -178,11 +178,11 @@ describe('installRouter', () => {
 })
 
 // The bug this pins down: the whitelist used to be decided once, at install
-// time. A tool plugin that registered later — an external plugin sits after
+// time. A tool plugin that registered later — another plugin sits after
 // dsh-dispatcher in the load order — was dropped from the allow list and never
-// came back, so the main session could call yuyu_face but not external_send_file.
+// came back, so the main session could call yuyu_face but not sibling_send_file.
 describe('bindRouter', () => {
-  const ALLOW = ['dispatch_open', 'dispatch_list', 'external_send_file', 'ghost_tool']
+  const ALLOW = ['dispatch_open', 'dispatch_list', 'sibling_send_file', 'ghost_tool']
 
   function bind(registered: string[]) {
     const fake = fakeAgent({ registered })
@@ -202,15 +202,15 @@ describe('bindRouter', () => {
     expect(filters).toEqual([['dispatch_open', 'dispatch_list']])
     expect(messages.join('\n')).toContain('ghost_tool')
 
-    registered.push('external_send_file')
+    registered.push('sibling_send_file')
     expect(binding.sync()).toBe('updated')
     expect(filters).toHaveLength(2)
-    expect(filters[1]).toEqual(['dispatch_open', 'dispatch_list', 'external_send_file'])
+    expect(filters[1]).toEqual(['dispatch_open', 'dispatch_list', 'sibling_send_file'])
     // The name nothing answers to is still never handed to `restrict`.
     expect(filters[1]).not.toContain('ghost_tool')
-    expect(notes.join('\n')).toContain('external_send_file')
+    expect(notes.join('\n')).toContain('sibling_send_file')
     expect(messages.join('\n')).toContain('ghost_tool')
-    expect(binding.installed()).toEqual(['dispatch_open', 'dispatch_list', 'external_send_file'])
+    expect(binding.installed()).toEqual(['dispatch_open', 'dispatch_list', 'sibling_send_file'])
   })
 
   it('lifts the previous restriction before the wider one goes on', () => {
@@ -237,7 +237,7 @@ describe('bindRouter', () => {
     const registered = ['dispatch_open']
     const { binding, hooks, hookStops } = bind(registered)
     expect(hooks).toHaveLength(1)
-    registered.push('external_send_file')
+    registered.push('sibling_send_file')
     binding.sync()
     expect(hooks).toHaveLength(2)
     // The first pass is gone, so the pruner is not installed twice.
@@ -272,9 +272,9 @@ describe('bindRouter', () => {
       log: () => {},
     })
     restricted = true
-    registered.push('external_send_file')
+    registered.push('sibling_send_file')
     expect(binding.sync()).toBe('updated')
-    expect(filters[1]).toEqual(['dispatch_open', 'dispatch_list', 'external_send_file'])
+    expect(filters[1]).toEqual(['dispatch_open', 'dispatch_list', 'sibling_send_file'])
   })
 
   it('keeps the previous whitelist when restrict refuses the new list', () => {
@@ -283,13 +283,13 @@ describe('bindRouter', () => {
     let refusals = 0
     const realRestrict = agent.ctx.tools.restrict
     agent.ctx.tools.restrict = (filter: { allow: readonly string[] }) => {
-      if (filter.allow.includes('external_send_file')) {
+      if (filter.allow.includes('sibling_send_file')) {
         refusals += 1
-        throw new Error('tools.restrict() names unknown global tool "external_send_file"')
+        throw new Error('tools.restrict() names unknown global tool "sibling_send_file"')
       }
       return realRestrict(filter)
     }
-    registered.push('external_send_file')
+    registered.push('sibling_send_file')
     expect(binding.sync()).toBe('error')
     expect(refusals).toBe(1)
     // Nothing was lifted, so the main session kept what it had.
@@ -379,7 +379,7 @@ describe('bindRouter', () => {
         return () => {}
       }
       const binding = bindRouter(agent, {
-        allow: [...LIST, 'external_send_file'],
+        allow: [...LIST, 'sibling_send_file'],
         escapeFile: escapeFile(),
         registry: { get: (name: string) => (hostKnown.includes(name) ? { name } : undefined) },
         log: () => {},
@@ -388,12 +388,12 @@ describe('bindRouter', () => {
       // 装好之后本模块的 restriction 让 agent 自己的视图什么都读不到。
       agent.ctx.tools.get = () => undefined
 
-      // 一次插件重载：memory_recall 没了，external_send_file 来了。current 里还
+      // 一次插件重载：memory_recall 没了，sibling_send_file 来了。current 里还
       // 记着 memory_recall（自己的视图被挡着，看不出来），restrict 会整份
       // 拒绝——这一轮得把死名字剔掉，把活着的那份装上去。
-      hostKnown.splice(1, 1, 'external_send_file')
+      hostKnown.splice(1, 1, 'sibling_send_file')
       expect(binding.sync()).toBe('updated')
-      expect(binding.installed()).toEqual(['dispatch_open', 'external_send_file'])
+      expect(binding.installed()).toEqual(['dispatch_open', 'sibling_send_file'])
 
       // 名单这会儿跟 current 一样了，但 allow 里还缺 memory_recall：上一轮
       // 的「缺的是谁」跟这一轮不同，所以不许拿「名单没变」当结论收工，得

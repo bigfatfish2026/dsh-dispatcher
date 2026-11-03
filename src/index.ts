@@ -193,7 +193,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           type: 'string',
           required: true,
           description:
-            'Required. The one line the little screen shows under the ticket title — write a short phrase, not a sentence. At most briefMaxColumns display columns (34 by default), and a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected; nothing is derived from goal any more.',
+            'Required. The one line the little screen shows under the ticket title — write a short phrase, not a sentence. At most briefMaxColumns character columns (34 by default), and a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected; nothing is derived from goal any more.',
         },
         dir: { type: 'string', description: 'Working directory the 小鱼 uses, if any.' },
         owner: { type: 'string', description: '小鱼 handle: subagent id or a short label.' },
@@ -413,11 +413,78 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const agentAlive = (owner: string): boolean | undefined => {
     const agents = (ctx as unknown as { agents?: { get?: (id: string) => unknown } }).agents
     if (!agents?.get) return undefined
-    const bare = owner.replace(/^session-/, '')
-    for (const id of new Set([owner, bare, `session-${bare}`])) {
+    for (const id of idVariants(owner)) {
       if (agents.get(id)) return true
     }
     return false
+  }
+
+  /**
+   * owner / 子 session id 的前缀变体。票里的 owner 是主会话随手填的：可能裸
+   * uuid、可能带 `session-` 前缀；`subagent/end` 给的 id 也可能是这两种写法。
+   * 比对时两边都过一遍这组变体，一处实现，判活和收票共用。
+   */
+  function idVariants(id: string): Set<string> {
+    const bare = id.replace(/^session-/, '')
+    return new Set([id, bare, `session-${bare}`])
+  }
+
+  // 小鱼退出后票不能空挂：宿主在子 session 收尾时广播 `subagent/end`，payload
+  // 是 dsh-subagent 的 SubagentRunEndInfo（runId / provider / id / local /
+  // stopReason / lastAssistantMessage?），`id` 就是子 session id。
+  //
+  // 这里只做一件事：把 owner 对得上的 open/running 票落成 waiting，让主会话
+  // 知道「小鱼不干了，该你判交付了」。done / dropped 是交付判断，只归主会话
+  // （README 那条硬规矩），这个钩子绝不写。
+  //
+  // 订阅放在 apply 顶层而不是某个开关分支里：noWaitGuard / routerRestrict 关掉
+  // 时票照样不能空挂。命中多张票就逐张落 waiting；owner 为空、id 缺失、票在
+  // list 和 update 之间消失，都只是跳过，不抛错也不写日志。
+  //
+  // `subagent/end` 是 dsh-subagent 扩出来的事件，这个包不依赖它，cordis 的
+  // keyof Events 里没有这一项，所以按结构收窄后再订阅，不引入新的依赖。
+  //
+  // 订阅本身也包在 try/catch 里：这个钩子只该让票自动落 waiting，不值得为它
+  // 把整个 dispatcher 拖下水。真订阅失败就 warn 一行，dispatch_* 照常工作。
+  try {
+    ;(ctx as unknown as {
+      on(name: string, listener: (information: { id?: string; stopReason?: string }) => unknown): unknown
+    }).on('subagent/end', (information) => {
+      const finished = typeof information?.id === 'string' ? information.id : ''
+      if (!finished) return undefined
+      const ended = idVariants(finished)
+      for (const ticket of store.list()) {
+        if (ticket.status !== 'open' && ticket.status !== 'running') continue
+        if (!ticket.owner) continue
+        let same = false
+        for (const candidate of idVariants(ticket.owner)) {
+          if (ended.has(candidate)) {
+            same = true
+            break
+          }
+        }
+        if (!same) continue
+        // 票里的 reports 在这张快照上已经 fold 好了（store.ts 那段 fold），
+        // 顺手数一下写进 note：主会话光看备注就知道小鱼到底交没交活，
+        // 不用为这个再翻一遍报告。只写 note，status 还是 waiting、绝不写 done。
+        const carried = ticket.reports.length
+        try {
+          store.update(ticket.id, {
+            status: 'waiting',
+            note: `worker 结束（${String(information.stopReason ?? 'unknown')}），${
+              carried === 0 ? '票内无报告' : `票内 ${carried} 条报告`
+            }`,
+          })
+        } catch {
+          // 票已经不在日志里：跳过，别把监听器抛进宿主的事件总线。
+        }
+      }
+      return undefined
+    })
+  } catch (error) {
+    warn(
+      `[dispatcher] subagent/end 订阅失败，票不会自动落 waiting（dispatch_* 不受影响）：${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 
   const isBusy = (agent: WakeableAgent | undefined): boolean =>
@@ -514,16 +581,19 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }
     }
 
-    // 僵尸巡检：只挑 open/running——waiting/blocked 是人按着没动，done/dropped 已结束。
+    // 僵尸巡检：主池是 open/running（waiting/blocked 是人按着没动，done/dropped 已结束），
+    // 外加一档「waiting 但票里一条报告都没有」——小鱼退了不等于交了活，这种票原来谁都
+    // 不看，落 waiting 就彻底失联。它有自己的阈值 noReportMinutes，不吃 zombieMinutes。
     // 判定和摘要都在 ./zombie，这里只做两件事：注入活表查询、按指纹节流。
     const zombies = config.notifyOwner
       ? evaluateZombies(store.list(), {
           now,
           zombieMinutes: config.zombieMinutes,
+          noReportMinutes: config.noReportMinutes,
           isAlive: agentAlive,
         })
       : []
-    // 不再僵尸的票（活了、关了）把指纹扔掉，下次真僵尸时还能再推一次。
+    // 不再命中的票（活了、关了、补报了）把指纹扔掉，下次真出事时还能再推一次。
     for (const id of [...zombiePushed.keys()]) {
       if (!zombies.some((hit) => hit.ticket.id === id)) zombiePushed.delete(id)
     }
@@ -721,7 +791,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // dispatch_* 当成错名扔掉，主会话随即少七个工具。启动路径也吃这一条：
   // 那时 agents.list() 是空的，白名单留给 agent/created，注册已经完成。
   //
-  // 但「跑在最后」靠不住：外部插件注册得比本插件晚，allow 里的
+  // 但「跑在最后」靠不住：有些插件注册得比本插件晚，allow 里的
   // 名字当时还不存在。所以每个 agent 留一个 binding，listen `tools/change`
   // 补装——白名单的最终内容按「加载完成后注册表里真实有的名字」算，不是
   // 按第一次安装那一刻。

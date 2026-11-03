@@ -107,7 +107,7 @@ export const DEFAULT_HANDOFF_POLICY = `【派活规矩 · dispatcher】主会话
 派完立刻 dispatch_open 记票再回话，票关掉之前不许当它没发生。
 派活时把票号写进任务里，让小鱼用 dispatch_report 交活；主人中途追加的话用 dispatch_send 进票，别转述丢了。
 交活要两条都发：先 dispatch_report 把结论记进票，再 send_message 喊一声主会话；只落票不喊，主会话不一定当场知道。
-派活时任务里写死打点义务：小鱼每出一段进度就调 progress_note 报一行，插件直接把这句话推到主人手机上，不经过会话也不用等谁醒；干完再报一次；不打点的长活就是让主人干等。
+派活时任务里写死打点义务：进度一律 dispatch_report 进票，不许绕过会话直接往主人手机上推；干完再报一次；不打点的长活就是让主人干等。
 记忆只有主会话能写：小鱼只许 memory_recall 查，memory_save / memory_archive / memory_merge / memory_split 一律不许调，发现该记的东西在 dispatch_report 里提一句，交回主会话落笔。`
 
 export interface Config {
@@ -118,7 +118,7 @@ export interface Config {
   /** How many tickets may be open (not done, not dropped) at once. */
   maxOpen: number
   /**
-   * Longest ticket brief, in display columns (a 汉字 is 2). What the little
+   * Longest ticket brief, in character columns (a 汉字 is 2). What the little
    * screen's second line can hold; defaults to BRIEF_MAX_COLUMNS.
    */
   briefMaxColumns: number
@@ -133,6 +133,13 @@ export interface Config {
    * zombie and is reported once. Only open/running tickets are candidates.
    */
   zombieMinutes: number
+  /**
+   * A `waiting` ticket that carries no report at all is reported once after
+   * this many minutes. A threshold of its own on purpose: `waiting` means the
+   * worker has already left, so making it wait zombieMinutes (20) would leave
+   * the main session blind for a quarter of an hour.
+   */
+  noReportMinutes: number
   /** Wake the owner's session when a ticket goes stale. */
   notifyOwner: boolean
   /** Never wake the owner session from a sweep — not even for a zombie ticket. */
@@ -175,12 +182,12 @@ export const Config: Schema<Config> = Schema.object({
   maxOpen: Schema.natural()
     .default(4)
     .description('Maximum number of tickets that are not done or dropped.'),
-  // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（2026-11-02 display 实测）。
+  // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（2026-11-02 小屏实测）。
   // 这个默认值就是 store.ts 里的 BRIEF_MAX_COLUMNS，两处永远同步。
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)
     .description(
-      'Longest ticket brief, measured in display columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字: 2026-11-02 the display side measured the second line at 10px / 172px wide, which holds 17 汉字 (or 28 ASCII characters). dispatch_open requires the caller to pass a brief and rejects a blank one; tickets written before 2026-11-03 are derived on read with the same cap.',
+      'Longest ticket brief, measured in character columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字: 2026-11-02 the little screen measured the second line at 10px / 172px wide, which holds 17 汉字 (or 28 ASCII characters). dispatch_open requires the caller to pass a brief and rejects a blank one; tickets written before 2026-11-03 are derived on read with the same cap.',
     ),
   handoffPolicy: Schema.boolean()
     .default(true)
@@ -198,7 +205,12 @@ export const Config: Schema<Config> = Schema.object({
   zombieMinutes: Schema.natural()
     .default(20)
     .description(
-      'A ticket with no progress for this many minutes is reported once as a suspected zombie. Only open/running tickets count: waiting/blocked mean a person is holding it. When the owner is a real subagent session id and that agent is no longer in the live registry, the ticket is reported as worker-gone regardless of this value.',
+      'A ticket with no progress for this many minutes is reported once as a suspected zombie. Only open/running tickets count here: waiting/blocked are held by a person, and a waiting ticket with no report at all is watched by noReportMinutes instead. When the owner is a real subagent session id and that agent is no longer in the live registry, the ticket is reported as worker-gone regardless of this value.',
+    ),
+  noReportMinutes: Schema.natural()
+    .default(5)
+    .description(
+      'A waiting ticket whose 小鱼 exited without leaving a single report is reported once after this many minutes: waiting is not the same as delivered. Its own threshold (default 5, not zombieMinutes): the worker is already gone, so there is nothing to wait for. The announcement says to dispatch_send the 小鱼 for a report or look at what it did; once a report lands, the ticket is no longer watched.',
     ),
   notifyOwner: Schema.boolean()
     .default(true)

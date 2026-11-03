@@ -35,6 +35,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
     sweepMinutes: 0,
     zombieMinutes: 20,
+    noReportMinutes: 5,
     notifyOwner: true,
     quietSweep: false,
     ownerSessionId: '',
@@ -213,12 +214,12 @@ describe('apply', () => {
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
   })
 
-  // The live bug: `external_send_file` is registered by an external plugin, which the loader
+  // The live bug: a tool that belongs to another plugin, which the loader
   // installs after dsh-dispatcher. The first pass cannot see it, so the main
-  // session ends up unable to send a picture. `tools/change` is the host's way
-  // of saying "the registry moved, look again".
+  // session ends up unable to use it. `tools/change` is the host's way of
+  // saying "the registry moved, look again".
   it('adds a tool that registers after the whitelist went on', () => {
-    const late = 'external_send_file'
+    const late = FOREIGN_TOOLS[0]!
     const host = fakeHost({ registered: FOREIGN_TOOLS.filter((name) => name !== late) })
     apply(host.ctx as never, testConfig())
 
