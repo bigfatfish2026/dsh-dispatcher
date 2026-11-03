@@ -1,15 +1,15 @@
-import {
-  closeSync,
-  existsSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  writeSync,
-} from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
+import { createTicketBackend } from './store/backend'
+import { JsonlTicketStore } from './store/jsonl'
+import type { TicketBackend } from './store/backend'
+
+// 后端在这一层之后：门面只认 TicketBackend 那四个原语（load / changed / append /
+// location），jsonl 的文件细节（O_APPEND、补换行、坏行跳过）全在
+// `store/jsonl.ts`。换 redis/sqlite 时这个文件一行不用改。
+export { createTicketBackend } from './store/backend'
+export { JsonlTicketStore } from './store/jsonl'
+export type { TicketBackend, TicketBackendConfig, TicketBackendName } from './store/backend'
 
 export type TicketStatus = 'open' | 'running' | 'waiting' | 'blocked' | 'done' | 'dropped'
 
@@ -69,7 +69,7 @@ export interface TicketSnapshot {
 }
 
 /** One line of the append-only log. Every field except id/at is optional. */
-interface TicketEvent {
+export interface TicketEvent {
   id: string
   at: string
   goal?: string
@@ -85,6 +85,20 @@ interface TicketEvent {
 }
 
 export type EntryKind = 'input' | 'report'
+
+/** What one appended log line did, as the event bus announces it. */
+export type TicketEventKind = 'open' | 'status' | 'input' | 'report' | 'delivered'
+
+/**
+ * What goes on the bus after a successful append: which ticket moved and in
+ * what way. Deliberately not the whole line — a listener that needs the ticket
+ * reads it from the projection (one shared fold, not one per listener).
+ */
+export interface TicketBroadcast {
+  id: string
+  at: string
+  kind: TicketEventKind
+}
 
 /**
  * Longest brief, measured in character columns: a CJK character is 2 columns, a
@@ -231,62 +245,80 @@ function deliver(entries: readonly TicketEntry[], at: string, id: string): Ticke
   return entries.map((entry) => (entry.id === id ? { ...entry, delivered: true, deliveredAt: at } : entry))
 }
 
+/**
+ * Fold one event into `state`. Shared by the full fold (`foldEvents`) and the
+ * store's projection: one code path means an incremental update after `append`
+ * and a rebuild from the file can never disagree.
+ */
+function applyEvent(state: Map<string, TicketSnapshot>, event: TicketEvent): void {
+  // 一行能 parse 不等于它是一条事件：崩溃留下的 null、数字、数组都在这里被挡下。
+  // 放过去的话 `event.id` 会抛 TypeError，而 `store.list()` 是每个 dispatch_* 的
+  // 第一步——一处脏行就能把整套工具打死。没有 id/at 的行也不构成事件。
+  if (event === null || typeof event !== 'object') return
+  if (typeof event.id !== 'string' || typeof event.at !== 'string') return
+  const previous = state.get(event.id)
+  if (!previous) {
+    state.set(event.id, {
+      id: event.id,
+      goal: event.goal ?? '',
+      brief: event.brief,
+      status: event.status ?? 'open',
+      dir: event.dir,
+      note: event.note,
+      owner: event.owner,
+      ownerId: event.ownerId,
+      createdAt: event.at,
+      updatedAt: event.at,
+      closedAt: event.status && ENDED.has(event.status) ? event.at : undefined,
+      inputs: event.input ? queue([], event.at, event.input) : [],
+      reports: event.report ? queue([], event.at, event.report) : [],
+    })
+    return
+  }
+  state.set(event.id, {
+    ...previous,
+    goal: event.goal ?? previous.goal,
+    // Old lines have no brief at all: `??` keeps whatever the ticket already
+    // had, so a fold never turns a present brief into undefined.
+    brief: event.brief ?? previous.brief,
+    status: event.status ?? previous.status,
+    dir: event.dir ?? previous.dir,
+    note: event.note ?? previous.note,
+    owner: event.owner ?? previous.owner,
+    ownerId: event.ownerId ?? previous.ownerId,
+    updatedAt: event.at,
+    // A status line is the only thing that moves the close: done/dropped set
+    // it, reopening clears it, and every other event leaves it alone.
+    closedAt: event.status ? (ENDED.has(event.status) ? event.at : undefined) : previous.closedAt,
+    inputs: event.input
+      ? queue(previous.inputs, event.at, event.input)
+      : event.delivered?.kind === 'input'
+        ? deliver(previous.inputs, event.at, event.delivered.id)
+        : previous.inputs,
+    reports: event.report
+      ? queue(previous.reports, event.at, event.report)
+      : event.delivered?.kind === 'report'
+        ? deliver(previous.reports, event.at, event.delivered.id)
+        : previous.reports,
+  })
+}
+
 /** Fold events into the current snapshot of every ticket, newest event last. */
 export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
   const state = new Map<string, TicketSnapshot>()
-  for (const event of events) {
-    // 一行能 parse 不等于它是一条事件：崩溃留下的 null、数字、数组都在这里被挡下。
-    // 放过去的话 `event.id` 会抛 TypeError，而 `store.list()` 是每个 dispatch_* 的
-    // 第一步——一处脏行就能把整套工具打死。没有 id/at 的行也不构成事件。
-    if (event === null || typeof event !== 'object') continue
-    if (typeof event.id !== 'string' || typeof event.at !== 'string') continue
-    const previous = state.get(event.id)
-    if (!previous) {
-      state.set(event.id, {
-        id: event.id,
-        goal: event.goal ?? '',
-        brief: event.brief,
-        status: event.status ?? 'open',
-        dir: event.dir,
-        note: event.note,
-        owner: event.owner,
-        ownerId: event.ownerId,
-        createdAt: event.at,
-        updatedAt: event.at,
-        closedAt: event.status && ENDED.has(event.status) ? event.at : undefined,
-        inputs: event.input ? queue([], event.at, event.input) : [],
-        reports: event.report ? queue([], event.at, event.report) : [],
-      })
-      continue
-    }
-    state.set(event.id, {
-      ...previous,
-      goal: event.goal ?? previous.goal,
-      // Old lines have no brief at all: `??` keeps whatever the ticket already
-      // had, so a fold never turns a present brief into undefined.
-      brief: event.brief ?? previous.brief,
-      status: event.status ?? previous.status,
-      dir: event.dir ?? previous.dir,
-      note: event.note ?? previous.note,
-      owner: event.owner ?? previous.owner,
-      ownerId: event.ownerId ?? previous.ownerId,
-      updatedAt: event.at,
-      // A status line is the only thing that moves the close: done/dropped set
-      // it, reopening clears it, and every other event leaves it alone.
-      closedAt: event.status ? (ENDED.has(event.status) ? event.at : undefined) : previous.closedAt,
-      inputs: event.input
-        ? queue(previous.inputs, event.at, event.input)
-        : event.delivered?.kind === 'input'
-          ? deliver(previous.inputs, event.at, event.delivered.id)
-          : previous.inputs,
-      reports: event.report
-        ? queue(previous.reports, event.at, event.report)
-        : event.delivered?.kind === 'report'
-          ? deliver(previous.reports, event.at, event.delivered.id)
-          : previous.reports,
-    })
-  }
+  for (const event of events) applyEvent(state, event)
   return [...state.values()]
+}
+
+/** What one log line did, for the event bus. */
+export function kindOf(event: TicketEvent): TicketEventKind {
+  if (event.delivered) return 'delivered'
+  if (event.input) return 'input'
+  if (event.report) return 'report'
+  // A creation line is the only one that carries a goal together with status
+  // open; every later status line is a change, including a reopen to open.
+  if (event.goal !== undefined && event.status === 'open') return 'open'
+  return 'status'
 }
 
 export function minutesSince(iso: string, now: Date = new Date()): number {
@@ -301,83 +333,86 @@ export function pending(entries: readonly TicketEntry[]): TicketEntry[] {
 }
 
 export class TicketStore {
-  private readonly file: string
-  /** Where a line the log cannot read gets reported; omitted means quietly. */
-  private readonly log?: (message: string) => void
+  /** 事件从哪儿来、往哪儿写；所有读写都走它，这个文件里没有一行 fs。 */
+  private readonly backend: TicketBackend
+  /** Called after every append that is not internal; see `quietly`. */
+  private readonly emit?: (event: TicketBroadcast) => void
 
-  constructor(file: string, log?: (message: string) => void) {
-    this.file = file
-    this.log = log
+  /**
+   * 内存投影：ticketId → 折好的快照。list()/get() 从这儿读，不再每次整份重读
+   * 日志、重新 fold。启动时（第一次 refresh）全量 fold 一次，之后 append 只折叠
+   * 刚写进去的那一行。
+   */
+  private state = new Map<string, TicketSnapshot>()
+  private loaded = false
+  /** 内部写入（巡检自己的重开、投递记账）不许再广播，否则事件自激。 */
+  private quiet = 0
+
+  /**
+   * `source` 给路径就按 jsonl 打开（测试和工具都这么用），给一个 TicketBackend
+   * 实例就用它。传后端时 `log` 这一栏没用：坏行由后端自己报。
+   */
+  constructor(
+    source: string | TicketBackend,
+    log?: (message: string) => void,
+    emit?: (event: TicketBroadcast) => void,
+  ) {
+    this.backend = typeof source === 'string' ? new JsonlTicketStore(source, log) : source
+    this.emit = emit
   }
 
+  /** 这份日志在哪儿：jsonl 就是文件路径，别的后端是它自己的地址。 */
   get path(): string {
-    return this.file
+    return this.backend.location
   }
 
-  private readEvents(): TicketEvent[] {
-    if (!existsSync(this.file)) return []
-    const text = readFileSync(this.file, 'utf8')
-    const events: TicketEvent[] = []
-    const bad: number[] = []
-    let line = 0
-    for (const raw of text.split('\n')) {
-      line += 1
-      const trimmed = raw.trim()
-      if (!trimmed) continue
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(trimmed)
-      } catch {
-        // 崩溃留下的半截行，或者别人写坏的字节：跳过这一行，不能因此让整次读取失败。
-        bad.push(line)
-        continue
-      }
-      const event = parsed as TicketEvent
-      // 能 parse 不等于是一条事件：null、数字、数组、缺 id/at 的行同样跳过。
-      if (
-        parsed === null ||
-        typeof parsed !== 'object' ||
-        typeof event.id !== 'string' ||
-        typeof event.at !== 'string'
-      ) {
-        bad.push(line)
-        continue
-      }
-      events.push(event)
-    }
-    if (bad.length > 0) {
-      this.log?.(
-        `[dispatcher] ticket log ${this.file}: skipped ${bad.length} line(s) that are not events (line ${bad.join(', ')})`,
-      )
-    }
-    return events
+  /**
+   * 读之前的兜底：只问后端一次「变了吗」，没变就直接用投影。变了（别的进程
+   * 追加、有人手改了文件、日志被截断）才整份重放一次——不是每次都重新折叠。
+   */
+  private refresh(): void {
+    if (this.loaded && !this.backend.changed()) return
+    const state = new Map<string, TicketSnapshot>()
+    for (const event of this.backend.load()) applyEvent(state, event)
+    this.state = state
+    this.loaded = true
   }
 
   list(): TicketSnapshot[] {
-    return foldEvents(this.readEvents()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    this.refresh()
+    return [...this.state.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
   get(id: string): TicketSnapshot | undefined {
-    return this.list().find((ticket) => ticket.id === id)
+    this.refresh()
+    return this.state.get(id)
+  }
+
+  /**
+   * Run `work` without broadcasting what it appends. Sweep and the ticket
+   * handlers write to the log themselves (reopen, markDelivered); announcing
+   * those would wake the very listener that asked for the write. Nested calls
+   * are fine: the counter only reaches zero once, on the outermost return.
+   */
+  quietly<T>(work: () => T): T {
+    this.quiet += 1
+    try {
+      return work()
+    } finally {
+      this.quiet -= 1
+    }
   }
 
   private append(event: TicketEvent): void {
-    mkdirSync(dirname(this.file), { recursive: true })
-    const fd = openSync(this.file, 'a+')
-    try {
-      // 上一次崩在半行：末字节不是换行就先补一个，否则这一条会粘在坏行尾巴上，
-      // 两条一起被当成坏行丢掉——被丢的可能正是 done 或 delivered。
-      const { size } = fstatSync(fd)
-      let prefix = ''
-      if (size > 0) {
-        const last = Buffer.alloc(1)
-        readSync(fd, last, 0, 1, size - 1)
-        if (last[0] !== 0x0a) prefix = '\n'
-      }
-      // 前缀和正文合成一次 writeSync：O_APPEND 下一次写完，没有半写的中间态。
-      writeSync(fd, `${prefix}${JSON.stringify(event)}\n`)
-    } finally {
-      closeSync(fd)
+    // 先对齐一次投影：日志要是被外部改过，这一条必须折在最新状态上。
+    this.refresh()
+    // 原子追加归后端管（jsonl 是一次 O_APPEND 的 writeSync），这里只折刚写的
+    // 这一行，不重读整份日志。
+    this.backend.append(event)
+    applyEvent(this.state, event)
+    this.loaded = true
+    if (this.emit && this.quiet === 0) {
+      this.emit({ id: event.id, at: event.at, kind: kindOf(event) })
     }
   }
 
