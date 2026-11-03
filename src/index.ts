@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { Config, DEFAULT_HANDOFF_POLICY } from './config'
+import { Config, DEFAULT_HANDOFF_POLICY, routerAllowList } from './config'
 import type { Config as ConfigShape } from './config'
 import {
   BRIEF_MAX_COLUMNS,
@@ -366,10 +366,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 原型的 Passes 是两秒心跳加到期唤醒，这里只缩成一件事：定时看票，
   // 卡住的就往主人会话 followup 一条，把它叫醒。会话忙就等下一轮，不丢。
 
+  // 空 = 没配映射文件（默认），不读盘：下面的 resolveOwnerSession 直接给空，
+  // 主人会话只能由 ownerSessionId 明确指定。
   const prefsPath = config.qqPrefsPath.replace(/^~(?=$|\/)/, homedir())
 
   function resolveOwnerSession(): string {
     if (config.ownerSessionId) return config.ownerSessionId
+    if (!prefsPath) return ''
     try {
       const data = JSON.parse(readFileSync(prefsPath, 'utf8')) as { sessionIds?: Record<string, string> }
       const keys = Object.keys(data.sessionIds ?? {}).filter((key) => key.split(':')[2] === 'c2c')
@@ -831,7 +834,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       },
     }
     const options = {
-      allow: config.routerTools,
+      allow: routerAllowList(config),
       deny: config.workerToolDeny ? config.workerDenyTools : [],
       escapeFile: config.routerEscapeFile,
       log,
@@ -867,7 +870,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if ((outcome === 'installed' || outcome === 'updated') && !announced) {
         announced = true
         info(
-          `[dispatcher] router whitelist installed on the main session (${binding.installed().length}/${config.routerTools.length} tools registered)`,
+          `[dispatcher] router whitelist installed on the main session (${binding.installed().length}/${options.allow.length} tools registered)`,
         )
       }
     }

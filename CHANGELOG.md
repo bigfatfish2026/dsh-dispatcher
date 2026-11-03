@@ -1,5 +1,17 @@
 # Changelog
 
+## 未发布 - 2026-11-03
+
+### Changed
+
+2026-11-03 — 主会话白名单里不再写死别的插件注册的工具名。`DEFAULT_ROUTER_TOOLS` 摘掉四项（一个发文件的、三个小屏的），32 项；`qqPrefsPath` 的默认值也从一串路径改成空字符串。这个仓库只讲自己的口径：谁家的工具该留在主会话、会话映射文件放在哪，都由 operator 在 cordis.yml 里点名。
+
+新的 `extraRouterTools`（string[]，默认空）接在 `routerTools` 后面，两段由 `routerAllowList()` 合并成一个 allow 表：顺序保留、重复丢掉、空串跳过，名字原样透传，没注册的仍旧是 router 丢掉并告警。`qqPrefsPath` 为空时不读盘，`resolveOwnerSession()` 直接给空，主人会话只能由 `ownerSessionId` 明确指定——这是缺省语义，不是坏掉。
+
+行为等价靠配置：装它的那份 profile 的 `cordis.patch.yml` 里，dispatcher 那块补上 `extraRouterTools` 四项和 `qqPrefsPath` 的原路径，主会话拿到的工具和以前一样。
+
+Tests: `tests/router-allow-list.test.ts` 9 条——缺省时白名单等于 `DEFAULT_ROUTER_TOOLS`、配了 extras 原样接在后面、重复不出现两次、空串不进表、两段都空就是空、`Config({})` 的 `extraRouterTools` / `qqPrefsPath` 缺省值、给了值原样读进来。全量 15 个文件 164 条全绿，typecheck 干净。
+
 ## 1.4.0 - 2026-11-03
 
 ### Changed

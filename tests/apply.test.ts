@@ -47,6 +47,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     routerRestrict: true,
     routerEscapeFile: join(dir, 'no-restrict'),
     routerTools: [...DEFAULT_ROUTER_TOOLS],
+    extraRouterTools: [],
     workerToolDeny: true,
     workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
     notifyScript: join(dir, 'notify.sh'),

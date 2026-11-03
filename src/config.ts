@@ -14,7 +14,8 @@ import { BRIEF_MAX_COLUMNS } from './store'
  * it installs the filter and drops (with a warning) anything it cannot find.
  * The shape of the list is the point of the plugin: conversation, tickets and
  * memory stay on the main session; anything that reads, writes or waits is a
- * worker's job.
+ * worker's job. Tools registered by other plugins are not listed here: the
+ * operator names those in `extraRouterTools` (see routerAllowList).
  */
 export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   // Tickets: the main session hands work out and reads what comes back.
@@ -47,15 +48,13 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   'memory_merge',
   'memory_reflect',
   'chat_recall',
-  // Talking to the person: QQ and the little screen.
+  // Talking to the person.
   'yuyu_face',
   'yuyu_face_list',
-  'external_send_file',
   // 2026-11-01 加：主人常发图，看不见就聊不动。纯只读，不写盘。
   'read_image',
-  'screen_say',
-  'screen_status',
-  'screen_power',
+  // 2026-11-03：别的插件注册的工具名不写死在这里——这个仓库只讲自己的口径。
+  // 谁家的工具该留在主会话，由 operator 在 cordis.yml 的 extraRouterTools 里点名。
   // Machine health, read-only.
   'host_status',
   'host_alerts',
@@ -146,7 +145,7 @@ export interface Config {
   quietSweep: boolean
   /** Session to wake; empty means "find the owner's c2c session in the QQ prefs file". */
   ownerSessionId: string
-  /** QQ prefs file that maps conversation keys to session ids. */
+  /** Prefs file that maps conversation keys to session ids; empty means none. */
   qqPrefsPath: string
   /** Owner openid, used to pick the right c2c session. */
   ownerOpenId: string
@@ -162,6 +161,13 @@ export interface Config {
   routerEscapeFile: string
   /** Global tool names the main session keeps. */
   routerTools: string[]
+  /**
+   * Extra global tool names the main session keeps, appended to `routerTools`.
+   * Where tools registered by other plugins go, so this package never has to
+   * spell them out. Passed through as written; the router drops names that no
+   * plugin registered, with a warning.
+   */
+  extraRouterTools: string[]
   /** Take the worker deny list out of every subagent's tool schema. */
   workerToolDeny: boolean
   /** Tool names a worker subagent does not see; write-side memory tools. */
@@ -223,9 +229,13 @@ export const Config: Schema<Config> = Schema.object({
   ownerSessionId: Schema.string()
     .default('')
     .description('Session to wake. Empty: pick the owner c2c session from the QQ prefs file.'),
+  // 2026-11-03：默认空。这个文件属于另一个插件，路径由 operator 在 cordis.yml 里配，
+  // 代码里不留那串名字。空 = 不读映射文件；ownerSessionId 没给就找不到主人会话。
   qqPrefsPath: Schema.string()
     .default('')
-    .description('QQ prefs file mapping conversation keys to session ids.'),
+    .description(
+      'Prefs file mapping conversation keys to session ids, used when ownerSessionId is empty. Empty (the default) means the file is never read, so the owner session has to be named explicitly.',
+    ),
   ownerOpenId: Schema.string()
     .default('')
     .description('Owner openid, used to pick the right c2c session when several exist.'),
@@ -251,6 +261,12 @@ export const Config: Schema<Config> = Schema.object({
   routerTools: Schema.array(Schema.string())
     .default([...DEFAULT_ROUTER_TOOLS])
     .description('Global tool names the main session keeps. Unknown names are dropped with a warning instead of failing the restrict call.'),
+  // 别的插件注册的工具：默认空，配了原样并进白名单（见 routerAllowList）。
+  extraRouterTools: Schema.array(Schema.string())
+    .default([])
+    .description(
+      'Extra global tool names the main session keeps, appended after routerTools. This is where tools registered by other plugins belong, so this package never spells their names out; values are passed through as written and unknown names are dropped with a warning.',
+    ),
   // 记忆写权限只归主会话：这是第二层，第一层是 dsh-memory 在 execute 里的守卫。
   // 单独一个开关，不跟 routerRestrict 绑：一个是主会话方不方便，一个是能不能
   // 替主人改记忆，两件事，关一个不该顺手关掉另一个。
@@ -272,3 +288,23 @@ export const Config: Schema<Config> = Schema.object({
     .default(5000)
     .description('Hard cap on one progress push in milliseconds; the child is killed and the tool returns sent=false.'),
 })
+
+/**
+ * The whitelist the router actually installs: `routerTools` followed by
+ * `extraRouterTools`, order kept, duplicates dropped.
+ *
+ * Two keys, not one, because they answer different questions: `routerTools` is
+ * this package's own table (tickets, memory, delegation), `extraRouterTools` is
+ * whatever the operator's other plugins register. Merging here keeps the code
+ * free of their names and leaves the operator a single place to name them.
+ * Nothing is validated at this point: the router drops names no plugin
+ * registered, with a warning that names the key.
+ */
+export function routerAllowList(config: Pick<Config, 'routerTools' | 'extraRouterTools'>): string[] {
+  const allow: string[] = []
+  for (const name of [...config.routerTools, ...config.extraRouterTools]) {
+    if (!name || allow.includes(name)) continue
+    allow.push(name)
+  }
+  return allow
+}

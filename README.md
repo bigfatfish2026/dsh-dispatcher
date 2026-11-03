@@ -50,14 +50,15 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
 | `quietSweep` | boolean | `false` | 巡检时不叫醒主会话，连僵尸票也不推；票照旧重开、排队消息照旧推给活着的 worker、已关票的积压报告照旧清账，报告留给主会话自己看 |
 | `ownerSessionId` | string | 空 | 叫醒哪个会话；空则从 QQ 偏好文件里认 c2c 会话 |
-| `qqPrefsPath` | string | QQ 偏好文件路径 | 会话映射文件：会话键 → session id；默认值见 `src/config.ts` 的 `qqPrefsPath` |
+| `qqPrefsPath` | string | 空 | 会话映射文件：会话键 → session id。默认空＝不读任何文件，主人会话只能由 `ownerSessionId` 指定；文件路径属于别的插件，由 operator 在 yml 里配 |
 | `ownerOpenId` | string | 空 | 主人 openid，多个 c2c 会话时用来挑对的那个 |
 | `noWaitGuard` | boolean | `true` | 拦下会让主会话干等的调用；worker 不受影响 |
 | `maxCommandMs` | number | `30000` | 单条命令最多占用主会话多久 |
 | `maxWaitMs` | number | `5000` | `job_output` 最多占用主会话多久 |
 | `routerRestrict` | boolean | `true` | 给每个非 worker 会话装 `routerTools` 白名单 |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | 这个文件存在时，任何会话都不装白名单 |
-| `routerTools` | string[] | 36 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` |
+| `routerTools` | string[] | 32 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS`：只收本包自己和宿主的内置工具 |
+| `extraRouterTools` | string[] | 空 | 别的插件注册、也该留在主会话的工具名。接在 `routerTools` 后面，原样透传；没注册的名字由 router 丢掉并告警。默认空＝本仓库不替任何外部插件点名 |
 | `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从每个 worker subagent 的工具 schema 里摘掉；跟 `routerRestrict` 各自独立 |
 | `workerDenyTools` | string[] | 7 个名字 | worker 看不见的工具名：写记忆那七个，`DEFAULT_WORKER_DENY_TOOLS` |
 | `notifyScript` | string | 安装环境里的 `notify.sh` | `progress_note` 推送用的脚本，openid 在脚本里，插件不存第二份 |
@@ -168,7 +169,7 @@ worker 需要人拍板时，让它把问题写进 `note`、状态改 `blocked`�
 
 ## 主会话白名单
 
-等待守卫是拦住「一次调用卡太久」，白名单是干脆不给它这个工具。`routerRestrict` 开着（默认）时，每个不是 worker 的会话一出现就挂上 `tools.restrict({ allow: routerTools })`：主会话留着票、派活、记忆、跟人说话的那几样，加只读文件工具（`read`、`glob`）和只读的机器检查，写盘、shell 和等待类全没了——「派出去」于是不再跟「在这儿干」抢，长活也卡不住回话。worker 这一头留着全套工具，重活才有地方去，只摘写记忆的那七个（见下一节）。
+等待守卫是拦住「一次调用卡太久」，白名单是干脆不给它这个工具。`routerRestrict` 开着（默认）时，每个不是 worker 的会话一出现就挂上 `tools.restrict({ allow: routerTools + extraRouterTools })`：主会话留着票、派活、记忆、跟人说话的那几样，加只读文件工具（`read`、`glob`）和只读的机器检查，写盘、shell 和等待类全没了——「派出去」于是不再跟「在这儿干」抢，长活也卡不住回话。worker 这一头留着全套工具，重活才有地方去，只摘写记忆的那七个（见下一节）。
 
 默认 36 个名字，写在 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS` 里。`grep` 不在其中：它一次 `-rn` 的输出体积没有上限，而主会话的长上下文成本基本全是 cache read（实测占 98.6%），一句没收住的搜索等于按整段日志持续付钱。要搜内容就派 worker，让它把命中压成几行带回来。名字必须跟注册的全局工具名对得上：`tools.restrict` 遇到不认识的名字会抛错，而 `ctx.effect` 把回调里的异常交给 cordis 的错误处理、不会送回调用方，所以插件先对着注册表核一遍——把没人认的名字 warn 出来，只从白名单里剔掉那几个。写错一个名字的代价是一行日志，不是整份白名单。
 
