@@ -40,7 +40,19 @@ export interface TicketSnapshot {
   status: TicketStatus
   dir?: string
   note?: string
+  /**
+   * Human label for the worker (what the little screen shows): `t4 查qqbot PR`
+   * rather than a session id. Kept as free text so a person can read it.
+   */
   owner?: string
+  /**
+   * The worker's session id as `spawn` returned it (uuid, optionally with a
+   * `session-` prefix). Optional: tickets written before 2026-11-03 have none,
+   * and readers must treat it as absent rather than guessing — the zombie sweep
+   * uses it for an exact liveness check and otherwise falls back to the old
+   * hex-fragment scan over `owner`.
+   */
+  ownerId?: string
   createdAt: string
   updatedAt: string
   /**
@@ -66,6 +78,7 @@ interface TicketEvent {
   dir?: string
   note?: string
   owner?: string
+  ownerId?: string
   input?: { id: string; text: string }
   report?: { id: string; text: string }
   delivered?: { kind: EntryKind; id: string }
@@ -237,6 +250,7 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
         dir: event.dir,
         note: event.note,
         owner: event.owner,
+        ownerId: event.ownerId,
         createdAt: event.at,
         updatedAt: event.at,
         closedAt: event.status && ENDED.has(event.status) ? event.at : undefined,
@@ -255,6 +269,7 @@ export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
       dir: event.dir ?? previous.dir,
       note: event.note ?? previous.note,
       owner: event.owner ?? previous.owner,
+      ownerId: event.ownerId ?? previous.ownerId,
       updatedAt: event.at,
       // A status line is the only thing that moves the close: done/dropped set
       // it, reopening clears it, and every other event leaves it alone.
@@ -376,7 +391,10 @@ export class TicketStore {
     return this.get(id)!
   }
 
-  update(id: string, patch: { status?: TicketStatus; note?: string; owner?: string; dir?: string }): TicketSnapshot {
+  update(
+    id: string,
+    patch: { status?: TicketStatus; note?: string; owner?: string; ownerId?: string; dir?: string },
+  ): TicketSnapshot {
     const existing = this.get(id)
     if (!existing) throw new Error(`unknown ticket: ${id}`)
     this.append({ id, at: new Date().toISOString(), ...patch })

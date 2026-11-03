@@ -172,26 +172,61 @@ export interface PruneResult {
   removed: string[]
 }
 
-/**
- * Drop the tool sections whose tools are all hidden.
- *
- * Visibility is read from `assembly.tools`, which the tool registry already
- * filled through this scope's restrictions — the same set the model is about
- * to receive. Nothing here re-derives it from the allow list, so a name that is
- * whitelisted but not registered does not keep a section alive.
- */
-export function pruneToolSections(assembly: PromptAssembly, allow: readonly string[]): PruneResult {
+/** How one prune pass decides which sections go. */
+export interface PruneOptions {
+  /**
+   * Drop every tool-guidance section, whatever the session can still call.
+   *
+   * A worker subagent's tool set comes from its preset, so a prompt that spells
+   * the tools out statically can never match the schema it ships with — and the
+   * tool's own description already says what it does. With no way to be right,
+   * the whole family is dead weight in every worker session, so it all goes.
+   * The family is still {@link sectionToolFamily}'s: persona, plan policy and
+   * the hand-off rules are never touched.
+   */
+  dropAllToolSections?: boolean
+}
+
+/** The per-section verdict one pass uses, so the loop below stays one shape. */
+function pruneVerdict(
+  assembly: PromptAssembly,
+  allow: readonly string[],
+  options: PruneOptions,
+): (section: PromptSection) => boolean {
+  if (options.dropAllToolSections === true) {
+    return (section) => sectionToolFamily(section.name) !== undefined
+  }
   const visible = new Set<string>((assembly.tools ?? []).map((tool) => tool.name))
   const vocabulary = new Set<string>([...allow, ...visible])
   for (const section of assembly.sections) {
     const group = toolSectionGroup(section.name)
     if (group !== undefined) vocabulary.add(group)
   }
+  return (section) => prunesToolSection(section, visible, vocabulary)
+}
+
+/**
+ * Drop the tool sections the session cannot back.
+ *
+ * Visibility is read from `assembly.tools`, which the tool registry already
+ * filled through this scope's restrictions — the same set the model is about
+ * to receive. Nothing here re-derives it from the allow list, so a name that is
+ * whitelisted but not registered does not keep a section alive.
+ *
+ * `options.dropAllToolSections` skips that question and drops the whole family
+ * (see {@link PruneOptions}); everything outside the family stays either way.
+ */
+export function pruneToolSections(
+  assembly: PromptAssembly,
+  allow: readonly string[],
+  options: PruneOptions = {},
+): PruneResult {
+  const prune = pruneVerdict(assembly, allow, options)
 
   const removed: string[] = []
   const sections = assembly.sections.filter((section) => {
     const text = typeof section.text === 'string' ? section.text : ''
-    if (!prunesToolSection({ ...section, text }, visible, vocabulary)) return true
+    if (!prune({ ...section, text })) return true
     removed.push(section.name)
     return false
   })
@@ -213,6 +248,10 @@ export interface PromptScope {
 export interface PromptFilterOptions {
   /** The whitelist, used only to widen the vocabulary. */
   allow: readonly string[]
+  /** Passed through to {@link pruneToolSections}; see {@link PruneOptions}. */
+  dropAllToolSections?: boolean
+  /** The effect label this pass is armed under; main and worker stay apart. */
+  effectLabel?: string
   log?(message: string): void
 }
 
@@ -258,10 +297,14 @@ export function bindPromptFilter(
     () => {
       stop = register('system-prompt/assemble', async (assembly, _context, next) => {
         const assembled = await next()
-        const { assembly: pruned, removed } = pruneToolSections(assembled, options.allow)
+        const { assembly: pruned, removed } = pruneToolSections(assembled, options.allow, {
+          dropAllToolSections: options.dropAllToolSections === true,
+        })
         if (removed.length > 0 && !announced) {
           announced = true
-          options.log?.(`[dispatcher] pruned prompt sections for hidden tools: ${removed.join(', ')}`)
+          const what =
+            options.dropAllToolSections === true ? 'tool sections from a worker prompt' : 'sections for hidden tools'
+          options.log?.(`[dispatcher] pruned ${removed.length} ${what}: ${removed.join(', ')}`)
         }
         return pruned
       })
@@ -270,7 +313,7 @@ export function bindPromptFilter(
         stop = undefined
       }
     },
-    'dsh-dispatcher.router-prompt',
+    options.effectLabel ?? 'dsh-dispatcher.router-prompt',
   )
 
   return {

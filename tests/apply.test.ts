@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
 import type { Config } from '../src/config'
 import { WORKER_FORBIDDEN_TOOLS, apply } from '../src/index'
+import type { PromptAssemblyHook } from '../src/prompt'
 
 const tempDirs: string[] = []
 
@@ -50,6 +51,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     extraRouterTools: [],
     workerToolDeny: true,
     workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
+    workerPromptPrune: true,
     notifyScript: join(dir, 'notify.sh'),
     notifyTimeoutMs: 5000,
     ...overrides,
@@ -60,6 +62,7 @@ interface FakeAgent {
   session: { header: { origin?: string } }
   ctx: {
     effect(callback: () => () => void, label?: string): unknown
+    on?(event: string, listener: PromptAssemblyHook): () => void
     tools: {
       restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
       get(name: string): unknown
@@ -83,6 +86,8 @@ function fakeHost(options: { registered?: string[]; existingAgents?: number } = 
   const lifted: number[] = []
   const createdListeners: Array<(payload: { agent: FakeAgent }) => unknown> = []
   const changeListeners: Array<() => unknown> = []
+  // The scoped prompt hooks: one per (main or worker) session that got a pass.
+  const hooks: PromptAssemblyHook[] = []
   // The host emits `tools/change` on every registration and every restriction.
   // Our own reinstall fires it too, so the loop has to stop by itself.
   const fireChange = (): void => {
@@ -93,6 +98,10 @@ function fakeHost(options: { registered?: string[]; existingAgents?: number } = 
     session: { header: origin ? { origin } : {} },
     ctx: {
       effect: (callback) => callback(),
+      on(event: string, listener: PromptAssemblyHook) {
+        if (event === 'system-prompt/assemble') hooks.push(listener)
+        return () => {}
+      },
       tools: {
         restrict(filter) {
           const index = restricted.length
@@ -139,7 +148,20 @@ function fakeHost(options: { registered?: string[]; existingAgents?: number } = 
     },
   }
 
-  return { ctx, registry, events, restricted, denied, warnings, infos, lifted, createdListeners, changeListeners, makeAgent }
+  return {
+    ctx,
+    registry,
+    events,
+    restricted,
+    denied,
+    warnings,
+    infos,
+    lifted,
+    hooks,
+    createdListeners,
+    changeListeners,
+    makeAgent,
+  }
 }
 
 describe('apply', () => {
@@ -231,6 +253,29 @@ describe('apply', () => {
     expect(host.denied).toEqual([])
     // The main session is still trimmed.
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
+  })
+
+  // The prompt prune is its own switch: turning the deny list off must not put
+  // the static tool sections back into every worker prompt.
+  it('trims the worker prompt even when workerToolDeny is off', () => {
+    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
+    apply(host.ctx as never, testConfig({ workerToolDeny: false }))
+    const before = host.hooks.length
+
+    for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
+    expect(host.denied).toEqual([])
+    expect(host.hooks.length - before).toBe(1)
+  })
+
+  it('leaves the worker prompt alone when workerPromptPrune is off', () => {
+    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
+    apply(host.ctx as never, testConfig({ workerPromptPrune: false }))
+    const before = host.hooks.length
+
+    for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
+    // The deny list still goes on; only the prompt pass is skipped.
+    expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
+    expect(host.hooks.length).toBe(before)
   })
 
   // The live bug: a tool that belongs to another plugin, which the loader

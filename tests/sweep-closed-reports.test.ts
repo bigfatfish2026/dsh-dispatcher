@@ -48,6 +48,7 @@ function testConfig(stateFile: string, overrides: Partial<Config> = {}): Config 
     extraRouterTools: [],
     workerToolDeny: false,
     workerDenyTools: [],
+    workerPromptPrune: true,
     notifyScript: '',
     notifyTimeoutMs: 5000,
     ...overrides,
