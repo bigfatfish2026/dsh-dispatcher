@@ -1,4 +1,13 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeSync,
+} from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -213,6 +222,11 @@ function deliver(entries: readonly TicketEntry[], at: string, id: string): Ticke
 export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
   const state = new Map<string, TicketSnapshot>()
   for (const event of events) {
+    // 一行能 parse 不等于它是一条事件：崩溃留下的 null、数字、数组都在这里被挡下。
+    // 放过去的话 `event.id` 会抛 TypeError，而 `store.list()` 是每个 dispatch_* 的
+    // 第一步——一处脏行就能把整套工具打死。没有 id/at 的行也不构成事件。
+    if (event === null || typeof event !== 'object') continue
+    if (typeof event.id !== 'string' || typeof event.at !== 'string') continue
     const previous = state.get(event.id)
     if (!previous) {
       state.set(event.id, {
@@ -273,9 +287,12 @@ export function pending(entries: readonly TicketEntry[]): TicketEntry[] {
 
 export class TicketStore {
   private readonly file: string
+  /** Where a line the log cannot read gets reported; omitted means quietly. */
+  private readonly log?: (message: string) => void
 
-  constructor(file: string) {
+  constructor(file: string, log?: (message: string) => void) {
     this.file = file
+    this.log = log
   }
 
   get path(): string {
@@ -286,14 +303,37 @@ export class TicketStore {
     if (!existsSync(this.file)) return []
     const text = readFileSync(this.file, 'utf8')
     const events: TicketEvent[] = []
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim()
+    const bad: number[] = []
+    let line = 0
+    for (const raw of text.split('\n')) {
+      line += 1
+      const trimmed = raw.trim()
       if (!trimmed) continue
+      let parsed: unknown
       try {
-        events.push(JSON.parse(trimmed) as TicketEvent)
+        parsed = JSON.parse(trimmed)
       } catch {
-        // A torn last line after a crash is skipped rather than failing the tool.
+        // 崩溃留下的半截行，或者别人写坏的字节：跳过这一行，不能因此让整次读取失败。
+        bad.push(line)
+        continue
       }
+      const event = parsed as TicketEvent
+      // 能 parse 不等于是一条事件：null、数字、数组、缺 id/at 的行同样跳过。
+      if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        typeof event.id !== 'string' ||
+        typeof event.at !== 'string'
+      ) {
+        bad.push(line)
+        continue
+      }
+      events.push(event)
+    }
+    if (bad.length > 0) {
+      this.log?.(
+        `[dispatcher] ticket log ${this.file}: skipped ${bad.length} line(s) that are not events (line ${bad.join(', ')})`,
+      )
     }
     return events
   }
@@ -308,7 +348,22 @@ export class TicketStore {
 
   private append(event: TicketEvent): void {
     mkdirSync(dirname(this.file), { recursive: true })
-    appendFileSync(this.file, `${JSON.stringify(event)}\n`, 'utf8')
+    const fd = openSync(this.file, 'a+')
+    try {
+      // 上一次崩在半行：末字节不是换行就先补一个，否则这一条会粘在坏行尾巴上，
+      // 两条一起被当成坏行丢掉——被丢的可能正是 done 或 delivered。
+      const { size } = fstatSync(fd)
+      let prefix = ''
+      if (size > 0) {
+        const last = Buffer.alloc(1)
+        readSync(fd, last, 0, 1, size - 1)
+        if (last[0] !== 0x0a) prefix = '\n'
+      }
+      // 前缀和正文合成一次 writeSync：O_APPEND 下一次写完，没有半写的中间态。
+      writeSync(fd, `${prefix}${JSON.stringify(event)}\n`)
+    } finally {
+      closeSync(fd)
+    }
   }
 
   open(goal: string, dir?: string, brief?: string): TicketSnapshot {

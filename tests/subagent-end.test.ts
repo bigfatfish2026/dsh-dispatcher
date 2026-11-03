@@ -245,3 +245,71 @@ describe('subagent/end subscription is not load-bearing', () => {
     expect(warnings.join('\n')).toContain('subagent/end')
   })
 })
+
+/**
+ * 2026-11-03: 现场真事——主会话开票时 owner 只写了 `subagent 34b183b9`，而
+ * `subagent/end` 的 id 是完整 uuid，旧的三变体比对永远不中，票静默挂 running。
+ * 这里钉住短标签兜底的边界：前缀算命中，任意子串、六位以下、纯中文标签都不算。
+ */
+describe('a short owner label still settles the ticket', () => {
+  const full = '34b183b9-5d77-474e-8a8d-74ea0d3327f4'
+
+  it('matches the real case: subagent 34b183b9 vs the full uuid', () => {
+    const { store, end } = mount()
+    const ticket = store.open('short label owner')
+    store.update(ticket.id, { status: 'running', owner: 'subagent 34b183b9' })
+
+    fire(end, { id: full, stopReason: 'completed' })
+
+    expect(store.get(ticket.id)!.status).toBe('waiting')
+  })
+
+  it('still matches full uuid against full uuid', () => {
+    const { store, end } = mount()
+    const ticket = store.open('full uuid owner')
+    store.update(ticket.id, { status: 'running', owner: full })
+
+    fire(end, { id: full, stopReason: 'completed' })
+
+    expect(store.get(ticket.id)!.status).toBe('waiting')
+  })
+
+  it('still matches through the session- prefix on the owner side', () => {
+    const { store, end } = mount()
+    const ticket = store.open('prefixed short label')
+    store.update(ticket.id, { status: 'running', owner: `session-subagent 34b183b9` })
+
+    fire(end, { id: full, stopReason: 'completed' })
+
+    expect(store.get(ticket.id)!.status).toBe('waiting')
+  })
+
+  it('leaves a pure Chinese label alone', () => {
+    const { store, end } = mount()
+    const ticket = store.open('chinese label')
+    store.update(ticket.id, { status: 'running', owner: '重启小鱼' })
+
+    expect(() => fire(end, { id: full, stopReason: 'completed' })).not.toThrow()
+    expect(store.get(ticket.id)!.status).toBe('running')
+  })
+
+  it('does not match two different uuids', () => {
+    const { store, end } = mount()
+    const ticket = store.open('someone else')
+    store.update(ticket.id, { status: 'running', owner: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })
+
+    fire(end, { id: full, stopReason: 'completed' })
+
+    expect(store.get(ticket.id)!.status).toBe('running')
+  })
+
+  it('does not match a fragment shorter than six hex digits', () => {
+    const { store, end } = mount()
+    const ticket = store.open('too short to mean anything')
+    store.update(ticket.id, { status: 'running', owner: 'subagent 34b18' })
+
+    fire(end, { id: full, stopReason: 'completed' })
+
+    expect(store.get(ticket.id)!.status).toBe('running')
+  })
+})

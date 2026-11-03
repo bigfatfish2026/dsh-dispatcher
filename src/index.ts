@@ -32,6 +32,26 @@ export { Config }
 
 const STATUSES = ['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as const
 
+/**
+ * worker 无论配置怎么写都不该拿到的本包工具：写 status、开票关票、扫票、
+ * 绕过票直接推手机。
+ *
+ * 名单按 README「谁写 status」那节定：worker 手上只该有 `dispatch_report` 和
+ * `dispatch_send`，两条都只往队列里追加行，碰不到 status。`dispatch_open` 还会
+ * 占 `maxOpen` 名额，`dispatch_sweep` 能把主会话叫醒，`progress_note` 正是
+ * 派活规矩里明令不许 worker 走的那条推送绕路。
+ *
+ * 它拼在 `workerDenyTools` 之后、不进 config 默认值：operator 改写
+ * `workerDenyTools` 不该顺手把这几样放回 worker 手里。
+ */
+export const WORKER_FORBIDDEN_TOOLS = [
+  'dispatch_open',
+  'dispatch_touch',
+  'dispatch_close',
+  'dispatch_sweep',
+  'progress_note',
+] as const
+
 /** One ticket as a plain JSON object, which is what a tool may return. */
 export interface TicketView {
   id: string
@@ -107,7 +127,6 @@ const ticketProperties = {  id: { type: 'string' },
  * whether anything has gone quiet for too long.
  */
 export function apply(ctx: Context, config: ConfigShape): void {
-  const store = new TicketStore(resolveStateFile(config.stateFile))
   const staleMinutes = config.staleMinutes
   const warn = (message: string): void => {
     ;(ctx as { logger?: { warn?: (message: string) => void } }).logger?.warn?.(message)
@@ -116,6 +135,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const info = (message: string): void => {
     ;(ctx as { logger?: { info?: (message: string) => void } }).logger?.info?.(message)
   }
+  // 日志里读不过来的行（崩溃留下的半截行、一行 null）不静默：跳过之后记一条 warn，
+  // 不然「有一张票莫名不见了」只能靠猜。
+  const store = new TicketStore(resolveStateFile(config.stateFile), warn)
 
   // The wording comes from config; an empty block means "do not inject this
   // section at all", which is the same thing handoffPolicy: false does.
@@ -153,6 +175,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
     // is not a guarantee. Sessions that already exist when the plugin loads get
     // the guard too, or a reload would only protect the next one.
     const guarded = new WeakSet<object>()
+    // guard 装在各会话的 ctx 上，所以它有两个拥有者：会话先没了走 agent.ctx 的
+    // effect，插件先没了（卸载 / 热重载）走下面那个插件级 teardown。两边都会调到，
+    // release 自己幂等，撤第二次什么也不做。
+    const guardReleases = new Set<() => void>()
     let announced = false
     const install = (agent: {
       session: { header: { origin?: string } }
@@ -161,13 +187,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }): void => {
       if (isWorkerSession(agent.session.header.origin) || guarded.has(agent)) return
       guarded.add(agent)
-      agent.ctx.effect(
-        () =>
-          agent.ctx.tools.guard((execution) =>
-            noWaitReason(execution.name, (execution.arguments ?? {}) as Record<string, unknown>, limits),
-          ),
-        'dsh-dispatcher.no-wait',
+      let stopGuard: (() => void) | undefined = agent.ctx.tools.guard((execution) =>
+        noWaitReason(execution.name, (execution.arguments ?? {}) as Record<string, unknown>, limits),
       )
+      const release = (): void => {
+        const stop = stopGuard
+        stopGuard = undefined
+        guardReleases.delete(release)
+        stop?.()
+      }
+      guardReleases.add(release)
+      // 两个拥有者：会话先没了走这里；插件先没了走下面的 teardown。release 幂等。
+      agent.ctx.effect(() => release, 'dsh-dispatcher.no-wait')
       if (!announced) {
         announced = true
         ;(ctx as { logger?: { info?: (message: string) => void } }).logger?.info?.(
@@ -180,6 +211,11 @@ export function apply(ctx: Context, config: ConfigShape): void {
       install(agent)
       return undefined
     })
+    // 插件这一侧的生命周期：热重载只换掉插件 fiber，不会去动 agent 的 scope，
+    // 所以卸下 guard 的动作得挂在这里，否则旧 limit 会一直压着新实例。
+    ctx.effect(() => () => {
+      for (const release of [...guardReleases]) release()
+    }, 'dsh-dispatcher.no-wait-teardown')
   }
 
   ctx.tools.register(
@@ -411,13 +447,26 @@ export function apply(ctx: Context, config: ConfigShape): void {
    * AgentRegistry.get(agent.session.id) 是唯一可靠的判活入口（dsh-agent 的
    * registry key 就是 session id），但票里的 owner 是主会话随手填的：可能裸 uuid、
    * 可能带 session- 前缀、也可能是「重启小鱼」这种短标签。短标签查不到活不等于
-   * 小鱼死了，所以那种情况返回 undefined，交给静默阈值兜底。
+   * 小鱼死了，所以这里只回答「查到了吗」，判死交给调用方的门槛。
    */
   const agentAlive = (owner: string): boolean | undefined => {
-    const agents = (ctx as unknown as { agents?: { get?: (id: string) => unknown } }).agents
+    const agents = (ctx as unknown as {
+      agents?: {
+        get?: (id: string) => unknown
+        list?: () => Array<{ id?: string; session?: { id?: string } }>
+      }
+    }).agents
     if (!agents?.get) return undefined
     for (const id of idVariants(owner)) {
       if (agents.get(id)) return true
+    }
+    // 短标签兜底：票里的 owner 可能只写了 uuid 前缀（`subagent 34b183b9`），
+    // 活表的 key 才是完整的 session id。查活宁可宽松——命中了就算活；
+    // 扫不到也不把这里的 false 改成 undefined，判死仍由调用方的
+    // looksLikeSessionId 门槛把关。
+    for (const agent of agents.list?.() ?? []) {
+      const live = agent?.session?.id ?? agent?.id
+      if (typeof live === 'string' && matchesId(owner, live)) return true
     }
     return false
   }
@@ -425,11 +474,44 @@ export function apply(ctx: Context, config: ConfigShape): void {
   /**
    * owner / 子 session id 的前缀变体。票里的 owner 是主会话随手填的：可能裸
    * uuid、可能带 `session-` 前缀；`subagent/end` 给的 id 也可能是这两种写法。
-   * 比对时两边都过一遍这组变体，一处实现，判活和收票共用。
+   * 精确比对走这组变体，短标签兜底在 matchesId 里。
    */
   function idVariants(id: string): Set<string> {
     const bare = id.replace(/^session-/, '')
     return new Set([id, bare, `session-${bare}`])
+  }
+
+  /**
+   * owner 和子 session id 是不是同一路小鱼。判活和收票共用这一份。
+   *
+   * 先按 idVariants 一比一判；不中再走短标签兜底：主会话开票时可能只写
+   * `subagent 34b183b9`（前缀 + 8 位 uuid 前缀），而 `subagent/end` 给的是完整
+   * `34b183b9-5d77-...`。两边各抽出 uuid 形态的片段（连续 [0-9a-f]、至少 6 位），
+   * 一方是另一方的前缀就算命中。
+   *
+   * 边界是有意的：只做前缀、不做任意子串（`deadbeef` 不该匹配到中间某段）；
+   * 片段至少 6 位（`abc` 太容易撞）；两边都抽不到片段（`重启小鱼` 这种纯中文
+   * 标签）就返回不匹配，交给静默阈值兜底，不报错。
+   */
+  function matchesId(a: string, b: string): boolean {
+    const left = idVariants(a)
+    for (const candidate of idVariants(b)) {
+      if (left.has(candidate)) return true
+    }
+    const aliases = hexFragments(a)
+    const ends = hexFragments(b)
+    if (aliases.length === 0 || ends.length === 0) return false
+    for (const alias of aliases) {
+      for (const end of ends) {
+        if (alias.startsWith(end) || end.startsWith(alias)) return true
+      }
+    }
+    return false
+  }
+
+  /** id 里的 uuid 形态片段：去 `session-` 前缀后连续 [0-9a-f]、至少 6 位。 */
+  function hexFragments(id: string): string[] {
+    return id.replace(/^session-/, '').toLowerCase().match(/[0-9a-f]{6,}/g) ?? []
   }
 
   // 小鱼退出后票不能空挂：宿主在子 session 收尾时广播 `subagent/end`，payload
@@ -455,18 +537,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }).on('subagent/end', (information) => {
       const finished = typeof information?.id === 'string' ? information.id : ''
       if (!finished) return undefined
-      const ended = idVariants(finished)
       for (const ticket of store.list()) {
         if (ticket.status !== 'open' && ticket.status !== 'running') continue
         if (!ticket.owner) continue
-        let same = false
-        for (const candidate of idVariants(ticket.owner)) {
-          if (ended.has(candidate)) {
-            same = true
-            break
-          }
-        }
-        if (!same) continue
+        if (!matchesId(ticket.owner, finished)) continue
         // 票里的 reports 在这张快照上已经 fold 好了（store.ts 那段 fold），
         // 顺手数一下写进 note：主会话光看备注就知道小鱼到底交没交活，
         // 不用为这个再翻一遍报告。只写 note，status 还是 waiting、绝不写 done。
@@ -785,8 +859,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // ── 主会话白名单 + worker 反向名单 ──────────────────────────────
   // 模型还是会自己决定怎么干活；能保证的只有一件事——重活在主会话里没有
   // 工具可调，于是「派出去」不再和「在这儿干」竞争，长任务也卡不住回话。
-  // worker 这边只摘一样东西：写记忆的工具（workerDenyTools）。记忆写权限
-  // 只归主会话，这是第二层，第一层是 dsh-memory 在 execute 里的守卫。
+  // worker 这边摘两样东西：写记忆的工具（workerDenyTools）和本包那几个能改票的
+  // 工具（WORKER_FORBIDDEN_TOOLS）。记忆写权限只归主会话，这是第二层，第一层是
+  // dsh-memory 在 execute 里的守卫；票的 status 只归主会话和巡检，worker 连名字
+  // 都不该看见（README「谁写 status」）。
   //
   // 顺序是有讲究的：这一段必须跑在所有 `ctx.tools.register` 之后。装载器会
   // 在安装白名单时拿 allow 名单去注册表里点名，点不到的就按「名字写错」剔掉；
@@ -804,6 +880,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
     const bound = new WeakMap<object, RouterBinding>()
     let announced = false
     let workerAnnounced = false
+    // teardown 开始以后，`tools/change` 不许再把还没拆到的 binding 装回去：
+    // dispose 撤 restrict 会同步触发它。
+    let tearingDown = false
     const log = (message: string): void => {
       ;(ctx as { logger?: { warn?: (message: string) => void } }).logger?.warn?.(message)
     }
@@ -835,7 +914,11 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }
     const options = {
       allow: routerAllowList(config),
-      deny: config.workerToolDeny ? config.workerDenyTools : [],
+      // deny 是叠加语义、越减越少，跟 allow 不会互相打架。这一份拼在配置之后、
+      // 不进 config 默认值：operator 改写 workerDenyTools 不该顺手放出这几样。
+      deny: config.workerToolDeny
+        ? [...new Set([...config.workerDenyTools, ...WORKER_FORBIDDEN_TOOLS])]
+        : [],
       escapeFile: config.routerEscapeFile,
       log,
       info,
@@ -854,6 +937,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
         binding = bindRouter(agent, options)
         bound.set(agent, binding)
         bindings.add(binding)
+        // 会话没了就把这条 binding 撤掉、从集合里删掉。强引用 Set 只增不删的话，
+        // 死掉的作用域会一直被 tools/change 叫醒着去 sync。dispose 幂等，
+        // 插件卸载时下面那段 teardown 再调一次也没事。
+        const own = binding
+        agent.ctx.effect(() => () => {
+          own.dispose()
+          bindings.delete(own)
+        }, 'dsh-dispatcher.router-release')
       } else {
         binding.sync()
       }
@@ -862,7 +953,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
         if ((outcome === 'denied' || outcome === 'updated') && !workerAnnounced) {
           workerAnnounced = true
           info(
-            `[dispatcher] worker subagents hide ${binding.installed().length} memory-write tool(s): ${binding.installed().join(', ')}`,
+            `[dispatcher] worker subagents hide ${binding.installed().length} tool(s): ${binding.installed().join(', ')}`,
           )
         }
         return
@@ -886,8 +977,20 @@ export function apply(ctx: Context, config: ConfigShape): void {
     // restriction change. Our own reinstall fires it too, which is why `sync`
     // short-circuits on an unchanged list instead of reinstalling blindly.
     ctx.on('tools/change', () => {
-      for (const binding of bindings) binding.sync()
+      if (tearingDown) return undefined
+      for (const binding of [...bindings]) binding.sync()
       return undefined
     })
+    // 插件这一侧的 disposer：热重载/卸载只替换插件 fiber，不会动 agent 的
+    // scope，所以装在各会话上的 restrict、worker deny 和 prompt pass 必须在这里
+    // 撤掉。只挂 agent.ctx 的后果 2026-11-01 真出过：旧的 26 个工具压着新白名单的
+    // 36 个，取交集之后改配置完全无效。
+    // tearingDown 先置位：dispose 里撤 restrict 会同步触发 tools/change，别让
+    // 还没撤到的 binding 在拆的过程中又装回去。
+    ctx.effect(() => () => {
+      tearingDown = true
+      for (const binding of [...bindings]) binding.dispose()
+      bindings.clear()
+    }, 'dsh-dispatcher.router-teardown')
   }
 }
