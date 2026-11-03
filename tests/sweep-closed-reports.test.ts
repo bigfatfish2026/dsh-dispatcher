@@ -33,6 +33,7 @@ function testConfig(stateFile: string, overrides: Partial<Config> = {}): Config 
     handoffPolicyText: '',
     sweepMinutes: 0,
     zombieMinutes: 20,
+    noReportMinutes: 5,
     notifyOwner: false,
     quietSweep: false,
     ownerSessionId: OWNER,

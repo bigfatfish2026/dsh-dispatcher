@@ -46,6 +46,7 @@ function testConfig(stateFile: string, overrides: Partial<Config> = {}): Config 
     handoffPolicyText: '',
     sweepMinutes: 0,
     zombieMinutes: 20,
+    noReportMinutes: 5,
     notifyOwner: false,
     quietSweep: true,
     ownerSessionId: '',
@@ -89,7 +90,7 @@ function mount(stateFile: string, overrides: Partial<Config> = {}): Map<string, 
   return tools
 }
 
-/** A goal that exactly fills the cap: 17 汉字 = 34 columns (2026-11-02 display measurement). */
+/** A goal that exactly fills the cap: 17 汉字 = 34 columns (2026-11-02 little-screen measurement). */
 const AT_CAP = '一二三四五六七八九十一二三四五六七'
 /** One more 汉字 than fits, so the truncation has something to cut. */
 const OVER_CAP = `${AT_CAP}八九十`

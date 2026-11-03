@@ -23,7 +23,7 @@ export interface TicketSnapshot {
   goal: string
   /**
    * One-line summary of the goal, for the little screen's second line: at most
-   * `BRIEF_MAX_COLUMNS` display columns. Optional because tickets written before
+   * `BRIEF_MAX_COLUMNS` character columns. Optional because tickets written before
    * 2026-11-02 have no such field — readers fall back to `briefOf()`, which
    * derives the same thing from `goal`.
    */
@@ -65,11 +65,11 @@ interface TicketEvent {
 export type EntryKind = 'input' | 'report'
 
 /**
- * Longest brief, measured in display columns: a CJK character is 2 columns, a
+ * Longest brief, measured in character columns: a CJK character is 2 columns, a
  * half-width one is 1. 34 columns = 17 汉字, which is what fits on the little
  * screen's second line.
  *
- * 依据 2026-11-02 display 侧实测：第二行 10px 字号、可用宽 172px，能放 17 个汉字
+ * 依据 2026-11-02 小屏实测：第二行 10px 字号、可用宽 172px，能放 17 个汉字
  * 或 28 个 ASCII 字符。汉字更宽，所以上限按汉字钉死在 17×2=34 列；纯 ASCII 的
  * brief 会在 28 列左右就自然结束，不会顶到 34。
  *
@@ -106,7 +106,7 @@ export function textColumns(text: string): number {
   return total
 }
 
-/** Cut to `maxColumns` display columns, adding an ellipsis when anything was dropped. */
+/** Cut to `maxColumns` character columns, adding an ellipsis when anything was dropped. */
 export function truncateColumns(text: string, maxColumns: number = BRIEF_MAX_COLUMNS): string {
   if (textColumns(text) <= maxColumns) return text
   // The ellipsis has to fit inside the cap too, otherwise a "10 汉字" brief

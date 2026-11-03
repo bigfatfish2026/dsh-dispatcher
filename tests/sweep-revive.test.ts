@@ -32,6 +32,7 @@ function testConfig(stateFile: string): Config {
     handoffPolicyText: '',
     sweepMinutes: 0,
     zombieMinutes: 20,
+    noReportMinutes: 5,
     notifyOwner: false,
     quietSweep: true,
     ownerSessionId: '',
