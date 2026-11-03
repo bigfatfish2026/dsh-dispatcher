@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { BRIEF_MAX_COLUMNS } from './store'
+import type { TicketBackendName } from './store/backend'
 
 // Tunable configuration must be a Schemastery Schema, never a plain object:
 // the harness validates it at load time and fails loud on invalid values, and
@@ -112,6 +113,15 @@ export const DEFAULT_HANDOFF_POLICY = `【派活规矩 · dispatcher】主会话
 export interface Config {
   /** Where the ticket log lives. One JSON object per line, append-only. */
   stateFile: string
+  /**
+   * Which storage backend serves the ticket log. Only the shape of the log is
+   * fixed; this picks who reads and appends it. Optional here (and defaulted in
+   * the schema) so a hand-written config object in a test still typechecks.
+   */
+  store?: {
+    /** 'jsonl' (default) | 'redis' | 'sqlite'. The last two fail loud for now. */
+    backend?: TicketBackendName
+  }
   /** Minutes without an update before a ticket is reported as stale. */
   staleMinutes: number
   /** How many tickets may be open (not done, not dropped) at once. */
@@ -184,6 +194,18 @@ export const Config: Schema<Config> = Schema.object({
   stateFile: Schema.string()
     .default('dispatcher/tickets.jsonl')
     .description('Ticket log path, relative to the DSH home directory unless absolute.'),
+  // 存储后端：日志格式和语义不变，变的只是「谁来读写它」。默认 jsonl，
+  // redis / sqlite 先只认名字、调用时抛未实现——别让写错的配置悄悄退回文件。
+  // 新后端要满足的契约在 src/store/backend.ts 顶部的注释里。
+  store: Schema.object({
+    backend: Schema.union(['jsonl', 'redis', 'sqlite'] as const)
+      .default('jsonl')
+      .description(
+        'Ticket log backend. jsonl is the only implementation today: the append-only file stateFile names. redis and sqlite are accepted names that fail loud at load time until they exist; a new backend must satisfy the contract at the top of src/store/backend.ts (linearized append, immutable events, replayable fold, crash-safe, changed() as an optimisation only).',
+      ),
+  })
+    .default({ backend: 'jsonl' })
+    .description('Storage selection for the ticket log; see store.backend.'),
   staleMinutes: Schema.natural()
     .default(30)
     .description('Minutes without an update before a ticket counts as stale.'),

@@ -4,6 +4,12 @@
 
 ### Added
 
+2026-11-04 — 票存储抽出后端接口。原来 `src/store.ts` 一个文件里既折票又直接 `openSync/writeSync` 写 jsonl，换个存储得把业务跟着改一遍。现在分成三层：`src/store/backend.ts` 是契约（`TicketBackend` 只有 `location` / `changed()` / `load()` / `append(event)` 四个原语，业务语义全留在门面上），`src/store/jsonl.ts` 的 `JsonlTicketStore` 是今天唯一的实现，`TicketStore` 只持有接口实例。开票、改状态、排 input、追加报告、标已读、清已关票的报告，统统是 `append()` 一条不可变事件——接 redis/sqlite 只要实现「读全量 + 原子追加 + 变更探测」，业务代码一行不改。
+
+配置新增 `store.backend`（默认 `jsonl`）。`redis` / `sqlite` 现在只认名字，选了在装载时抛「还没实现」，不会悄悄退回文件。日志格式、路径解析（相对 `DSH_HOME`）、一次 `writeSync` 追加、坏行跳过全部原样，老数据不用迁移。接口顶部写了五条后端验收标准：追加线性化/单写者、事件不可变、fold 可重放、崩溃后可恢复、`changed()` 只是优化。
+
+Tests: 新增 `tests/store-backend.test.ts` 5 条（默认实例化 jsonl 且路径原样、redis/sqlite 抛未实现、错名报错、内存后端跑完整业务且与整份 fold 一致、门面自己的写让 `changed()` 归零）。全量 22 个文件 233 条全绿，`tsc --noEmit` 干净，`pnpm build` 通过。
+
 2026-11-03 — 票的 owner 拆成两栏：`owner` 是人话标签（屏幕上显示的就是它，「t4 查qqbot PR」这种），新增可选 `ownerId` 存 spawn 返回的会话 id（uuid，`session-` 前缀也行）。背景是旧规矩：巡检只能从自由文本 owner 里抽 ≥6 位 hex 片段去活表比对，主会话写中文标签就抽不出来，`worker-gone` 永远不触发，票只能等 20 分钟 `silent`。
 
 `dispatch_open` 带 `ownerId` 时开票前先查一次活表：不在表里直接拒绝开票（提示「ownerId 不在活表，可能是填错了或小鱼已经结束」），一个事件都不写；查不到 agents 服务（没 get、或活表空着）时放行并记一条 warn。巡检那侧 `agentAlive` 多一个 `exact` 档：`ownerId` 存在就只按 `idVariants` 的几种写法精确比对，扫完没有就是 `false`，不再受 `hasIdFragment` 那道门限制；`worker-gone` 的其它条件（2 分钟新建宽限）原样。`subagent/end` 对票、以及把排队消息递回 worker 也优先用 `ownerId`。老票没有这个字段，`foldEvents` 读到就是 undefined，完全走旧路径。巡检仍然只推提醒、绝不写票状态。

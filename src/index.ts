@@ -10,6 +10,7 @@ import {
   BRIEF_MAX_COLUMNS,
   TicketStore,
   briefIsBlank,
+  createTicketBackend,
   briefOf,
   truncateColumns,
   isOpen,
@@ -17,13 +18,23 @@ import {
   pending,
   resolveStateFile,
 } from './store'
-import type { TicketSnapshot, TicketStatus } from './store'
+import type { TicketBroadcast, TicketSnapshot, TicketStatus } from './store'
 import { hasIdFragment, idVariants, matchesId } from './ids'
 import { evaluateZombies, shouldPush, summarizeZombies } from './zombie'
+import type { ZombieHit } from './zombie'
 import { isWorkerSession, noWaitReason } from './no-wait'
 import { sendProgress } from './progress'
 import { bindRouter } from './router'
 import type { RouterAgent, RouterBinding } from './router'
+
+// 票事件：store 每追加一行成功就广播一条，监听方按 id 处理受影响的那张票。
+// 事件只带 { id, at, kind }，要看内容就从 store 的投影读——投影已经折好了，
+// 监听方不该各读一遍日志。
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'dispatcher/ticket'(payload: TicketBroadcast): void
+  }
+}
 
 export const name = 'dsh-dispatcher'
 export const inject = ['tools', 'agents']
@@ -110,6 +121,14 @@ export function toView(
  */
 export const HANDOFF_POLICY = DEFAULT_HANDOFF_POLICY
 
+/**
+ * Queue of ticket-event work started by `emit`, keyed by the plugin context.
+ * The host never needs it; tests await it instead of guessing how many
+ * microtasks a delivery takes. Kept out of the context object itself so a
+ * reloaded plugin does not leave a stale queue behind.
+ */
+export const ticketEventQueue = new WeakMap<object, () => Promise<void>>()
+
 const ticketProperties = {  id: { type: 'string' },
   goal: { type: 'string' },
   brief: { type: 'string' },
@@ -143,7 +162,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
   }
   // 日志里读不过来的行（崩溃留下的半截行、一行 null）不静默：跳过之后记一条 warn，
   // 不然「有一张票莫名不见了」只能靠猜。
-  const store = new TicketStore(resolveStateFile(config.stateFile), warn)
+  // 第三个参数是广播：append 成功后发一条票事件，内部写入（quiet）不发。测试里的假
+  // ctx 没有事件总线，所以按可选成员探一下，不能假定宿主一定有 emit。
+  // 后端按 config.store.backend 选（默认 jsonl）；redis/sqlite 现在只有名字，
+  // 选了就在装载时抛错，不会悄悄退回文件。坏行由后端自己 warn，所以这里的
+  // 第二栏留空（只有传路径时才用它）。
+  const store = new TicketStore(
+    createTicketBackend({ backend: config.store?.backend, stateFile: resolveStateFile(config.stateFile) }, warn),
+    undefined,
+    (event) => {
+      ;(ctx as unknown as { emit?: (name: string, payload: unknown) => void }).emit?.('dispatcher/ticket', event)
+    },
+  )
 
   // The wording comes from config; an empty block means "do not inject this
   // section at all", which is the same thing handoffPolicy: false does.
@@ -593,6 +623,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
     source: { kind: 'dsh-dispatcher' },
   })
 
+  // 同一条排队消息只许投一次：dispatch_send、agent/status 和 tick 三条路都可能
+  // 同时看上它。先占位再 await，JS 单线程，另一条路就会跳过。
+  const inFlight = new Set<string>()
+
   interface SweepResult {
     /** Zombie tickets the pass saw (before throttling), for the log line. */
     stale: number
@@ -605,131 +639,328 @@ export function apply(ctx: Context, config: ConfigShape): void {
   }
 
   /**
+   * 票事件串行队列。append 的调用栈里不就地干活：dispatch_send 追加 input 之后
+   * 自己也会顺手投递，处理器得等它让出这一步，才看得见 delivered 已经记上。
+   * 队列也保证同一个 id 的两次事件按顺序处理。
+   *
+   * 内部写入（巡检的重开、投递记账）走 store.quietly，不发事件；否则处理器写日志、
+   * 日志再叫醒处理器，自己喂自己。
+   */
+  let ticketQueue: Promise<void> = Promise.resolve()
+  const enqueue = (work: () => Promise<void>): void => {
+    ticketQueue = ticketQueue.then(work).catch((error) => {
+      warn(`[dispatcher] 票事件处理失败：${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+  ticketEventQueue.set(ctx as object, () => ticketQueue)
+
+  /**
+   * 重开：done 的票在 closedAt 之后又收到 input。
+   *
+   * The after-it-ended part is the whole point: an input queued while the ticket
+   * was still running never reaches a worker whose session is gone, so counting
+   * it as "new mail" is what used to flip finished tickets back to open on the
+   * next sweep. dropped 是人按下的停止，永远不重开。只改状态，不叫醒主会话。
+   */
+  function reopenIfMailed(id: string): boolean {
+    const ticket = store.get(id)
+    if (!ticket || ticket.status !== 'done') return false
+    const since = Date.parse(ticket.closedAt ?? ticket.updatedAt)
+    const fresh = pending(ticket.inputs).filter((entry) => Date.parse(entry.at) > since)
+    if (fresh.length === 0) return false
+    store.quietly(() => store.update(id, { status: 'open' }))
+    info(`[dispatcher] ${id}「${ticket.goal}」结束后又收到新消息，已重新打开（不推送）`)
+    return true
+  }
+
+  /** 把票里排队的 input 交给还活着、且不忙的 worker。返回这一轮投出去几条。 */
+  async function deliverQueued(id: string): Promise<number> {
+    const ticket = store.get(id)
+    if (!ticket || !isOpen(ticket.status)) return 0
+    const queued = pending(ticket.inputs).filter((entry) => !inFlight.has(entry.id))
+    if (queued.length === 0) return 0
+    const worker = agentFor(ownerKey(ticket))
+    if (!worker?.steer || isBusy(worker)) return 0
+    for (const entry of queued) inFlight.add(entry.id)
+    let delivered = 0
+    try {
+      for (const entry of queued) {
+        await worker.steer(message(entry.text))
+        store.quietly(() => store.markDelivered(id, 'input', entry.id))
+        delivered += 1
+      }
+    } finally {
+      for (const entry of queued) inFlight.delete(entry.id)
+    }
+    return delivered
+  }
+
+  /**
+   * 账目清理：已关票上积压的报告没有消费者。小鱼交活走 send_message，巡检从来没
+   * 投递过它们的报告，票一关更没人来读。这里只补一条 delivered，不通知任何人。
+   * 未结票的报告一律不动：留在 pending 上，由 dispatch_list 的 «n 显示出来。
+   */
+  function clearClosedReports(id: string): number {
+    const ticket = store.get(id)
+    if (!ticket || isOpen(ticket.status)) return 0
+    let cleared = 0
+    for (const entry of pending(ticket.reports)) {
+      store.quietly(() => store.markDelivered(id, 'report', entry.id))
+      cleared += 1
+    }
+    return cleared
+  }
+
+  /**
+   * 僵尸判定。`withAlive` 为真时接活表（worker-gone 快路），为假时不接——
+   * 低频 tick 只留静默兜底那两档，worker 没了由 agent/disposed 当场判。
+   */
+  function zombiesFor(tickets: readonly TicketSnapshot[], now: Date, withAlive: boolean): ZombieHit[] {
+    if (!config.notifyOwner) return []
+    return evaluateZombies(tickets, {
+      now,
+      zombieMinutes: config.zombieMinutes,
+      noReportMinutes: config.noReportMinutes,
+      ...(withAlive ? { isAlive: agentAlive } : {}),
+    })
+  }
+
+  /** 这轮该真推的：指纹和上次推过的一样就跳过。 */
+  function freshHits(hits: readonly ZombieHit[]): ZombieHit[] {
+    return hits.filter((hit) => shouldPush(hit, zombiePushed))
+  }
+
+  /** 不再命中的票把指纹扔掉，下次真出事时还能再推一次。 */
+  function forgetHealed(hits: readonly ZombieHit[]): void {
+    for (const id of [...zombiePushed.keys()]) {
+      if (!hits.some((hit) => hit.ticket.id === id)) zombiePushed.delete(id)
+    }
+  }
+
+  type AnnounceOutcome = 'woke' | 'quiet' | 'no-session' | 'busy' | 'none'
+
+  /**
+   * 唯一会 followup 的出口：一句摘要，不带报告正文。报告正文进来这条消息就
+   * 成了第二份报告。quietSweep 下不推、也不记指纹——安静的一轮什么都没宣布，
+   * 不该把第一次真正的宣布压掉。
+   */
+  async function announce(fresh: readonly ZombieHit[]): Promise<AnnounceOutcome> {
+    if (fresh.length === 0) return 'none'
+    if (config.quietSweep) return 'quiet'
+    const sessionId = resolveOwnerSession()
+    const owner = agentFor(sessionId)
+    if (!owner?.followup) return 'no-session'
+    if (isBusy(owner)) return 'busy'
+    const text = `（dispatcher 巡检，不是主人发的）${summarizeZombies(fresh)}。用 dispatch_list 看一眼，收票或者继续派活。`
+    await owner.followup(message(text))
+    for (const hit of fresh) zombiePushed.set(hit.ticket.id, hit.fingerprint)
+    return 'woke'
+  }
+
+  /** 单票判定 + 立推：agent/disposed 和票事件走这条。 */
+  async function judgeAndPush(id: string, now: Date, withAlive = true): Promise<void> {
+    const ticket = store.get(id)
+    if (!ticket) return
+    const hits = zombiesFor([ticket], now, withAlive)
+    const fresh = freshHits(hits)
+    if (fresh.length === 0) {
+      zombiePushed.delete(id)
+      return
+    }
+    await announce(fresh)
+  }
+
+  /**
+   * 只处理受影响那张票的处理器：重开、投递排队 input、清已关票的报告账、
+   * 单票僵尸判定。sweep 和事件总线走的是同一组函数，行为不会分叉。
+   */
+  async function handleTicketEvent(payload: TicketBroadcast): Promise<void> {
+    switch (payload.kind) {
+      case 'input':
+        reopenIfMailed(payload.id)
+        await deliverQueued(payload.id)
+        return
+      case 'status':
+        clearClosedReports(payload.id)
+        await judgeAndPush(payload.id, new Date())
+        return
+      case 'report':
+        await judgeAndPush(payload.id, new Date())
+        return
+      default:
+        return
+    }
+  }
+
+  ctx.on('dispatcher/ticket', (payload) => {
+    enqueue(() => handleTicketEvent(payload))
+    return undefined
+  })
+
+  // ── 宿主事件 ────────────────────────────────────────────────────
+  // 事件的形状来自 dsh-agent 的 runtime-types.d.ts（agent/status: { agent, status }、
+  // agent/disposed: { agent }），这个包不依赖 dsh-agent，所以按结构收窄后订阅，
+  // 和上面 subagent/end 一个路子。订阅失败只 warn，dispatch_* 照常工作。
+  const agentIdOf = (agent: unknown): string => {
+    const shaped = agent as { session?: { id?: string }; id?: string } | undefined
+    return shaped?.session?.id ?? shaped?.id ?? ''
+  }
+  const hostEvents = ctx as unknown as {
+    on(
+      name: string,
+      listener: (payload: { agent?: unknown; status?: string }) => unknown,
+    ): unknown
+  }
+
+  /** worker 名下所有还开着的票，逐张试着投递。 */
+  async function deliverForOwner(sessionId: string): Promise<number> {
+    let delivered = 0
+    for (const ticket of store.list()) {
+      if (!isOpen(ticket.status)) continue
+      const known = ownerKey(ticket)
+      if (!known || !matchesId(known, sessionId)) continue
+      delivered += await deliverQueued(ticket.id)
+    }
+    return delivered
+  }
+
+  /**
+   * agent/disposed：worker 从活表里没了，名下还开着的票当场按 worker-gone 判。
+   * 只推提醒，绝不自动改票 status——写权限只归主会话（README「谁写 status」）。
+   * `freshMinutes: 0`：id 都从活表里被摘掉了，不用再给注册留宽限。
+   */
+  async function judgeGone(sessionId: string): Promise<void> {
+    if (!config.notifyOwner) return
+    const now = new Date()
+    // 一次死的 worker 可能名下有不止一张票：攒成一句再发，别一张一条 followup。
+    const hits: ZombieHit[] = []
+    for (const ticket of store.list()) {
+      if (!isOpen(ticket.status)) continue
+      const known = ownerKey(ticket)
+      if (!known || !matchesId(known, sessionId)) continue
+      hits.push(
+        ...evaluateZombies([ticket], {
+          now,
+          freshMinutes: 0,
+          zombieMinutes: config.zombieMinutes,
+          noReportMinutes: config.noReportMinutes,
+          isAlive: () => false,
+        }),
+      )
+    }
+    const fresh = freshHits(hits)
+    if (fresh.length > 0) await announce(fresh)
+  }
+
+  try {
+    // worker 变 idle：立刻投递它名下排队的 input，不等低频 tick。
+    // 这一条就是替掉原来 sweep 里拿 isBusy 轮询 wait 的判断。
+    hostEvents.on('agent/status', (payload) => {
+      if (payload?.status !== 'idle') return undefined
+      const id = agentIdOf(payload.agent)
+      if (!id) return undefined
+      enqueue(async () => {
+        await deliverForOwner(id)
+      })
+      return undefined
+    })
+    hostEvents.on('agent/disposed', (payload) => {
+      const id = agentIdOf(payload.agent)
+      if (!id) return undefined
+      enqueue(async () => {
+        await judgeGone(id)
+      })
+      return undefined
+    })
+  } catch (error) {
+    warn(
+      `[dispatcher] agent/status 或 agent/disposed 订阅失败，投递与 worker-gone 会退化到低频 tick：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
+
+  /**
    * One pass over the ticket log: revive tickets that ended but received more
    * mail, push queued messages to workers that are still alive, clear the report
    * entries nobody can read any more, then report zombie tickets — one line,
    * once — to the owner session.
    *
    * It does not deliver reports, and no other thing it does may wake the owner
-   * session. A worker hands its report back with `send_message`; the main
+   * session: a worker hands its report back with `send_message`, and the main
    * session reads the log with `dispatch_list`, where a ticket's `«n` counts the
-   * reports it has not read. A sweep has no consumer for a report, and carrying
-   * one to the owner was the 2026-11-02 flood: the entries stayed `delivered:
-   * false` for the life of every ticket, so the first tick after `sweepMinutes`
-   * came back from 0 replayed a day of finished work as one message. Reports
-   * therefore stay put — pending on an open ticket, cleared from a closed one —
-   * and only a zombie ticket is worth a whole main-session turn.
+   * reports it has not read. Carrying reports to the owner was the 2026-11-02
+   * flood. Only a zombie ticket is worth a whole main-session turn.
    *
-   * This is the half of the prototype's `evaluateDue` that makes sense here. The
-   * prototype has an input queue and a report delivery queue per ticket and
-   * wakes an ended ticket that still has undelivered inputs; this plugin keeps
-   * the same two queues as log entries but only the input queue is a queue with
-   * a consumer. What it does not do is any retry bookkeeping beyond "still
-   * pending, try on the next sweep".
+   * `dispatch_sweep` still runs the whole thing on demand (tests and the manual
+   * tool depend on it); the timer runs `tick`, which is the subset that has no
+   * event to wait for.
    */
   async function sweep(): Promise<SweepResult> {
     const now = new Date()
     let delivered = 0
     let cleared = 0
 
-    // A ticket that ended but received more mail *after* it ended reopens — the
-    // prototype's `tickets.wake`. A dropped ticket is a person's stop and stays
-    // shut. The after-it-ended part is the whole point: an input queued while
-    // the ticket was still running never reaches a worker whose session is gone
-    // (dispatch_send only hands it over to a live, idle agent), so it sits in the
-    // log forever. Counting that as "new mail" is what used to flip finished
-    // tickets back to open on the next sweep, with a fresh timestamp.
-    // 重开只改状态，不叫醒主会话：报告这条推送线撤掉之后，醒一次只值一条僵尸摘要。
-    for (const ticket of store.list()) {
-      if (ticket.status !== 'done') continue
-      const since = Date.parse(ticket.closedAt ?? ticket.updatedAt)
-      const fresh = pending(ticket.inputs).filter((entry) => Date.parse(entry.at) > since)
-      if (fresh.length === 0) continue
-      store.update(ticket.id, { status: 'open' })
-      info(`[dispatcher] ${ticket.id}「${ticket.goal}」结束后又收到新消息，已重新打开（不推送）`)
+    // 一次 list()：投影读一次，后面每张票的处理器都只碰自己那张。
+    const tickets = store.list()
+    for (const ticket of tickets) {
+      reopenIfMailed(ticket.id)
+      delivered += await deliverQueued(ticket.id)
+      cleared += clearClosedReports(ticket.id)
     }
 
-    // Queued messages go to the worker, if its session is still alive and idle.
-    for (const ticket of store.list()) {
-      if (!isOpen(ticket.status)) continue
-      const queued = pending(ticket.inputs)
-      if (queued.length === 0) continue
-      const worker = agentFor(ownerKey(ticket))
-      if (!worker?.steer || isBusy(worker)) continue
-      for (const entry of queued) {
-        await worker.steer(message(entry.text))
-        store.markDelivered(ticket.id, 'input', entry.id)
-        delivered += 1
+    // 判僵尸在写完之后再看快照：重开改了 status，投递记账改了 updatedAt。
+    const after = tickets
+      .map((ticket) => store.get(ticket.id))
+      .filter((ticket): ticket is TicketSnapshot => Boolean(ticket))
+    const zombies = zombiesFor(after, now, true)
+    forgetHealed(zombies)
+    const outcome = await announce(freshHits(zombies))
+    const result: SweepResult = { stale: zombies.length, delivered, cleared, woke: outcome === 'woke' }
+    if (outcome !== 'woke' && outcome !== 'none') result.reason = outcome
+    return result
+  }
+
+  /**
+   * 低频兜底 tick（间隔仍走 sweepMinutes）。只做三件没有事件可等的事：
+   *
+   * 1. 投递失败重试：steer 抛过、或者 worker 上一轮还忙，票里的 input 还挂着。
+   *    正常路径是 agent/status 变 idle 当场投，这一条只是漏网兜底。
+   * 2. 20 分钟静默：worker 没死、也没交活，就是不动了——没有任何事件会在
+   *    「沉默满 20 分钟」那一刻发出来，只能靠时钟。
+   * 3. waiting 但票里一条报告都没有的 5 分钟档：小鱼退出有 subagent/end，
+   *    但「退了却没交活」要等满 noReportMinutes 才成立，同样是时间条件。
+   *
+   * worker-gone 不在这里：agent/disposed 已经当场判了，再扫一遍活表只是重复。
+   */
+  async function tick(): Promise<void> {
+    const now = new Date()
+    const tickets = store.list()
+    for (const ticket of tickets) {
+      try {
+        await deliverQueued(ticket.id)
+      } catch (error) {
+        warn(
+          `[dispatcher] 投递重试失败（${ticket.id}）：${error instanceof Error ? error.message : String(error)}`,
+        )
       }
     }
-
-    // 账目清理：已关票上积压的报告没有消费者。小鱼交活走 send_message，巡检从来没
-    // 投递过它们的报告，所以 delivered 一直是 false；票一关，更没人会来读。这里只往
-    // 日志补一条 delivered（和 quietSweep 一样只动账本、不通知任何人），否则
-    // dispatch_list 每轮都报「未读报告 N 条」，日志里永远挂着一堆没人读的未读。
-    //
-    // 未结票的报告一律**不动**：留在 pending 上，由 dispatch_list 的 «n 显示出来，
-    // 主会话自己扫。巡检不替主会话收集报告——收集就是 2026-11-02 那次刷屏的起点。
-    for (const ticket of store.list()) {
-      if (isOpen(ticket.status)) continue
-      for (const entry of pending(ticket.reports)) {
-        store.markDelivered(ticket.id, 'report', entry.id)
-        cleared += 1
-      }
-    }
-
-    // 僵尸巡检：主池是 open/running（waiting/blocked 是人按着没动，done/dropped 已结束），
-    // 外加一档「waiting 但票里一条报告都没有」——小鱼退了不等于交了活，这种票原来谁都
-    // 不看，落 waiting 就彻底失联。它有自己的阈值 noReportMinutes，不吃 zombieMinutes。
-    // 判定和摘要都在 ./zombie，这里只做两件事：注入活表查询、按指纹节流。
-    const zombies = config.notifyOwner
-      ? evaluateZombies(store.list(), {
-          now,
-          zombieMinutes: config.zombieMinutes,
-          noReportMinutes: config.noReportMinutes,
-          isAlive: agentAlive,
-        })
-      : []
-    // 不再命中的票（活了、关了、补报了）把指纹扔掉，下次真出事时还能再推一次。
-    for (const id of [...zombiePushed.keys()]) {
-      if (!zombies.some((hit) => hit.ticket.id === id)) zombiePushed.delete(id)
-    }
-    const freshZombies = zombies.filter((hit) => shouldPush(hit, zombiePushed))
-
-    // Quiet sweep: 仍然守住「定时器不花主会话的 turn」这条线。报告这条推送线已经整个
-    // 撤掉，所以这个分支现在只剩上面那段账目清理的语义——它清的是已关票上没人会读的
-    // 报告，不是「替外部脚本先标已读」；未结票的报告一条都不动，外部脚本要发就照发。
-    // 僵尸不推、也不记指纹：安静的一轮什么都没宣布，不该把第一次真正的宣布压掉。
-    if (config.quietSweep) {
-      return { stale: zombies.length, delivered, cleared, woke: false, reason: 'quiet' }
-    }
-
-    // 唯一会 followup 的条件：这一轮有没推过的僵尸票。没有就直接返回，一条消息不发。
-    if (freshZombies.length === 0) {
-      return { stale: zombies.length, delivered, cleared, woke: false }
-    }
-
-    const sessionId = resolveOwnerSession()
-    const owner = agentFor(sessionId)
-    if (!owner?.followup) {
-      return { stale: zombies.length, delivered, cleared, woke: false, reason: 'no-session' }
-    }
-    if (isBusy(owner)) return { stale: zombies.length, delivered, cleared, woke: false, reason: 'busy' }
-
-    // 一句摘要，不带报告正文：报告不再由巡检送，正文进来这条消息就成了第二份报告。
-    const text = `（dispatcher 巡检，不是主人发的）${summarizeZombies(freshZombies)}。用 dispatch_list 看一眼，收票或者继续派活。`
-    await owner.followup(message(text))
-    for (const hit of freshZombies) zombiePushed.set(hit.ticket.id, hit.fingerprint)
-    return { stale: zombies.length, delivered, cleared, woke: true }
+    const after = tickets
+      .map((ticket) => store.get(ticket.id))
+      .filter((ticket): ticket is TicketSnapshot => Boolean(ticket))
+    // 不传 isAlive：静默兜底和 no-report 两档不需要活表，worker-gone 归宿主事件。
+    const zombies = zombiesFor(after, now, false)
+    forgetHealed(zombies)
+    await announce(freshHits(zombies))
   }
 
   if (config.sweepMinutes > 0) {
     ctx.effect(() => {
       const timer = setInterval(() => {
-        void sweep()
+        void tick()
       }, Math.max(1, config.sweepMinutes) * 60_000)
       return () => clearInterval(timer)
-    }, 'dsh-dispatcher.sweep')
+    }, 'dsh-dispatcher.tick')
   }
 
   ctx.tools.register(
@@ -797,13 +1028,26 @@ export function apply(ctx: Context, config: ConfigShape): void {
         ],
       },
       async execute(args) {
+        // 追加之前先看它是不是已经关掉了：这一条落在 closedAt 之后就当场重开，
+        // 不等下一轮 tick。dropped 是人按的停止，不重开。
+        const before = store.get(args.id)
+        if (!before) throw new Error(`unknown ticket: ${args.id}`)
         const { ticket, entry } = store.appendInput(args.id, args.text)
+        const closedAt = Date.parse(before.closedAt ?? before.updatedAt)
+        if (before.status === 'done' && Date.parse(ticket.updatedAt) > closedAt) {
+          store.update(args.id, { status: 'open' })
+        }
         const worker = agentFor(ownerKey(ticket))
         let delivered = false
         if (worker?.steer && !isBusy(worker)) {
-          await worker.steer(message(args.text))
-          store.markDelivered(ticket.id, 'input', entry.id)
-          delivered = true
+          inFlight.add(entry.id)
+          try {
+            await worker.steer(message(args.text))
+            store.markDelivered(ticket.id, 'input', entry.id)
+            delivered = true
+          } finally {
+            inFlight.delete(entry.id)
+          }
         }
         const after = store.get(ticket.id)!
         return { id: ticket.id, pendingInputs: pending(after.inputs).length, delivered }
