@@ -5,6 +5,7 @@ import {
   createLlmClassifier,
   parseChoice,
   parseModelRoute,
+  parseNeedsCommand,
 } from '../src/tickets/classify'
 import type { ClassifyChoice, ClassifyInput, PresetInfo } from '../src/tickets/publish'
 
@@ -46,8 +47,20 @@ describe('prompt 拼装', () => {
     expect(system).toContain('- t2（只读）：只查不改')
   })
 
-  it('硬判据在场：要写盘就不许给只读档', () => {
-    expect(buildClassifySystem(PRESETS)).toContain('要写盘、要改文件、要跑命令的，就一定不能给只会读的档')
+  it('硬判据在场：要命令就得给有命令工具的档，写命令类词算要命令', () => {
+    const system = buildClassifySystem(PRESETS)
+    expect(system).toContain('要命令的包括但不限于：跑 bash 或脚本、grep/find/sed/awk')
+    expect(system).toContain('日志、会话记录、备份包不是普通文本文件')
+    expect(system).toContain('要命令就不能给 t2、t3 这种只有读工具没有命令工具的档')
+    expect(system).toContain('拿不准时：写 yes，档位给 t1')
+  })
+
+  it('prompt 里的四档例子原样在场（grep 会话 / README / 记忆 / 放歌）', () => {
+    const system = buildClassifySystem(PRESETS)
+    expect(system).toContain('翻会话记录 grep 报错 → t1，yes')
+    expect(system).toContain('读 README 总结要点 → t2，no')
+    expect(system).toContain('查记忆里有没有记过某个决定 → t3，no')
+    expect(system).toContain('放歌或开灯 → t5，no')
   })
 
   it('用户消息只有目标/摘要/目录，不掺档位表', () => {
@@ -94,6 +107,32 @@ describe('parseChoice', () => {
     expect(parseChoice('我觉得都行', PRESETS)).toBeUndefined()
     expect(parseChoice('', PRESETS)).toBeUndefined()
     expect(parseChoice('t1', [])).toBeUndefined()
+  })
+})
+
+// 这四条是格式契约：不真调模型，只锁「模型按三行格式回话 → parseNeedsCommand 解析结果」。
+// 真实模型输出由 classify prompt 的判据约束；这里保证解析层与 prompt 例子一致。
+describe('classify 判档例子与 NEEDS_COMMAND 格式契约', () => {
+  it('翻会话记录 grep 报错 → NEEDS_COMMAND: yes', () => {
+    const reply = 't1\n要 grep 原始会话，还得解压\nNEEDS_COMMAND: yes'
+    expect(parseNeedsCommand(reply)).toBe(true)
+    expect(parseChoice(reply, PRESETS)?.preset).toBe('t1')
+  })
+
+  it('读 README 总结要点 → NEEDS_COMMAND: no', () => {
+    const reply = 't2\n只读普通文本，不需要命令\nNEEDS_COMMAND: no'
+    expect(parseNeedsCommand(reply)).toBe(false)
+    expect(parseChoice(reply, PRESETS)?.preset).toBe('t2')
+  })
+
+  it('查记忆里有没有记过某个决定 → NEEDS_COMMAND: no', () => {
+    const reply = 't3\n只查长期记忆\nNEEDS_COMMAND: no'
+    expect(parseNeedsCommand(reply)).toBe(false)
+  })
+
+  it('放歌或开灯 → NEEDS_COMMAND: no', () => {
+    const reply = 't5\n媒体控制，不跑命令\nNEEDS_COMMAND: no'
+    expect(parseNeedsCommand(reply)).toBe(false)
   })
 })
 

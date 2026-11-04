@@ -48,7 +48,7 @@ export interface ClassifyChoice {
   preset: string
   why?: string
   /**
-   * 这轮要不要真的执行命令。三态：true 必须查、false 不查关键词、
+   * 这轮要不要真的执行命令。三态：true 必须查、false 也查关键词（命中即矛盾）、
    * undefined（模型没给）只走关键词兜底。
    */
   needsCommand?: boolean

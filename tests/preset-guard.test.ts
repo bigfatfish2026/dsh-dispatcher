@@ -90,8 +90,36 @@ describe('需求判定：关键词兜底', () => {
     expect(commandHint('不许改文件，但要跑 git 命令')).toBe('git')
   })
 
-  it('拉丁词按整词认：digit 不算 git', () => {
-    expect(commandHint('统计 digit 个数')).toBeUndefined()
+  it('拉丁词按整词认：digit 不算 git，category 不算 cat', () => {
+    expect(commandHint('digit 有多少位')).toBeUndefined()
+    expect(commandHint('把 category 分一下')).toBeUndefined()
+    expect(commandHint('用 grep 翻日志')).toBe('grep')
+    expect(commandHint('GREP 一下')).toBe('grep')
+  })
+
+  it('远程排障词表：grep/zstd/journalctl 都能认出来', () => {
+    expect(commandHint('grep 一下会话里的报错')).toBe('grep')
+    expect(commandHint('把归档 zstd 解压出来看看')).toBe('zstd')
+    expect(commandHint('gunzip 这个包')).toBe('gunzip')
+    expect(commandHint('sed -n 1,20p 那个文件')).toBe('sed')
+    expect(commandHint('awk 数一下第三列')).toBe('awk')
+    expect(commandHint('curl 一下健康检查')).toBe('curl')
+    expect(commandHint('journalctl -u dsh-qqbot 看服务日志')).toBe('journalctl')
+    expect(commandHint('翻一下日志，找解压失败那回')).toBe('日志')
+    expect(commandHint('把这个包解压出来')).toBe('解压')
+    expect(commandHint('翻会话记录，找那次报错')).toBe('会话记录')
+    expect(commandHint('cat 一下压缩包里的清单')).toBe('cat')
+    expect(commandHint('按时间排序')).toBe('排序')
+    expect(commandHint('统计每个服务的内存')).toBe('统计')
+    expect(commandHint('把测试跑一遍')).toBe('跑一遍')
+    expect(commandHint('按计划执行')).toBe('执行')
+  })
+
+  it('负例不误伤：读 README / 查记忆 / 网页搜索都不算要命令', () => {
+    expect(commandHint('读一下 README，写三句摘要')).toBeUndefined()
+    expect(commandHint('查一下记忆里主人喜欢什么')).toBeUndefined()
+    expect(commandHint('上网查一下下周天气')).toBeUndefined()
+    expect(commandHint('只读代码审查，挑逻辑问题')).toBeUndefined()
   })
 
   it('没有迹象就不命中', () => {
@@ -184,13 +212,60 @@ describe('选档守卫：三条规则', () => {
     expect(rejection?.matchedKeyword).toBe('跑命令')
   })
 
-  it('rule2：needsCommand=false 时不看关键词，纯只读任务放行', async () => {
+  it('rule2：needsCommand=false 但任务书出现命令类词 → 按矛盾驳回，点名命中词', async () => {
     const rejection = await checkPresetChoice({
       ...base,
       preset: 't2',
+      label: '只读',
       needsCommand: false,
       goal: '用 git 看看这仓库，纯只读',
       toolsOf: toolsOfFrom({ t2: T2_READ_ONLY }),
+    })
+    expect(rejection?.rule).toBe('needs-command-no-bash')
+    expect(rejection?.matchedKeyword).toBe('git')
+    expect(rejection?.message).toContain('任务书里出现命令类词「git」，判成不需要执行命令')
+  })
+
+  it('rule2：三条命令类正例（grep 日志 / zstd 解压 / journalctl 查）即使 false 也驳回', async () => {
+    const cases: Array<[string, string]> = [
+      ['grep 一下原始会话里的报错', 'grep'],
+      ['把归档 zstd 解压出来看看', 'zstd'],
+      ['journalctl -u dsh-qqbot 最近一百行', 'journalctl'],
+    ]
+    for (const [goal, keyword] of cases) {
+      const rejection = await checkPresetChoice({
+        ...base,
+        preset: 't2',
+        needsCommand: false,
+        goal,
+        toolsOf: toolsOfFrom({ t0: T0_SMALL, t1: T1_FULL, t2: T2_READ_ONLY }),
+      })
+      expect(rejection?.rule).toBe('needs-command-no-bash')
+      expect(rejection?.matchedKeyword).toBe(keyword)
+    }
+  })
+
+  it('rule2：三条负例（读 README / 查记忆 / 网页搜索）false 时放行', async () => {
+    const goals = ['读一下 README，写三句摘要', '查一下记忆里主人喜欢什么', '上网查一下下周天气']
+    for (const goal of goals) {
+      const rejection = await checkPresetChoice({
+        ...base,
+        preset: 't2',
+        needsCommand: false,
+        goal,
+        toolsOf: toolsOfFrom({ t2: T2_READ_ONLY }),
+      })
+      expect(rejection).toBeUndefined()
+    }
+  })
+
+  it('rule2：false + 命中关键词，但档里有 bash → 放行', async () => {
+    const rejection = await checkPresetChoice({
+      ...base,
+      preset: 't1',
+      needsCommand: false,
+      goal: 'grep 一下会话日志',
+      toolsOf: toolsOfFrom({ t0: T0_SMALL, t1: T1_FULL, t2: T2_READ_ONLY }),
     })
     expect(rejection).toBeUndefined()
   })
