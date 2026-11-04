@@ -699,8 +699,10 @@ describe('DEFAULT_ROUTER_TOOLS', () => {
   })
 
   it('keeps the dispatch tools a main session needs to hand work out', () => {
-    for (const name of ['dispatch_open', 'dispatch_list', 'dispatch_send', 'subagent', 'send_message']) {
+    for (const name of ['dispatch_open', 'dispatch_list', 'dispatch_send', 'dispatch_read', 'send_message']) {
       expect(DEFAULT_ROUTER_TOOLS).toContain(name)
     }
+    // 派活只能走 dispatch_open，主会话手里不再有裸 subagent。
+    expect(DEFAULT_ROUTER_TOOLS).not.toContain('subagent')
   })
 })

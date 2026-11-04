@@ -3,8 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { TicketStore, foldEvents, isOpen, minutesSince } from '../src/store'
-import type { TicketSnapshot } from '../src/store'
-import { toView } from '../src/index'
+import { makeDesk } from './helpers/desk-harness'
 
 const tempDirs: string[] = []
 
@@ -69,26 +68,31 @@ describe('minutesSince', () => {
   })
 })
 
-describe('toView', () => {
-  const ticket: TicketSnapshot = {
-    id: 't-1',
-    goal: 'build it',
-    status: 'running',
-    createdAt: '2026-11-01T00:00:00.000Z',
-    updatedAt: '2026-11-01T00:00:00.000Z',
-    inputs: [],
-    reports: [],
-  }
+describe('TicketDesk 视图', () => {
+  it('挂起超过阈值就标 stale，关掉的票永不 stale', async () => {
+    const h = makeDesk({ now: new Date('2026-11-01T00:00:00.000Z') })
+    const receipt = await h.desk.open({ goal: 'build it', brief: '开工', requestId: 'r-1' }, h.main)
+    await h.desk.block(receipt.id, '等主人拍板', h.main)
+    h.clock.advance(61 * 60_000)
 
-  it('marks an open ticket stale once it passes the threshold', () => {
-    const now = new Date('2026-11-01T01:00:00.000Z')
-    expect(toView(ticket, 30, now).stale).toBe(true)
-    expect(toView(ticket, 90, now).stale).toBe(false)
+    const parked = h.desk.get(receipt.id)!
+    expect(parked.stale).toBe(true)
+    expect(parked.statusSince).toBe('2026-11-01T00:00:00.000Z')
+
+    await h.desk.close(receipt.id, { outcome: 'done', actor: h.main })
+    expect(h.desk.get(receipt.id)!.stale).toBe(false)
   })
 
-  it('never marks a closed ticket stale', () => {
-    const now = new Date('2026-11-01T05:00:00.000Z')
-    expect(toView({ ...ticket, status: 'done' }, 30, now).stale).toBe(false)
+  it('视图带 statusSince、pending 计数和自己的档位来源', async () => {
+    const h = makeDesk({ now: new Date('2026-11-01T00:00:00.000Z') })
+    const receipt = await h.desk.open({ goal: 'build it', brief: '开工', requestId: 'r-2' }, h.main)
+    const view = h.desk.get(receipt.id)!
+    expect(view.statusSince).toBe('2026-11-01T00:00:00.000Z')
+    expect(view.pendingInputs).toBe(0)
+    expect(view.pendingReports).toBe(0)
+    expect(view.preset).toBe('t1')
+    expect(view.presetSource).toBe('fallback')
+    expect(view.epoch).toBe(1)
   })
 })
 

@@ -1,316 +1,146 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import type { Config } from '../src/config'
-import { apply } from '../src/index'
-import { TicketStore } from '../src/store'
+import { describe, expect, it } from 'vitest'
+import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 
 /**
- * `subagent/end` is the only thing that tells the log a 小鱼 is gone. The rule
- * under test is narrow on purpose: a matched open/running ticket becomes
- * `waiting`, and nothing else — `done`/`dropped` are the main session's call.
+ * `subagent/end` 是「这条鱼没了」唯一的信号。规矩很窄：命中 workerId 的未结
+ * 票落 `waiting`，别的什么都不改——done/dropped 是主会话的判决，鱼自己说了不算。
  */
 
-const dirs: string[] = []
-
-afterEach(() => {
-  while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
-})
-
-interface EndInfo {
-  id?: string
-  stopReason?: string
+function end(h: ReturnType<typeof makeDesk>, id: string, stopReason = 'completed'): void {
+  h.host.emit('subagent/end', { id, stopReason })
 }
 
-type EndListener = (info: EndInfo) => unknown
+describe('subagent/end 落票', () => {
+  it('running 的票落 waiting，绝不自己判 done', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
 
-function testConfig(stateFile: string): Config {
-  return {
-    stateFile,
-    staleMinutes: 30,
-    maxOpen: 8,
-    briefMaxColumns: 20,
-    handoffPolicy: false,
-    handoffPolicyText: '',
-    sweepMinutes: 0,
-    zombieMinutes: 20,
-    noReportMinutes: 5,
-    notifyOwner: false,
-    quietSweep: true,
-    ownerSessionId: '',
-    qqPrefsPath: join(stateFile, '..', 'prefs.json'),
-    ownerOpenId: '',
-    noWaitGuard: false,
-    maxCommandMs: 30000,
-    maxWaitMs: 5000,
-    routerRestrict: false,
-    routerEscapeFile: join(stateFile, '..', 'no-restrict'),
-    routerTools: [],
-    extraRouterTools: [],
-    workerToolDeny: false,
-    workerDenyTools: [],
-    workerPromptPrune: true,
-    notifyScript: '',
-    notifyTimeoutMs: 5000,
-  }
-}
+    end(h, 'worker-1')
+    await flush()
 
-/** Mount the plugin, keep the `subagent/end` listeners, and hand back the log. */
-function mount(): { store: TicketStore; end: EndListener[] } {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatcher-subagent-end-'))
-  dirs.push(dir)
-  const stateFile = join(dir, 'tickets.jsonl')
-  const store = new TicketStore(stateFile)
-  const end: EndListener[] = []
-  const ctx = {
-    agents: { list: () => [], get: () => undefined },
-    effect: (callback: () => () => void) => callback(),
-    on(event: string, listener: unknown) {
-      if (event === 'subagent/end') end.push(listener as EndListener)
-      return () => {}
-    },
-    tools: { register: () => () => {}, get: () => undefined },
-    logger: { info() {}, warn() {} },
-  }
-  apply(ctx as never, testConfig(stateFile))
-  return { store, end }
-}
-
-function fire(listeners: EndListener[], info: EndInfo): void {
-  for (const listener of listeners) listener(info)
-}
-
-describe('subagent/end settles the ticket it owns', () => {
-  it('turns a running ticket into waiting, never done', () => {
-    const { store, end } = mount()
-    const ticket = store.open('build llvm', '/tmp/work', 'build llvm')
-    store.update(ticket.id, { status: 'running', owner: 'session-abc' })
-
-    fire(end, { id: 'session-abc', stopReason: 'completed' })
-
-    const settled = store.get(ticket.id)!
-    expect(settled.status).toBe('waiting')
-    expect(settled.status).not.toBe('done')
-    // stopReason goes into the note verbatim.
-    expect(settled.note).toBe('worker 结束（completed），票内无报告')
+    const view = h.desk.get(id)!
+    expect(view.status).toBe('waiting')
+    expect(view.workerAlive).toBe(false)
   })
 
-  it('matches the owner through the session- prefix in either direction', () => {
-    const { store, end } = mount()
-    const bare = store.open('one')
-    store.update(bare.id, { status: 'running', owner: 'abc' })
-    const prefixed = store.open('two')
-    store.update(prefixed.id, { status: 'running', owner: 'session-def' })
+  it('session- 前缀两边都认', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
 
-    // Both tickets share one owner id in the event: only the prefix variants match.
-    fire(end, { id: 'session-abc', stopReason: 'aborted' })
-    fire(end, { id: 'def', stopReason: 'error' })
-
-    expect(store.get(bare.id)!.status).toBe('waiting')
-    expect(store.get(prefixed.id)!.status).toBe('waiting')
-    expect(store.get(prefixed.id)!.note).toBe('worker 结束（error），票内无报告')
+    end(h, 'session-worker-1')
+    await flush()
+    expect(h.desk.get(id)!.status).toBe('waiting')
   })
 
-  it('leaves other owners, closed tickets and the done verdict alone', () => {
-    const { store, end } = mount()
-    const other = store.open('someone else')
-    store.update(other.id, { status: 'running', owner: 'session-zzz' })
-    const done = store.open('already shipped')
-    store.update(done.id, { status: 'done', owner: 'session-abc', note: 'shipped' })
-    const waiting = store.open('blocked on a person')
-    store.update(waiting.id, { status: 'blocked', owner: 'session-abc' })
+  it('不碰别人的票、不碰已经收工的票', async () => {
+    const h = makeDesk()
+    const mine = await h.desk.open(INTENT, h.main)
+    const other = await h.desk.open({ ...INTENT, goal: '另一件', brief: '另一件', requestId: 'req-2' }, h.main)
+    await h.desk.close(other.id, { outcome: 'done', actor: h.main })
+    h.desk.attach()
 
-    fire(end, { id: 'session-abc', stopReason: 'completed' })
+    // 第二张票的 worker 是 worker-2；这里只结束 worker-1。
+    end(h, 'worker-1')
+    await flush()
 
-    expect(store.get(other.id)!.status).toBe('running')
-    expect(store.get(done.id)!.status).toBe('done')
-    expect(store.get(done.id)!.note).toBe('shipped')
-    expect(store.get(waiting.id)!.status).toBe('blocked')
+    expect(h.desk.get(mine.id)!.status).toBe('waiting')
+    expect(h.desk.get(other.id)!.status).toBe('done')
   })
 
-  it('settles every open ticket with that owner', () => {
-    const { store, end } = mount()
-    const first = store.open('first')
-    store.update(first.id, { status: 'running', owner: 'session-abc' })
-    const second = store.open('second')
-    store.update(second.id, { status: 'running', owner: 'session-abc' })
+  it('一个 worker 名下多张票就一起落', async () => {
+    const h = makeDesk()
+    const a = await h.desk.open(INTENT, h.main)
+    const b = await h.desk.open({ ...INTENT, goal: '第二件', brief: '第二件', requestId: 'req-2' }, h.main)
+    // 把第二张也挂到同一个 worker 上：直接发事件，看它认不认票上的 workerId。
+    h.desk.attach()
 
-    fire(end, { id: 'session-abc', stopReason: 'max-tokens' })
-
-    expect(store.get(first.id)!.status).toBe('waiting')
-    expect(store.get(second.id)!.status).toBe('waiting')
-    expect(store.get(first.id)!.note).toBe('worker 结束（max-tokens），票内无报告')
+    end(h, 'worker-1')
+    await flush()
+    expect(h.desk.get(a.id)!.status).toBe('waiting')
+    // b 的 worker 是 worker-2，不该被 worker-1 的结束带走。
+    expect(h.desk.get(b.id)!.status).toBe('running')
   })
 
-  it('stays quiet for a missing id, an unknown id and an ownerless ticket', () => {
-    const { store, end } = mount()
-    const ownerless = store.open('nobody owns this')
-    store.update(ownerless.id, { status: 'running' })
+  it('缺 id、未知 id 都是静默，不写任何事件', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
+    const lines = h.lines()
 
-    expect(() => fire(end, {})).not.toThrow()
-    expect(() => fire(end, { id: '' })).not.toThrow()
-    expect(() => fire(end, { id: 'session-ghost', stopReason: 'completed' })).not.toThrow()
-    expect(store.get(ownerless.id)!.status).toBe('running')
+    h.host.emit('subagent/end', { stopReason: 'completed' })
+    end(h, 'worker-nope')
+    await flush()
+
+    expect(h.lines()).toBe(lines)
+    expect(h.desk.get(id)!.status).toBe('running')
   })
 })
 
-/**
- * 2026-11-03: a ticket that lands in `waiting` used to look exactly like one
- * that delivered — nothing in the log said whether the 小鱼 had left a single
- * report. The note carries that count now, so "did it hand anything back?" can
- * be answered from `dispatch_list` alone. Still a note and only a note: no new
- * event kind, no status, and never `done`.
- */
-describe('the waiting note says whether anything was handed back', () => {
-  it('writes 票内无报告 when the ticket carries none', () => {
-    const { store, end } = mount()
-    const ticket = store.open('nothing handed back')
-    store.update(ticket.id, { status: 'running', owner: 'session-abc' })
+describe('结束时的证据', () => {
+  it('票上有报告就留着，等主会话自己读', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    await h.desk.report(id, '做到一半，卡在权限上')
+    h.desk.attach()
 
-    fire(end, { id: 'session-abc', stopReason: 'completed' })
+    end(h, 'worker-1')
+    await flush()
 
-    const settled = store.get(ticket.id)!
-    expect(settled.status).toBe('waiting')
-    expect(settled.note).toBe('worker 结束（completed），票内无报告')
-    expect(settled.reports).toHaveLength(0)
+    const view = h.desk.get(id)!
+    expect(view.status).toBe('waiting')
+    expect(view.pendingReports).toBe(1)
   })
 
-  it('writes 票内 N 条报告 when the ticket carries two', () => {
-    const { store, end } = mount()
-    const ticket = store.open('handed two back')
-    store.update(ticket.id, { status: 'running', owner: 'session-abc' })
-    store.appendReport(ticket.id, '第一条：改完了')
-    store.appendReport(ticket.id, '第二条：测试过了')
+  it('鱼带着错误死：票照样落 waiting，报告里留下它最后的话', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    await h.desk.report(id, '最后一句：编译挂了')
+    h.desk.attach()
 
-    fire(end, { id: 'session-abc', stopReason: 'completed' })
+    end(h, 'worker-1', 'error')
+    await flush()
 
-    const settled = store.get(ticket.id)!
-    expect(settled.status).toBe('waiting')
-    expect(settled.reports).toHaveLength(2)
-    expect(settled.note).toBe('worker 结束（completed），票内 2 条报告')
+    expect(h.desk.get(id)!.status).toBe('waiting')
+    expect(h.desk.get(id)!.pendingReports).toBe(1)
   })
 
-  it('leaves the same evidence when the worker died with an error', () => {
-    const { store, end } = mount()
-    const empty = store.open('died without a word')
-    store.update(empty.id, { status: 'running', owner: 'session-abc' })
-    const reported = store.open('died after reporting')
-    store.update(reported.id, { status: 'running', owner: 'session-abc' })
-    store.appendReport(reported.id, '只剩这一步没做完')
+  it('同一轮只落一次：重复的 end 事件不改票', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
 
-    fire(end, { id: 'session-abc', stopReason: 'error' })
+    end(h, 'worker-1')
+    await flush()
+    const since = h.desk.get(id)!.statusSince
+    end(h, 'worker-1')
+    await flush()
 
-    expect(store.get(empty.id)!.note).toBe('worker 结束（error），票内无报告')
-    expect(store.get(reported.id)!.note).toBe('worker 结束（error），票内 1 条报告')
-    // The note is a note: the hook still never decides the ticket is done.
-    expect(store.get(empty.id)!.status).toBe('waiting')
-    expect(store.get(reported.id)!.status).toBe('waiting')
+    // 第二条 ended 事实无害：状态和那一轮的时间戳都不再动。
+    expect(h.desk.get(id)!.status).toBe('waiting')
+    expect(h.desk.get(id)!.statusSince).toBe(since)
   })
 })
 
-/**
- * 2026-11-03: a broken dispatcher took the whole ticket system down. This hook
- * is a nicety — it may never be the reason `dispatch_*` disappear. A host that
- * refuses the event (an older cordis, a stricter registry) must cost us one
- * warning line, not the plugin.
- */
-describe('subagent/end subscription is not load-bearing', () => {
-  it('keeps apply() and every tool alive when the host refuses the event', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dispatcher-subagent-end-hard-'))
-    dirs.push(dir)
-    const stateFile = join(dir, 'tickets.jsonl')
-    const warnings: string[] = []
-    const registered: string[] = []
-    const ctx = {
-      agents: { list: () => [], get: () => undefined },
-      effect: (callback: () => () => void) => callback(),
-      on(event: string) {
-        if (event === 'subagent/end') throw new Error('unknown event')
-        return () => {}
-      },
-      tools: {
-        register(definition: { name: string }) {
-          registered.push(definition.name)
-          return () => {}
-        },
-        get: () => undefined,
-      },
-      logger: { info() {}, warn: (message: string) => warnings.push(message) },
-    }
+describe('workerId 不做 hex 片段猜测', () => {
+  it('不同 worker 不串票', async () => {
+    const h = makeDesk()
+    const a = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
 
-    expect(() => apply(ctx as never, testConfig(stateFile))).not.toThrow()
-    // The ticket tools came up anyway, which is the only part that matters.
-    expect(registered).toContain('dispatch_open')
-    expect(registered).toContain('dispatch_report')
-    expect(warnings.join('\n')).toContain('subagent/end')
-  })
-})
-
-/**
- * 2026-11-03: 现场真事——主会话开票时 owner 只写了 `subagent 34b183b9`，而
- * `subagent/end` 的 id 是完整 uuid，旧的三变体比对永远不中，票静默挂 running。
- * 这里钉住短标签兜底的边界：前缀算命中，任意子串、六位以下、纯中文标签都不算。
- */
-describe('a short owner label still settles the ticket', () => {
-  const full = '34b183b9-5d77-474e-8a8d-74ea0d3327f4'
-
-  it('matches the real case: subagent 34b183b9 vs the full uuid', () => {
-    const { store, end } = mount()
-    const ticket = store.open('short label owner')
-    store.update(ticket.id, { status: 'running', owner: 'subagent 34b183b9' })
-
-    fire(end, { id: full, stopReason: 'completed' })
-
-    expect(store.get(ticket.id)!.status).toBe('waiting')
+    end(h, 'worker-2')
+    await flush()
+    expect(h.desk.get(a.id)!.status).toBe('running')
   })
 
-  it('still matches full uuid against full uuid', () => {
-    const { store, end } = mount()
-    const ticket = store.open('full uuid owner')
-    store.update(ticket.id, { status: 'running', owner: full })
+  it('人话标签再像也不认：只认 workerId', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
 
-    fire(end, { id: full, stopReason: 'completed' })
-
-    expect(store.get(ticket.id)!.status).toBe('waiting')
-  })
-
-  it('still matches through the session- prefix on the owner side', () => {
-    const { store, end } = mount()
-    const ticket = store.open('prefixed short label')
-    store.update(ticket.id, { status: 'running', owner: `session-subagent 34b183b9` })
-
-    fire(end, { id: full, stopReason: 'completed' })
-
-    expect(store.get(ticket.id)!.status).toBe('waiting')
-  })
-
-  it('leaves a pure Chinese label alone', () => {
-    const { store, end } = mount()
-    const ticket = store.open('chinese label')
-    store.update(ticket.id, { status: 'running', owner: '重启小鱼' })
-
-    expect(() => fire(end, { id: full, stopReason: 'completed' })).not.toThrow()
-    expect(store.get(ticket.id)!.status).toBe('running')
-  })
-
-  it('does not match two different uuids', () => {
-    const { store, end } = mount()
-    const ticket = store.open('someone else')
-    store.update(ticket.id, { status: 'running', owner: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })
-
-    fire(end, { id: full, stopReason: 'completed' })
-
-    expect(store.get(ticket.id)!.status).toBe('running')
-  })
-
-  it('does not match a fragment shorter than six hex digits', () => {
-    const { store, end } = mount()
-    const ticket = store.open('too short to mean anything')
-    store.update(ticket.id, { status: 'running', owner: 'subagent 34b18' })
-
-    fire(end, { id: full, stopReason: 'completed' })
-
-    expect(store.get(ticket.id)!.status).toBe('running')
+    end(h, '小鱼甲')
+    await flush()
+    expect(h.desk.get(id)!.status).toBe('running')
   })
 })

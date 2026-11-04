@@ -17,7 +17,7 @@ export const DEFAULT_NOTIFY_SCRIPT = '/home/julia/fatfish/notify.sh'
 /** A push must never hold a turn: the child is killed at this point. */
 export const DEFAULT_TIMEOUT_MS = 5000
 
-export interface ProgressOptions {
+interface ProgressOptions {
   /** Script to run. Defaults to DEFAULT_NOTIFY_SCRIPT; tests inject a stub. */
   script?: string
   /** Hard cap on the child process, in milliseconds. */
@@ -26,7 +26,7 @@ export interface ProgressOptions {
   log?(message: string): void
 }
 
-export interface ProgressResult {
+interface ProgressResult {
   /** True when the notify script exited 0. */
   sent: boolean
 }

@@ -54,14 +54,35 @@ describe('Config 缺省值', () => {
     expect(routerAllowList(config)).toEqual([...DEFAULT_ROUTER_TOOLS])
   })
 
-  it('qqPrefsPath 默认空：没配就不读映射文件', () => {
-    expect(config.qqPrefsPath).toBe('')
+  it('defaultPreset 默认空：档位名由 profile 给，代码不写死', () => {
+    expect(config.defaultPreset).toBe('')
   })
 
-  it('配了 extraRouterTools 就原样读进来', () => {
-    const given = parse({ extraRouterTools: EXTRAS, qqPrefsPath: '/tmp/prefs.json' })
+  it('presetStrategy 默认 llm，超时 8 秒：选档失败也不许卡住开票', () => {
+    expect(config.presetStrategy).toBe('llm')
+    expect(config.classifyTimeoutMs).toBe(8000)
+    expect(config.classifyModel).toBe('deepseek/deepseek-flash')
+    expect(config.classifyEffort).toBe('off')
+  })
+
+  it('配了 extraRouterTools 和 defaultPreset 就原样读进来', () => {
+    const given = parse({ extraRouterTools: EXTRAS, defaultPreset: 't1' })
     expect(given.extraRouterTools).toEqual(EXTRAS)
-    expect(given.qqPrefsPath).toBe('/tmp/prefs.json')
+    expect(given.defaultPreset).toBe('t1')
     expect(routerAllowList(given)).toEqual([...DEFAULT_ROUTER_TOOLS, ...EXTRAS])
+  })
+
+  it('票面就是六个名字，旧名不在白名单里', () => {
+    const tickets = DEFAULT_ROUTER_TOOLS.filter((name) => name.startsWith('dispatch_'))
+    expect(tickets).toEqual([
+      'dispatch_open',
+      'dispatch_send',
+      'dispatch_read',
+      'dispatch_close',
+      'dispatch_block',
+      'dispatch_list',
+    ])
+    expect(DEFAULT_ROUTER_TOOLS).not.toContain('subagent')
+    expect(DEFAULT_ROUTER_TOOLS).not.toContain('progress_note')
   })
 })

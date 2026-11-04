@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Config } from '../src/config'
-import { apply, toView } from '../src/index'
 import {
   BRIEF_MAX_COLUMNS,
   TicketStore,
@@ -13,11 +12,14 @@ import {
   textColumns,
   truncateColumns,
 } from '../src/store'
+import { makeDesk } from './helpers/desk-harness'
+import { cleanTempDirs, mountPlugin, tempDir } from './helpers/plugin-harness'
 
 const dirs: string[] = []
 
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
+  cleanTempDirs()
 })
 
 function tempFile(): string {
@@ -36,60 +38,23 @@ function logFile(lines: readonly TicketEvent[]): string {
   return file
 }
 
-function testConfig(stateFile: string, overrides: Partial<Config> = {}): Config {
-  return {
-    stateFile,
-    staleMinutes: 30,
-    maxOpen: 8,
-    briefMaxColumns: BRIEF_MAX_COLUMNS,
-    handoffPolicy: false,
-    handoffPolicyText: '',
-    sweepMinutes: 0,
-    zombieMinutes: 20,
-    noReportMinutes: 5,
-    notifyOwner: false,
-    quietSweep: true,
-    ownerSessionId: '',
-    qqPrefsPath: join(stateFile, '..', 'prefs.json'),
-    ownerOpenId: '',
-    noWaitGuard: false,
-    maxCommandMs: 30000,
-    maxWaitMs: 5000,
-    routerRestrict: false,
-    routerEscapeFile: join(stateFile, '..', 'no-restrict'),
-    routerTools: [],
-    extraRouterTools: [],
-    workerToolDeny: false,
-    workerDenyTools: [],
-    workerPromptPrune: true,
-    notifyScript: '',
-    notifyTimeoutMs: 5000,
-    ...overrides,
-  }
-}
-
 interface RegisteredTool {
-  execute(args: Record<string, unknown>): Promise<Record<string, unknown>>
+  execute(args: Record<string, unknown>, exec?: unknown): Promise<unknown>
 }
 
-/** Mount the plugin the way the host does and keep the tools it registers. */
-function mount(stateFile: string, overrides: Partial<Config> = {}): Map<string, RegisteredTool> {
-  const tools = new Map<string, RegisteredTool>()
-  const ctx = {
-    agents: { list: () => [], get: () => undefined },
-    effect: (callback: () => () => void) => callback(),
-    on: () => () => {},
-    tools: {
-      register(definition: { name: string } & RegisteredTool) {
-        tools.set(definition.name, definition)
-        return () => {}
-      },
-      get: () => undefined,
-    },
-    logger: { info: () => {}, warn: () => {} },
+/** 装一次插件，把注册的工具拿回来；票日志落在 stateFile。 */
+function mount(stateFile: string, overrides: Partial<Config> = {}): {
+  tools: Map<string, RegisteredTool>
+  call: (name: string, args: Record<string, unknown>) => Promise<unknown>
+  open: (args: Record<string, unknown>) => Promise<{ id: string }>
+} {
+  const host = mountPlugin({ config: { stateFile, ...overrides } })
+  const tools = host.tools as unknown as Map<string, RegisteredTool>
+  return {
+    tools,
+    call: (name, args) => host.call(name, args),
+    open: (args) => host.call('dispatch_open', args) as Promise<{ id: string }>,
   }
-  apply(ctx as never, testConfig(stateFile, overrides))
-  return tools
 }
 
 /** A goal that exactly fills the cap: 17 汉字 = 34 columns (2026-11-02 little-screen measurement). */
@@ -135,48 +100,50 @@ describe('deriveBrief', () => {
 describe('dispatch_open brief', () => {
   it('stores the brief the caller passed', async () => {
     const file = tempFile()
-    const tools = mount(file)
-    const opened = await tools.get('dispatch_open')!.execute({ goal: '很长的任务书，写了一大段。', brief: '改插件字段' })
+    const { open } = mount(file)
+    const opened = await open({ goal: '很长的任务书，写了一大段。', brief: '改插件字段' })
 
-    const line = readFileSync(file, 'utf8').trim().split('\n').at(-1)!
-    expect(JSON.parse(line)).toMatchObject({ id: opened.id, brief: '改插件字段' })
+    // 开票写两行：published（人交的活）和 spawned（派了小鱼）。摘要在第一行上。
+    const lines = readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(lines.find((line) => line.kind === 'published')).toMatchObject({ id: opened.id, brief: '改插件字段' })
     expect(new TicketStore(file).get(String(opened.id))?.brief).toBe('改插件字段')
   })
 
   it('rejects a ticket opened with no brief at all', async () => {
     const file = tempFile()
-    const tools = mount(file)
-    // 2026-11-03 起 brief 必填：不传就是错误，不再从 goal 派生一句顶上来。
-    // 缺参数在 schema 那道关就被拦下（required 列表），空串之类才轮到 execute 里的
-    // 中文提示，两条路径都不许静默派生。
+    const { tools, open } = mount(file)
+    // brief 必填：不传就是错误，不再从 goal 派生一句顶上来。缺参数在 schema 那道
+    // 关就被拦下（required 列表），空串之类才轮到 execute 里的中文提示。
     await expect(
       tools.get('dispatch_open')!.execute({ goal: '在小屏第二行显示票的简短目标。整段任务书太长，塞不下。' }),
     ).rejects.toThrow(/missing required property "brief"/)
-    // 一个事件都没写：错误发生在 store.open 之前。
+    // 票日志里一条都没有：错误发生在落票之前。
+    expect(existsSync(file) ? readFileSync(file, 'utf8').trim() : '').toBe('')
+    await expect(open({ goal: 'g', brief: '' })).rejects.toThrow(/brief 不能为空/)
     expect(existsSync(file) ? readFileSync(file, 'utf8').trim() : '').toBe('')
   })
 
   it('rejects an empty, whitespace-only or punctuation-only brief', async () => {
     const file = tempFile()
-    const tools = mount(file)
+    const { call } = mount(file)
     for (const brief of ['', '   ', '\n\t', '。', '…… ！？', '—— 、']) {
-      await expect(tools.get('dispatch_open')!.execute({ goal: 'g', brief })).rejects.toThrow(/brief 必填/)
+      await expect(call('dispatch_open', { goal: 'g', brief })).rejects.toThrow(/brief 不能为空/)
     }
-    // 一个都没落盘：写入侧压根没走 store.open。
+    // 一个都没落盘：空摘要连票都不开。
     expect(existsSync(file) ? readFileSync(file, 'utf8').trim() : '').toBe('')
   })
 
-  it('names the column cap and the 汉字 count in the error', async () => {
-    const tools = mount(tempFile(), { briefMaxColumns: 20 })
-    await expect(tools.get('dispatch_open')!.execute({ goal: 'g', brief: ' ' })).rejects.toThrow(
-      'brief 必填，写一句 20 列以内的短话（汉字按 2 列算，约 10 个汉字）',
+  it('says what the field is for and refuses a blank one', async () => {
+    const { call } = mount(tempFile(), { briefMaxColumns: 20 })
+    await expect(call('dispatch_open', { goal: 'g', brief: ' ' })).rejects.toThrow(
+      'brief 不能为空：它是小屏第二行，一句话说清这票干嘛',
     )
   })
 
   it('keeps a brief that is exactly at the cap untouched', async () => {
     const file = tempFile()
-    const tools = mount(file)
-    const opened = await tools.get('dispatch_open')!.execute({ goal: 'g', brief: AT_CAP })
+    const { open } = mount(file)
+    const opened = await open({ goal: 'g', brief: AT_CAP })
 
     const stored = new TicketStore(file).get(String(opened.id))?.brief
     expect(stored).toBe(AT_CAP)
@@ -186,9 +153,9 @@ describe('dispatch_open brief', () => {
 
   it('cuts a brief one column over the cap to 32 columns plus the ellipsis', async () => {
     const file = tempFile()
-    const tools = mount(file)
+    const { open } = mount(file)
     // 34 列 + 一个半角字符 = 35 列，刚好越过上限一列。
-    const opened = await tools.get('dispatch_open')!.execute({ goal: 'g', brief: `${AT_CAP}a` })
+    const opened = await open({ goal: 'g', brief: `${AT_CAP}a` })
 
     const brief = new TicketStore(file).get(String(opened.id))?.brief!
     expect(brief.endsWith('…')).toBe(true)
@@ -199,10 +166,8 @@ describe('dispatch_open brief', () => {
 
   it('caps a caller-supplied brief at the configured width', async () => {
     const file = tempFile()
-    const tools = mount(file, { briefMaxColumns: 8 })
-    const opened = await tools
-      .get('dispatch_open')!
-      .execute({ goal: 'g', brief: `${AT_CAP}八九十` })
+    const { open } = mount(file, { briefMaxColumns: 8 })
+    const opened = await open({ goal: 'g', brief: `${AT_CAP}八九十` })
 
     const brief = new TicketStore(file).get(String(opened.id))?.brief
     expect(textColumns(brief!)).toBeLessThanOrEqual(8)
@@ -232,13 +197,15 @@ describe('old tickets without a brief', () => {
 
   it('exposes the derived brief through dispatch_list', async () => {
     const file = logFile(lines)
-    const tools = mount(file)
-    const listed = (await tools.get('dispatch_list')!.execute({})) as {
+    const { call } = mount(file)
+    const listed = (await call('dispatch_list', {})) as {
       tickets: Array<{ id: string; goal: string; brief: string }>
     }
     const row = listed.tickets.find((ticket) => ticket.id === 't-old-1')!
     expect(row.brief).toBe('整理磁盘上的备份目录')
-    expect(row.goal).toContain('顺手删掉')
+    // 小屏只放摘要；整段目标留在日志里，命令里不重复占位。
+    expect(row).not.toHaveProperty('goal')
+    expect(new TicketStore(file).get('t-old-1')!.goal).toContain('顺手删掉')
   })
 
   it('lets a later event fill the field in without losing it', () => {
@@ -250,9 +217,11 @@ describe('old tickets without a brief', () => {
     expect(snapshots[0].brief).toBe('补上摘要')
   })
 
-  it('shows the derived brief in a ticket view', () => {
-    const ticket = foldEvents(lines)[0]
-    const view = toView(ticket, 30, new Date('2026-10-31T01:00:00.000Z'))
-    expect(view.brief).toBe('整理磁盘上的备份目录')
+  it('shows the derived brief in a ticket view', async () => {
+    const h = makeDesk({ now: new Date('2026-10-31T01:00:00.000Z') })
+    h.backend.append(lines[0]!)
+    h.backend.append(lines[1]!)
+    h.desk.attach()
+    expect(h.desk.get('t-old-1')!.brief).toBe('整理磁盘上的备份目录')
   })
 })

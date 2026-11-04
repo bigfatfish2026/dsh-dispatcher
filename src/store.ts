@@ -1,104 +1,52 @@
 import { isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
-import { createTicketBackend } from './store/backend'
-import { JsonlTicketStore } from './store/jsonl'
+import { TicketLog } from './store/log'
 import type { TicketBackend } from './store/backend'
+import type {
+  EntryKind,
+  TicketBroadcast,
+  TicketEntry,
+  TicketSnapshot,
+  TicketStatus,
+} from './store/events'
 
 // 后端在这一层之后：门面只认 TicketBackend 那四个原语（load / changed / append /
 // location），jsonl 的文件细节（O_APPEND、补换行、坏行跳过）全在
 // `store/jsonl.ts`。换 redis/sqlite 时这个文件一行不用改。
+//
+// 2026-11-04 拆成三层：事件类型在 `store/events.ts`，纯 fold 在
+// `store/reducer.ts`，读写与投影在 `store/log.ts`。这个文件只剩「门面 + 与票
+// 无关的小工具」（brief 宽度、时间换算、待投递过滤）。TicketStore 的方法一个
+// 没少——删 `update({status})` 是第三期的事。
 export { createTicketBackend } from './store/backend'
 export { JsonlTicketStore } from './store/jsonl'
 export type { TicketBackend, TicketBackendConfig, TicketBackendName } from './store/backend'
-
-export type TicketStatus = 'open' | 'running' | 'waiting' | 'blocked' | 'done' | 'dropped'
-
-/**
- * One message waiting for a worker, or one report a worker handed back. Both
- * are durable: the queue survives a restart, which is the point of keeping it
- * in the log instead of in the session that happened to be alive.
- */
-export interface TicketEntry {
-  id: string
-  at: string
-  text: string
-  delivered: boolean
-  deliveredAt?: string
-}
-
-/** One ticket as the tools and the model see it: a fold of its events. */
-export interface TicketSnapshot {
-  id: string
-  goal: string
-  /**
-   * One-line summary of the goal, for the little screen's second line: at most
-   * `BRIEF_MAX_COLUMNS` character columns. Optional because tickets written before
-   * 2026-11-02 have no such field — readers fall back to `briefOf()`, which
-   * derives the same thing from `goal`.
-   */
-  brief?: string
-  status: TicketStatus
-  dir?: string
-  note?: string
-  /**
-   * Human label for the worker (what the little screen shows): `t4 查qqbot PR`
-   * rather than a session id. Kept as free text so a person can read it.
-   */
-  owner?: string
-  /**
-   * The worker's session id as `spawn` returned it (uuid, optionally with a
-   * `session-` prefix). Optional: tickets written before 2026-11-03 have none,
-   * and readers must treat it as absent rather than guessing — the zombie sweep
-   * uses it for an exact liveness check and otherwise falls back to the old
-   * hex-fragment scan over `owner`.
-   */
-  ownerId?: string
-  createdAt: string
-  updatedAt: string
-  /**
-   * When the ticket last ended (done or dropped), in the log's own time; unset
-   * while it is open again. A sweep needs this to tell "mail that arrived after
-   * the close" from "mail a dead worker never picked up" — only the first is a
-   * reason to reopen, and the log cannot answer that without keeping the close.
-   */
-  closedAt?: string
-  /** Messages queued for the worker, oldest first. */
-  inputs: TicketEntry[]
-  /** Reports the worker handed back, oldest first. */
-  reports: TicketEntry[]
-}
-
-/** One line of the append-only log. Every field except id/at is optional. */
-export interface TicketEvent {
-  id: string
-  at: string
-  goal?: string
-  brief?: string
-  status?: TicketStatus
-  dir?: string
-  note?: string
-  owner?: string
-  ownerId?: string
-  input?: { id: string; text: string }
-  report?: { id: string; text: string }
-  delivered?: { kind: EntryKind; id: string }
-}
-
-export type EntryKind = 'input' | 'report'
-
-/** What one appended log line did, as the event bus announces it. */
-export type TicketEventKind = 'open' | 'status' | 'input' | 'report' | 'delivered'
-
-/**
- * What goes on the bus after a successful append: which ticket moved and in
- * what way. Deliberately not the whole line — a listener that needs the ticket
- * reads it from the projection (one shared fold, not one per listener).
- */
-export interface TicketBroadcast {
-  id: string
-  at: string
-  kind: TicketEventKind
-}
+export type {
+  Actor,
+  Blocked,
+  Closed,
+  Delivered,
+  Ended,
+  Idled,
+  LegacyStatus,
+  LegacyTicketEvent,
+  LegacyTicketSnapshot,
+  Published,
+  PresetSource,
+  Queued,
+  Reported,
+  Resumed,
+  Spawned,
+  SpawnFailed,
+  TicketBroadcast,
+  TicketEntry,
+  TicketEvent,
+  TicketEventKind,
+  TicketSnapshot,
+  TicketStatus,
+} from './store/events'
+export type { EntryKind } from './store/events'
+export { fold, foldEvents } from './store/reducer'
 
 /**
  * Longest brief, measured in character columns: a CJK character is 2 columns, a
@@ -211,9 +159,6 @@ export function briefOf(
 
 const OPEN: ReadonlySet<TicketStatus> = new Set(['open', 'running', 'waiting', 'blocked'])
 
-/** The two statuses that end a ticket: a dropped one is a person's stop. */
-const ENDED: ReadonlySet<TicketStatus> = new Set(['done', 'dropped'])
-
 export function isOpen(status: TicketStatus): boolean {
   return OPEN.has(status)
 }
@@ -223,102 +168,6 @@ export function resolveStateFile(configured: string): string {
   if (isAbsolute(configured)) return configured
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return join(home, configured)
-}
-
-export function newTicketId(now: Date = new Date()): string {
-  const stamp = now.getTime().toString(36)
-  const salt = Math.random().toString(36).slice(2, 6)
-  return `t-${stamp}-${salt}`
-}
-
-function newEntryId(now: Date = new Date()): string {
-  return `e-${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-}
-
-/** Append one queued entry, undelivered. */
-function queue(entries: readonly TicketEntry[], at: string, entry: { id: string; text: string }): TicketEntry[] {
-  return [...entries, { id: entry.id, at, text: entry.text, delivered: false }]
-}
-
-/** Mark one entry of a list delivered; other entries are untouched. */
-function deliver(entries: readonly TicketEntry[], at: string, id: string): TicketEntry[] {
-  return entries.map((entry) => (entry.id === id ? { ...entry, delivered: true, deliveredAt: at } : entry))
-}
-
-/**
- * Fold one event into `state`. Shared by the full fold (`foldEvents`) and the
- * store's projection: one code path means an incremental update after `append`
- * and a rebuild from the file can never disagree.
- */
-function applyEvent(state: Map<string, TicketSnapshot>, event: TicketEvent): void {
-  // 一行能 parse 不等于它是一条事件：崩溃留下的 null、数字、数组都在这里被挡下。
-  // 放过去的话 `event.id` 会抛 TypeError，而 `store.list()` 是每个 dispatch_* 的
-  // 第一步——一处脏行就能把整套工具打死。没有 id/at 的行也不构成事件。
-  if (event === null || typeof event !== 'object') return
-  if (typeof event.id !== 'string' || typeof event.at !== 'string') return
-  const previous = state.get(event.id)
-  if (!previous) {
-    state.set(event.id, {
-      id: event.id,
-      goal: event.goal ?? '',
-      brief: event.brief,
-      status: event.status ?? 'open',
-      dir: event.dir,
-      note: event.note,
-      owner: event.owner,
-      ownerId: event.ownerId,
-      createdAt: event.at,
-      updatedAt: event.at,
-      closedAt: event.status && ENDED.has(event.status) ? event.at : undefined,
-      inputs: event.input ? queue([], event.at, event.input) : [],
-      reports: event.report ? queue([], event.at, event.report) : [],
-    })
-    return
-  }
-  state.set(event.id, {
-    ...previous,
-    goal: event.goal ?? previous.goal,
-    // Old lines have no brief at all: `??` keeps whatever the ticket already
-    // had, so a fold never turns a present brief into undefined.
-    brief: event.brief ?? previous.brief,
-    status: event.status ?? previous.status,
-    dir: event.dir ?? previous.dir,
-    note: event.note ?? previous.note,
-    owner: event.owner ?? previous.owner,
-    ownerId: event.ownerId ?? previous.ownerId,
-    updatedAt: event.at,
-    // A status line is the only thing that moves the close: done/dropped set
-    // it, reopening clears it, and every other event leaves it alone.
-    closedAt: event.status ? (ENDED.has(event.status) ? event.at : undefined) : previous.closedAt,
-    inputs: event.input
-      ? queue(previous.inputs, event.at, event.input)
-      : event.delivered?.kind === 'input'
-        ? deliver(previous.inputs, event.at, event.delivered.id)
-        : previous.inputs,
-    reports: event.report
-      ? queue(previous.reports, event.at, event.report)
-      : event.delivered?.kind === 'report'
-        ? deliver(previous.reports, event.at, event.delivered.id)
-        : previous.reports,
-  })
-}
-
-/** Fold events into the current snapshot of every ticket, newest event last. */
-export function foldEvents(events: readonly TicketEvent[]): TicketSnapshot[] {
-  const state = new Map<string, TicketSnapshot>()
-  for (const event of events) applyEvent(state, event)
-  return [...state.values()]
-}
-
-/** What one log line did, for the event bus. */
-export function kindOf(event: TicketEvent): TicketEventKind {
-  if (event.delivered) return 'delivered'
-  if (event.input) return 'input'
-  if (event.report) return 'report'
-  // A creation line is the only one that carries a goal together with status
-  // open; every later status line is a change, including a reopen to open.
-  if (event.goal !== undefined && event.status === 'open') return 'open'
-  return 'status'
 }
 
 export function minutesSince(iso: string, now: Date = new Date()): number {
@@ -332,132 +181,70 @@ export function pending(entries: readonly TicketEntry[]): TicketEntry[] {
   return entries.filter((entry) => !entry.delivered)
 }
 
+/**
+ * 薄门面：调用点还用 `new TicketStore(...)` 和那几个方法，实现全搬到
+ * `TicketLog`。这一期一个方法都不删——`update({status})` 留给第三期。
+ */
 export class TicketStore {
-  /** 事件从哪儿来、往哪儿写；所有读写都走它，这个文件里没有一行 fs。 */
-  private readonly backend: TicketBackend
-  /** Called after every append that is not internal; see `quietly`. */
-  private readonly emit?: (event: TicketBroadcast) => void
+  private readonly inner: TicketLog
 
-  /**
-   * 内存投影：ticketId → 折好的快照。list()/get() 从这儿读，不再每次整份重读
-   * 日志、重新 fold。启动时（第一次 refresh）全量 fold 一次，之后 append 只折叠
-   * 刚写进去的那一行。
-   */
-  private state = new Map<string, TicketSnapshot>()
-  private loaded = false
-  /** 内部写入（巡检自己的重开、投递记账）不许再广播，否则事件自激。 */
-  private quiet = 0
-
-  /**
-   * `source` 给路径就按 jsonl 打开（测试和工具都这么用），给一个 TicketBackend
-   * 实例就用它。传后端时 `log` 这一栏没用：坏行由后端自己报。
-   */
   constructor(
     source: string | TicketBackend,
     log?: (message: string) => void,
     emit?: (event: TicketBroadcast) => void,
   ) {
-    this.backend = typeof source === 'string' ? new JsonlTicketStore(source, log) : source
-    this.emit = emit
+    this.inner = new TicketLog(source, log, emit)
   }
 
   /** 这份日志在哪儿：jsonl 就是文件路径，别的后端是它自己的地址。 */
   get path(): string {
-    return this.backend.location
+    return this.inner.location
   }
 
   /**
-   * 读之前的兜底：只问后端一次「变了吗」，没变就直接用投影。变了（别的进程
-   * 追加、有人手改了文件、日志被截断）才整份重放一次——不是每次都重新折叠。
+   * 同一个 TicketLog 给票台用：desk 只碰 `commit` / `get` / `list`，串行化仍归
+   * 调用方那一条队列。门面自己那几个写方法（P3 删）与 desk 共用这一个实例，
+   * 所以投影只有一份，不会各折各的。
    */
-  private refresh(): void {
-    if (this.loaded && !this.backend.changed()) return
-    const state = new Map<string, TicketSnapshot>()
-    for (const event of this.backend.load()) applyEvent(state, event)
-    this.state = state
-    this.loaded = true
+  get log(): TicketLog {
+    return this.inner
   }
 
   list(): TicketSnapshot[] {
-    this.refresh()
-    return [...this.state.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    return this.inner.list()
   }
 
   get(id: string): TicketSnapshot | undefined {
-    this.refresh()
-    return this.state.get(id)
+    return this.inner.get(id)
   }
 
-  /**
-   * Run `work` without broadcasting what it appends. Sweep and the ticket
-   * handlers write to the log themselves (reopen, markDelivered); announcing
-   * those would wake the very listener that asked for the write. Nested calls
-   * are fine: the counter only reaches zero once, on the outermost return.
-   */
   quietly<T>(work: () => T): T {
-    this.quiet += 1
-    try {
-      return work()
-    } finally {
-      this.quiet -= 1
-    }
-  }
-
-  private append(event: TicketEvent): void {
-    // 先对齐一次投影：日志要是被外部改过，这一条必须折在最新状态上。
-    this.refresh()
-    // 原子追加归后端管（jsonl 是一次 O_APPEND 的 writeSync），这里只折刚写的
-    // 这一行，不重读整份日志。
-    this.backend.append(event)
-    applyEvent(this.state, event)
-    this.loaded = true
-    if (this.emit && this.quiet === 0) {
-      this.emit({ id: event.id, at: event.at, kind: kindOf(event) })
-    }
+    return this.inner.quietly(work)
   }
 
   open(goal: string, dir?: string, brief?: string): TicketSnapshot {
-    const now = new Date()
-    const id = newTicketId(now)
-    // An empty brief is not written at all: absent and empty should read the
-    // same, and leaving it out keeps the log line as short as it used to be.
-    const trimmed = brief?.trim()
-    this.append({ id, at: now.toISOString(), goal, status: 'open', dir, ...(trimmed ? { brief: trimmed } : {}) })
-    return this.get(id)!
+    return this.inner.open(goal, dir, brief)
   }
 
   update(
     id: string,
     patch: { status?: TicketStatus; note?: string; owner?: string; ownerId?: string; dir?: string },
   ): TicketSnapshot {
-    const existing = this.get(id)
-    if (!existing) throw new Error(`unknown ticket: ${id}`)
-    this.append({ id, at: new Date().toISOString(), ...patch })
-    return this.get(id)!
+    return this.inner.update(id, patch)
   }
 
   /** Queue one more message for the worker; it is delivered later, not now. */
   appendInput(id: string, text: string): { ticket: TicketSnapshot; entry: TicketEntry } {
-    if (!this.get(id)) throw new Error(`unknown ticket: ${id}`)
-    const now = new Date()
-    const entry = newEntryId(now)
-    this.append({ id, at: now.toISOString(), input: { id: entry, text } })
-    return { ticket: this.get(id)!, entry: { id: entry, at: now.toISOString(), text, delivered: false } }
+    return this.inner.appendInput(id, text)
   }
 
   /** Record one report from a worker; the main session reads it later. */
   appendReport(id: string, text: string): { ticket: TicketSnapshot; entry: TicketEntry } {
-    if (!this.get(id)) throw new Error(`unknown ticket: ${id}`)
-    const now = new Date()
-    const entry = newEntryId(now)
-    this.append({ id, at: now.toISOString(), report: { id: entry, text } })
-    return { ticket: this.get(id)!, entry: { id: entry, at: now.toISOString(), text, delivered: false } }
+    return this.inner.appendReport(id, text)
   }
 
   /** Record that one queued entry reached its reader. */
   markDelivered(id: string, kind: EntryKind, entryId: string): TicketSnapshot {
-    if (!this.get(id)) throw new Error(`unknown ticket: ${id}`)
-    this.append({ id, at: new Date().toISOString(), delivered: { kind, id: entryId } })
-    return this.get(id)!
+    return this.inner.markDelivered(id, kind, entryId)
   }
 }

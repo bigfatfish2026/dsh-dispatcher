@@ -1,13 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import type { Config } from '../src/config'
+import { describe, expect, it } from 'vitest'
 import { hasIdFragment, matchesId } from '../src/ids'
-import { apply } from '../src/index'
 import { foldEvents } from '../src/store'
 import type { TicketStatus } from '../src/store'
 import { evaluateZombies } from '../src/zombie'
+import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 
 /**
  * 2026-11-03：短标签 owner 也得走 worker-gone 快路。
@@ -116,160 +112,51 @@ describe('纯中文标签的防御层', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/* 端到端：sweep 真的按快路推                                                                  */
+/* 端到端：worker 没了以后巡检干什么                                        */
 /* ------------------------------------------------------------------ */
 
-const dirs: string[] = []
+describe('worker 没了以后', () => {
+  it('worker 从活表里没了，巡检也不动票：状态与日志一字节不改', async () => {
+    const h = makeDesk()
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
+    h.agents.markGone('worker-1')
+    const lines = h.lines()
 
-afterEach(() => {
-  while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true })
-})
+    await h.desk.maintain()
 
-function logFile(lines: Array<Record<string, unknown>>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatcher-owner-match-'))
-  dirs.push(dir)
-  const file = join(dir, 'tickets.jsonl')
-  writeFileSync(file, lines.map((line) => `${JSON.stringify(line)}\n`).join(''), 'utf8')
-  return file
-}
-
-const OWNER = 'session-owner'
-
-/** 时间要相对真实时钟：sweep 用的是 new Date()。 */
-const minutesAgo = (min: number): string => new Date(Date.now() - min * 60_000).toISOString()
-
-function testConfig(stateFile: string): Config {
-  return {
-    stateFile,
-    staleMinutes: 30,
-    maxOpen: 8,
-    briefMaxColumns: 20,
-    handoffPolicy: false,
-    handoffPolicyText: '',
-    sweepMinutes: 0,
-    zombieMinutes: 20,
-    noReportMinutes: 5,
-    notifyOwner: true,
-    quietSweep: false,
-    ownerSessionId: OWNER,
-    qqPrefsPath: join(stateFile, '..', 'prefs.json'),
-    ownerOpenId: '',
-    noWaitGuard: false,
-    maxCommandMs: 30000,
-    maxWaitMs: 5000,
-    routerRestrict: false,
-    routerEscapeFile: join(stateFile, '..', 'no-restrict'),
-    routerTools: [],
-    extraRouterTools: [],
-    workerToolDeny: false,
-    workerDenyTools: [],
-    workerPromptPrune: true,
-    notifyScript: '',
-    notifyTimeoutMs: 5000,
-  }
-}
-
-interface RegisteredTool {
-  execute(args: Record<string, unknown>): Promise<unknown>
-}
-
-/** 活表里的 agent 要够 install 用：有 session.header.origin，也有 ctx 上那几个钩子。 */
-function makeAgent(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    session: { id, header: {} },
-    ...extra,
-    ctx: {
-      effect: (callback: () => () => void) => callback(),
-      on: () => () => {},
-      tools: {
-        restrict: () => () => {},
-        guard: () => () => {},
-        get: () => undefined,
-      },
-    },
-  }
-}
-
-function mount(stateFile: string, liveIds: readonly string[]): { tools: Map<string, RegisteredTool>; inbox: unknown[] } {
-  const tools = new Map<string, RegisteredTool>()
-  const inbox: unknown[] = []
-  const owner = makeAgent(OWNER, {
-    status: 'idle',
-    followup: async (message: unknown) => {
-      inbox.push(message)
-      return undefined
-    },
-    steer: async () => undefined,
+    expect(h.desk.get(id)!.status).toBe('running')
+    expect(h.lines()).toBe(lines)
   })
-  const others = liveIds.filter((id) => id !== OWNER).map((id) => makeAgent(id))
-  const ctx = {
-    agents: {
-      list: () => [owner, ...others],
-      get: (id: string) => (id === OWNER ? owner : undefined),
-    },
-    effect: (callback: () => () => void) => callback(),
-    on: () => () => {},
-    tools: {
-      register(definition: { name: string } & RegisteredTool) {
-        tools.set(definition.name, definition)
-        return () => {}
-      },
-      get: () => undefined,
-    },
-    logger: { info: () => {}, warn: () => {} },
-  }
-  apply(ctx as never, testConfig(stateFile))
-  return { tools, inbox }
-}
 
-function injectedText(inbox: unknown[]): string {
-  return inbox
-    .flatMap((message) => {
-      const content = (message as unknown as { content?: Array<{ text?: string }> }).content ?? []
-      return content.map((part) => part.text ?? '')
+  it('挂到 running-90m 才推一次，理由写 running-90m', async () => {
+    const calls: Array<{ ticketId: string; reason: string }> = []
+    const h = makeDesk({
+      config: { runningReminderMinutes: 90 },
+      notifier: {
+        async idle(input: { ticketId: string; reason: string }) {
+          calls.push({ ticketId: input.ticketId, reason: input.reason })
+          return true
+        },
+        async noReport() {
+          return true
+        },
+        async reportArrived() {
+          return true
+        },
+      },
     })
-    .join('')
-}
+    const { id } = await h.desk.open(INTENT, h.main)
+    h.desk.attach()
+    h.agents.markGone('worker-1')
 
-interface SweepOutput {
-  stale: number
-  woke: boolean
-}
+    h.clock.advance(89 * 60_000)
+    await flush()
+    await h.desk.maintain()
+    expect(calls).toHaveLength(0)
 
-const ticketLines = [
-  { id: 't-short-live', at: minutesAgo(10), goal: '短标签 owner，会话还在', status: 'open' },
-  { id: 't-short-live', at: minutesAgo(9), owner: SHORT, status: 'running' },
-  { id: 't-short-gone', at: minutesAgo(3), goal: '短标签 owner，会话没了', status: 'open' },
-  { id: 't-short-gone', at: minutesAgo(3), owner: SHORT_DEAD, status: 'running' },
-  { id: 't-cn-new', at: minutesAgo(3), goal: '刚派出去的中文标签活', status: 'open' },
-  { id: 't-cn-new', at: minutesAgo(3), owner: '小丙', status: 'running' },
-]
-
-describe('sweep 端到端', () => {
-  it('短标签对上活会话的不推，扫不到的那张立刻推 worker-gone', async () => {
-    const file = logFile(ticketLines)
-    const { tools, inbox } = mount(file, [FULL, OWNER])
-    const result = (await tools.get('dispatch_sweep')!.execute({})) as SweepOutput
-
-    expect(result.stale).toBe(1)
-    expect(result.woke).toBe(true)
-    expect(inbox).toHaveLength(1)
-    const text = injectedText(inbox)
-    expect(text).toContain('t-short-gone')
-    expect(text).toContain('worker-gone')
-    expect(text).not.toContain('t-short-live')
-    // 中文标签那张没到静默阈值，也不许出现在推送里。
-    expect(text).not.toContain('t-cn-new')
-  })
-
-  it('活表里那张短标签会话还在，就一条都不推', async () => {
-    const file = logFile(ticketLines)
-    // 让 SHORT_DEAD 也对上一个活会话：两张短标签票都不该被当成僵尸。
-    const { tools, inbox } = mount(file, [FULL, OWNER, 'deadbeef-1111-4222-8333-44445555666'])
-    const result = (await tools.get('dispatch_sweep')!.execute({})) as SweepOutput
-
-    expect(result.stale).toBe(0)
-    expect(result.woke).toBe(false)
-    expect(inbox).toHaveLength(0)
+    h.clock.advance(2 * 60_000)
+    await h.desk.maintain()
+    expect(calls).toEqual([{ ticketId: id, reason: 'running-90m' }])
   })
 })

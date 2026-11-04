@@ -1,244 +1,95 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
+import { DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
 import type { Config } from '../src/config'
 import { WORKER_FORBIDDEN_TOOLS, apply } from '../src/index'
-import type { PromptAssemblyHook } from '../src/prompt'
+import { cleanTempDirs, fakePluginHost, testConfig } from './helpers/plugin-harness'
 
-const tempDirs: string[] = []
-
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatcher-apply-'))
-  tempDirs.push(dir)
-  return dir
-}
-
-afterEach(() => {
-  while (tempDirs.length) rmSync(tempDirs.pop()!, { recursive: true, force: true })
-})
+afterEach(cleanTempDirs)
 
 const DISPATCH_TOOLS = DEFAULT_ROUTER_TOOLS.filter((name) => name.startsWith('dispatch_'))
-/** Tools this plugin registers: the dispatch_* family plus progress_note. */
+/** 本包注册的工具：七个票工具 + progress_note。 */
 const OWN_TOOLS = [...DISPATCH_TOOLS, 'progress_note']
-/** Everything the whitelist names that another plugin registers, not this one. */
+/** 白名单里由别的插件注册的那些名字。 */
 const FOREIGN_TOOLS = DEFAULT_ROUTER_TOOLS.filter((name) => !OWN_TOOLS.includes(name))
 
-function testConfig(overrides: Partial<Config> = {}): Config {
-  const dir = tempDir()
-  return {
-    stateFile: join(dir, 'tickets.jsonl'),
-    staleMinutes: 30,
-    maxOpen: 4,
-    briefMaxColumns: 20,
-    handoffPolicy: true,
-    handoffPolicyText: DEFAULT_HANDOFF_POLICY,
-    sweepMinutes: 0,
-    zombieMinutes: 20,
-    noReportMinutes: 5,
-    notifyOwner: true,
-    quietSweep: false,
-    ownerSessionId: '',
-    qqPrefsPath: join(dir, 'prefs.json'),
-    ownerOpenId: '',
-    noWaitGuard: true,
-    maxCommandMs: 30000,
-    maxWaitMs: 5000,
-    routerRestrict: true,
-    routerEscapeFile: join(dir, 'no-restrict'),
-    routerTools: [...DEFAULT_ROUTER_TOOLS],
-    extraRouterTools: [],
-    workerToolDeny: true,
-    workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
-    workerPromptPrune: true,
-    notifyScript: join(dir, 'notify.sh'),
-    notifyTimeoutMs: 5000,
-    ...overrides,
-  }
-}
-
-interface FakeAgent {
-  session: { header: { origin?: string } }
-  ctx: {
-    effect(callback: () => () => void, label?: string): unknown
-    on?(event: string, listener: PromptAssemblyHook): () => void
-    tools: {
-      restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
-      get(name: string): unknown
-      guard(): () => void
-    }
-  }
-}
-
-/**
- * A host that behaves like a reload: the registry starts with every *other*
- * plugin's tools and none of this one's, agents exist, and a name is only
- * visible through `tools.get` once `tools.register` has been called for it.
- */
-function fakeHost(options: { registered?: string[]; existingAgents?: number } = {}) {
-  const registry = new Set<string>(options.registered ?? [])
-  const events: string[] = []
-  const restricted: string[][] = []
-  const denied: string[][] = []
-  const warnings: string[] = []
-  const infos: string[] = []
-  const lifted: number[] = []
-  const createdListeners: Array<(payload: { agent: FakeAgent }) => unknown> = []
-  const changeListeners: Array<() => unknown> = []
-  // The scoped prompt hooks: one per (main or worker) session that got a pass.
-  const hooks: PromptAssemblyHook[] = []
-  // The host emits `tools/change` on every registration and every restriction.
-  // Our own reinstall fires it too, so the loop has to stop by itself.
-  const fireChange = (): void => {
-    for (const listener of changeListeners) listener()
-  }
-
-  const makeAgent = (origin?: string): FakeAgent => ({
-    session: { header: origin ? { origin } : {} },
-    ctx: {
-      effect: (callback) => callback(),
-      on(event: string, listener: PromptAssemblyHook) {
-        if (event === 'system-prompt/assemble') hooks.push(listener)
-        return () => {}
-      },
-      tools: {
-        restrict(filter) {
-          const index = restricted.length
-          events.push('restrict')
-          if (filter.allow !== undefined) restricted.push([...filter.allow])
-          if (filter.deny !== undefined) denied.push([...filter.deny])
-          fireChange()
-          return () => {
-            lifted.push(index)
-          }
-        },
-        get: (name: string) => (registry.has(name) ? { name } : undefined),
-        guard: () => () => {},
-      },
-    },
-  })
-
-  const agents = Array.from({ length: options.existingAgents ?? 1 }, () => makeAgent())
-  const ctx = {
-    agents: { list: () => agents, get: () => undefined },
-    effect: (callback: () => () => void) => callback(),
-    on(event: string, listener: unknown) {
-      if (event === 'agent/created') createdListeners.push(listener as (payload: { agent: FakeAgent }) => unknown)
-      if (event === 'tools/change') changeListeners.push(listener as () => unknown)
-      return () => {}
-    },
-    tools: {
-      register(definition: { name: string }) {
-        registry.add(definition.name)
-        events.push(`register:${definition.name}`)
-        fireChange()
-        return () => {}
-      },
-      // The unfiltered global view the router's self-test reads.
-      get: (name: string) => (registry.has(name) ? { name } : undefined),
-    },
-    logger: {
-      info: (message: string) => {
-        infos.push(message)
-      },
-      warn: (message: string) => {
-        warnings.push(message)
-      },
-    },
-  }
-
-  return {
-    ctx,
-    registry,
-    events,
-    restricted,
-    denied,
-    warnings,
-    infos,
-    lifted,
-    hooks,
-    createdListeners,
-    changeListeners,
-    makeAgent,
-  }
+function mount(options: { registered?: string[]; existingAgents?: number } = {}, overrides: Partial<Config> = {}) {
+  const host = fakePluginHost(options)
+  apply(host.ctx as never, testConfig(overrides))
+  return host
 }
 
 describe('apply', () => {
-  // The bug this pins down: on a hot reload the old registrations are already
-  // gone and the new ones have not landed yet, so installing the whitelist
-  // before `ctx.tools.register` made the self-test drop all seven dispatch_*
-  // names from the allow list. The main session then answered "unknown tool".
+  // 热重载时旧注册已经撤掉、新注册还没落地，先装白名单会让自检把本插件自己的
+  // dispatch_* 当「错名」扔掉，主会话随即少七个工具。
   it('registers its own tools before it installs the whitelist', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS] })
-    apply(host.ctx as never, testConfig())
+    const host = mount({ registered: [...FOREIGN_TOOLS] })
 
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
-    for (const name of OWN_TOOLS) expect(host.restricted[0]).toContain(name)
+    // 票面六个名字全在白名单里；progress_note 注册了但主会话拿不到（P4 删）。
+    for (const name of DISPATCH_TOOLS) expect(host.restricted[0]).toContain(name)
+    expect(host.restricted[0]).not.toContain('progress_note')
+    expect(host.names()).toContain('progress_note')
     expect(host.warnings.join('\n')).not.toMatch(/no registered global tool/)
 
     let lastRegister = -1
-    host.events.forEach((event, index) => {
+    host.changes.forEach((event, index) => {
       if (event.startsWith('register:')) lastRegister = index
     })
     expect(lastRegister).toBeGreaterThanOrEqual(0)
-    expect(host.events.indexOf('restrict')).toBeGreaterThan(lastRegister)
+    expect(host.changes.indexOf('restrict')).toBeGreaterThan(lastRegister)
   })
 
   it('covers a session created after load with the same full list', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS], existingAgents: 0 })
-    apply(host.ctx as never, testConfig())
+    const host = mount({ registered: [...FOREIGN_TOOLS], existingAgents: 0 })
 
-    // Nothing existed at load time, so the whitelist waits for agent/created.
     expect(host.restricted).toEqual([])
-    // The no-wait guard listens on the same event; only one of them restricts.
     expect(host.createdListeners.length).toBeGreaterThan(0)
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent() })
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
   })
 
-  // The rule from 2026-11-01: only the main session writes memory. The memory
-  // plugin refuses the call at execute time; this is the layer above it, where
-  // the names never reach a worker's schema at all.
+  // 2026-11-01 的规矩：只有主会话写记忆。dsh-memory 在 execute 里拦，这一层是
+  // 上面那层——名字根本不进小鱼的 schema。
   it('hides the memory-write tools from a worker and from nobody else', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig())
+    const host = mount({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
 
-    // The main session keeps the full whitelist, memory writes included.
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
     expect(host.denied).toEqual([])
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
 
-    // 配置里的记忆写工具 + 代码里那份不可覆盖的票工具。
     expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
-    // A worker never gets an allow list, and never reaches `restrict` twice.
     expect(host.restricted).toHaveLength(1)
-    expect(host.infos.join('\n')).toContain('worker subagents hide 13')
+    expect(host.infos.join('\n')).toContain(
+      `worker subagents hide ${DEFAULT_WORKER_DENY_TOOLS.length + WORKER_FORBIDDEN_TOOLS.length}`,
+    )
   })
 
-  // README「谁写 status」：worker 手上只该有 dispatch_report 和 dispatch_send，
-  // 票的 status 只归主会话和巡检。这份名单写死在代码里，operator 改
-  // workerDenyTools 也不该把 dispatch_close 之类的放回 worker 手里。
+  // 小鱼手上只留 dispatch_report：开票、发话、读票、关票、挂起、列表、打点都拿走，
+  // 而且不因为 operator 改了 workerDenyTools 就放回去。
   it('keeps the ticket tools away from a worker whatever the config says', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig({ workerDenyTools: ['memory_save'] }))
+    const host = mount(
+      { registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 },
+      { workerDenyTools: ['memory_save'] },
+    )
 
-    // 主会话侧一个不少：白名单里那几个名字照样在。
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
-    for (const name of WORKER_FORBIDDEN_TOOLS) expect(host.restricted[0]).toContain(name)
+    for (const name of DISPATCH_TOOLS) expect(host.restricted[0]).toContain(name)
+    expect(host.restricted[0]).not.toContain('progress_note')
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
     expect(host.denied).toHaveLength(1)
     for (const name of WORKER_FORBIDDEN_TOOLS) expect(host.denied[0]).toContain(name)
     expect(host.denied[0]).toContain('memory_save')
+    expect(host.denied[0]).not.toContain('dispatch_report')
   })
 
-  // Two switches, two rules: trimming the main session and taking memory writes
-  // away from a worker are not the same decision, so one must not drag the other.
+  // 两个开关两条规矩：收窄主会话和拿走小鱼的记忆写权限不是同一件事。
   it('applies the worker deny list even when the main whitelist is off', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig({ routerRestrict: false }))
+    const host = mount(
+      { registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 },
+      { routerRestrict: false },
+    )
 
     expect(host.restricted).toEqual([])
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
@@ -246,20 +97,21 @@ describe('apply', () => {
   })
 
   it('leaves the worker alone when workerToolDeny is off', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig({ workerToolDeny: false }))
+    const host = mount(
+      { registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 },
+      { workerToolDeny: false },
+    )
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
     expect(host.denied).toEqual([])
-    // The main session is still trimmed.
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
   })
 
-  // The prompt prune is its own switch: turning the deny list off must not put
-  // the static tool sections back into every worker prompt.
   it('trims the worker prompt even when workerToolDeny is off', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig({ workerToolDeny: false }))
+    const host = mount(
+      { registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 },
+      { workerToolDeny: false },
+    )
     const before = host.hooks.length
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
@@ -268,36 +120,46 @@ describe('apply', () => {
   })
 
   it('leaves the worker prompt alone when workerPromptPrune is off', () => {
-    const host = fakeHost({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
-    apply(host.ctx as never, testConfig({ workerPromptPrune: false }))
+    const host = mount(
+      { registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 },
+      { workerPromptPrune: false },
+    )
     const before = host.hooks.length
 
     for (const listener of host.createdListeners) listener({ agent: host.makeAgent('subagent') })
-    // The deny list still goes on; only the prompt pass is skipped.
     expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
     expect(host.hooks.length).toBe(before)
   })
 
-  // The live bug: a tool that belongs to another plugin, which the loader
-  // installs after dsh-dispatcher. The first pass cannot see it, so the main
-  // session ends up unable to use it. `tools/change` is the host's way of
-  // saying "the registry moved, look again".
+  // 别的插件注册得比本插件晚：第一遍看不见，靠 tools/change 补装。
   it('adds a tool that registers after the whitelist went on', () => {
     const late = FOREIGN_TOOLS[0]!
-    const host = fakeHost({ registered: FOREIGN_TOOLS.filter((name) => name !== late) })
-    apply(host.ctx as never, testConfig())
+    const host = mount({ registered: FOREIGN_TOOLS.filter((name) => name !== late) })
 
     expect(host.restricted).toHaveLength(1)
     expect(host.restricted[0]).not.toContain(late)
     expect(host.warnings.join('\n')).toContain(late)
 
-    // The late plugin loads and registers.
-    host.ctx.tools.register({ name: late })
+    ;(host.ctx.tools as { register: (definition: { name: string }) => unknown }).register({ name: late })
 
     expect(host.restricted).toHaveLength(2)
     expect(host.restricted[1]).toEqual([...DEFAULT_ROUTER_TOOLS])
     expect(host.infos.join('\n')).toContain(late)
-    // No name outside the registry ever reaches `restrict`.
     expect(host.restricted[1]).not.toContain('ghost_tool')
+  })
+
+  // 七个票工具的名字就是最终面：没有 touch / sweep / reports，也没有旧名。
+  it('registers exactly the seven ticket tools plus progress_note', () => {
+    const host = mount({ registered: [...FOREIGN_TOOLS] })
+    const dispatch = host.names().filter((name) => name.startsWith('dispatch_')).sort()
+    expect(dispatch).toEqual([
+      'dispatch_block',
+      'dispatch_close',
+      'dispatch_list',
+      'dispatch_open',
+      'dispatch_read',
+      'dispatch_report',
+      'dispatch_send',
+    ])
   })
 })
