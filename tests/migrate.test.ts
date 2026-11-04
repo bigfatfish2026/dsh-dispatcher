@@ -186,6 +186,18 @@ describe('迁移脚本：CLI 参数面', () => {
     expect(runMigrateCli([FIXTURE, '--nope'], cliIo(unknown))).toBe(2)
   })
 
+  it('--in / --in= 等价于位置参数', () => {
+    const dir = tempDir()
+    const a = join(dir, 'in-a.db')
+    const b = join(dir, 'in-b.db')
+    const first = io()
+    expect(runMigrateCli(['--in', FIXTURE, '--out', a], cliIo(first))).toBe(0)
+    const second = io()
+    expect(runMigrateCli([`--in=${FIXTURE}`, '--out', b], cliIo(second))).toBe(0)
+    expect(first.err).toBe('')
+    expect(second.err).toBe('')
+  })
+
   it('--json 输出可解析的结果，--out= 形式也认', () => {
     const dir = tempDir()
     const db = join(dir, 'json.db')

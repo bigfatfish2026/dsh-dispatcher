@@ -1,4 +1,5 @@
 import type { TicketEvent } from '../store'
+import { DEFAULT_STORE_BACKEND } from '../defaults'
 import { JsonlTicketStore } from './jsonl'
 import { SqliteTicketStore } from './sqlite'
 
@@ -89,7 +90,7 @@ export function createTicketBackend(
   config: TicketBackendConfig,
   log?: (message: string) => void,
 ): TicketBackend {
-  const name = (config.backend ?? '').trim() || 'jsonl'
+  const name = (config.backend ?? '').trim() || DEFAULT_STORE_BACKEND
   switch (name) {
     case 'jsonl':
       return new JsonlTicketStore(config.stateFile, log)

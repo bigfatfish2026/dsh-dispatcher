@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { textColumns } from '../store'
 import { fold } from './reducer'
 import { isTicketEvent } from './events'
@@ -332,11 +333,13 @@ export interface MigrateIo {
   err(text: string): void
 }
 
-export const MIGRATE_USAGE = `用法：node scripts/migrate-to-sqlite.ts <jsonl 路径> [选项]
+export const MIGRATE_USAGE = `用法：node lib/migrate.js <jsonl 路径> [选项]
+      node scripts/migrate-to-sqlite.ts <jsonl 路径> [选项]
 
 把 append-only 的 jsonl 票日志迁进 SQLite。输入只读，输出默认写到 /tmp；绝不写真实 ~/.dsh。
 
 选项：
+  --in <路径>        输入 jsonl；等价于把路径写在第一个位置
   --dry-run          只读：输出将写入多少票、多少事件，不建库
   --out <路径>       输出库；默认 /tmp/dsh-tickets-<时间戳>.db
   --json             输出 JSON 结果（给脚本用）
@@ -367,6 +370,12 @@ function parseArgs(argv: readonly string[]): CliOptions {
       options.db = value
       index += 1
     } else if (arg.startsWith('--out=')) options.db = arg.slice('--out='.length)
+    else if (arg === '--in') {
+      const value = argv[index + 1]
+      if (!value) throw new UsageError('--in 后面要跟路径')
+      options.jsonl = value
+      index += 1
+    } else if (arg.startsWith('--in=')) options.jsonl = arg.slice('--in='.length)
     else if (arg.startsWith('-')) throw new UsageError(`不认识的选项：${arg}`)
     else if (options.jsonl === undefined) options.jsonl = arg
     else throw new UsageError(`多余的参数：${arg}`)
@@ -464,3 +473,13 @@ export function writeRawProjection(dbPath: string, snapshot: TicketSnapshot, seq
 
 /** 未使用但保留：绝对路径判断，供未来 --state 之类的参数复用。 */
 export const isAbsolutePath = isAbsolute
+
+// 直接 `node lib/migrate.js ...` 时也当入口用（构建产物没有脚本包装）。
+// 被 import 时（vitest、别的模块）process.argv[1] 不是这个文件，这段不执行。
+const entry = process.argv[1]
+if (entry && import.meta.url === pathToFileURL(entry).href) {
+  process.exitCode = runMigrateCli(process.argv.slice(2), {
+    out: (text) => process.stdout.write(text),
+    err: (text) => process.stderr.write(text),
+  })
+}

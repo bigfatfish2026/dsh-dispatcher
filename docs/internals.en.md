@@ -116,7 +116,10 @@ dsh-dispatcher tickets --json                  # every ticket
 dsh-dispatcher tickets --json --open-only      # open tickets only
 dsh-dispatcher tickets --json --id t-abc       # one ticket; exit code 1 if absent
 dsh-dispatcher tickets --json --recent 20      # open tickets plus the last 20 closed
+dsh-dispatcher tickets --json --backend sqlite --db ~/.dsh/dispatcher/tickets.db
 ```
+
+With no flags the CLI follows the profile's `store.backend` / `store.file`, exactly like the in-process runtime; the default is still `jsonl`. `--backend <jsonl|sqlite>` picks a backend explicitly, `--db <path>` implies `--backend sqlite` and names the database (relative paths resolve against `DSH_HOME`), and `--state <path>` explicitly uses jsonl. Passing `--backend jsonl` together with `--db` is an error (exit 2); `redis` reports not-implemented and exits 2.
 
 The `--json` shape is fixed and `v` is the schema version. `counts` is computed over the whole log and is not affected by filters. Fields: `id`, `brief`, `goal`, `status`, `owner`, `createdAt` / `updatedAt` / `closedAt` / `statusSince`, `workerAlive`, `pendingInputs` / `pendingReports`, `reportsCount`, `ageMinutes`, `stale`, `epoch` / `epochReports`, `preset` / `presetSource`, `dir` / `note` / `device`. Times are ISO 8601 UTC.
 

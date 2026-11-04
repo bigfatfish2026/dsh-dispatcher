@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { BRIEF_MAX_COLUMNS } from './store'
+import { DEFAULT_STATE_FILE, DEFAULT_STORE_BACKEND, DEFAULT_STORE_FILE } from './defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from './tickets/preset-guard'
 import type { TicketBackendName } from './store/backend'
 
@@ -212,21 +213,21 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   stateFile: Schema.string()
-    .default('dispatcher/tickets.jsonl')
+    .default(DEFAULT_STATE_FILE)
     .description('Ticket log path, relative to the DSH home directory unless absolute.'),
   store: Schema.object({
     backend: Schema.union(['jsonl', 'redis', 'sqlite'] as const)
-      .default('jsonl')
+      .default(DEFAULT_STORE_BACKEND)
       .description(
         'Ticket log backend. jsonl is the default and stays the default; sqlite stores the same append-only events in a SQLite file (node:sqlite). redis is a name that fails loud until it exists. A backend must satisfy the contract at the top of src/store/backend.ts.',
       ),
     file: Schema.string()
-      .default('')
+      .default(DEFAULT_STORE_FILE)
       .description(
         'SQLite database file. Empty means "next to the log": tickets.jsonl becomes tickets.db in the same directory. Relative paths resolve against the DSH home. Ignored by the jsonl backend.',
       ),
   })
-    .default({ backend: 'jsonl', file: '' })
+    .default({ backend: DEFAULT_STORE_BACKEND, file: DEFAULT_STORE_FILE })
     .description('Storage selection for the ticket log; see store.backend.'),
   snapshotFile: Schema.string()
     .default('')

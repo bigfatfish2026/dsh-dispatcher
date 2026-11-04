@@ -116,7 +116,10 @@ dsh-dispatcher tickets --json                  # 全部票
 dsh-dispatcher tickets --json --open-only      # 只要未结票
 dsh-dispatcher tickets --json --id t-abc       # 单票，查不到退出码 1
 dsh-dispatcher tickets --json --recent 20      # 未结票 + 最近 20 张结票
+dsh-dispatcher tickets --json --backend sqlite --db ~/.dsh/dispatcher/tickets.db
 ```
+
+不传参时按 profile 配置里的 `store.backend` / `store.file` 选后端，跟进程内一致；默认仍是 `jsonl`。`--backend <jsonl|sqlite>` 显式挑后端，`--db <路径>` 等价于 `--backend sqlite` 并指定库文件（相对路径按 `DSH_HOME` 解析），`--state <路径>` 显式走 jsonl。`--backend jsonl` 和 `--db` 同时给会报错退出码 2；`redis` 会报未实现退出码 2。
 
 `--json` 的形状固定，`v` 是 schema 版本，`counts` 按全量日志算、不受过滤影响。字段：`id`、`brief`、`goal`、`status`、`owner`、`createdAt` / `updatedAt` / `closedAt` / `statusSince`、`workerAlive`、`pendingInputs` / `pendingReports`、`reportsCount`、`ageMinutes`、`stale`、`epoch` / `epochReports`、`preset` / `presetSource`、`dir` / `note` / `device`。时间一律 ISO 8601（UTC）。
 
