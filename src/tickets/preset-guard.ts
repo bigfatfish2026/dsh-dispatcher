@@ -5,7 +5,7 @@
  * 「要真的用 bash 跑命令」。2026-11-04 那两张 git 勘察票就是这么派空的：一张
  * 白跑，一张补跑。这一层不看模型怎么措辞，只对两件事实：
  *
- *   1. 任务要不要执行命令（模型声明的 `needsCommand`，缺省时用关键词兜底）；
+ *   1. 任务要不要执行命令（模型声明的 `needsCommand`；false 也查关键词，命中即矛盾）；
  *   2. 这个档的工具面里有没有能执行命令的工具（从档位声明的 YAML 读 allow/deny）。
  *
  * 三条规则按顺序判，第一条中就不往下走：
@@ -147,6 +147,21 @@ export const DEFAULT_COMMAND_KEYWORDS: readonly string[] = [
   'systemctl',
   '脚本',
   '重跑',
+  'grep',
+  'zstd',
+  'gunzip',
+  'sed',
+  'awk',
+  'curl',
+  'journalctl',
+  '解压',
+  '日志',
+  '会话记录',
+  'cat',
+  '排序',
+  '统计',
+  '跑一遍',
+  '执行',
 ]
 
 /** 分句：负向词只否决它所在的那一句，不能把整张任务书一起否决掉。 */
@@ -220,7 +235,7 @@ export interface PresetCheckInput {
   preset: string
   /** 档的中文名，写进驳回文本（t2（只读））。 */
   label?: string
-  /** 分类器声明的三态：true 必查、false 不查关键词、undefined 只看关键词。 */
+  /** 分类器声明的三态：true 必查、false 也查关键词（命中即矛盾）、undefined 只走关键词兜底。 */
   needsCommand?: boolean
   goal: string
   /** 允许档位镜像；空数组 = 不校验 rule1。 */
@@ -309,11 +324,15 @@ export async function checkPresetChoice(input: PresetCheckInput): Promise<Preset
   // rule2：任务要跑命令，档里就得有命令工具。
   let matchedKeyword: string | undefined
   let needsCommand = false
+  let contradiction = false
   if (input.needsCommand === true) {
     needsCommand = true
-  } else if (input.needsCommand === undefined) {
+  } else {
+    // false 也查一遍：模型说「不用命令」但任务书里明写着 grep/解压/journalctl，
+    // 这是自相矛盾，按要命令处理。undefined 维持原样（只靠关键词兜底）。
     matchedKeyword = commandHint(input.goal, input.keywords)
     needsCommand = matchedKeyword !== undefined
+    contradiction = input.needsCommand === false && matchedKeyword !== undefined
   }
   if (!needsCommand || presetRunsCommands(tools)) return undefined
 
@@ -321,7 +340,9 @@ export async function checkPresetChoice(input: PresetCheckInput): Promise<Preset
   const evidence =
     input.needsCommand === true
       ? '分类器判断这轮要执行命令'
-      : `任务书命中关键词「${matchedKeyword ?? ''}」`
+      : contradiction
+        ? `任务书里出现命令类词「${matchedKeyword ?? ''}」，判成不需要执行命令`
+        : `任务书命中关键词「${matchedKeyword ?? ''}」`
   const advice = suggestion
     ? `建议改用 ${suggestion}（有 bash），或`
     : '换一个有 bash 的档，或'
@@ -332,6 +353,9 @@ export async function checkPresetChoice(input: PresetCheckInput): Promise<Preset
     ...(matchedKeyword ? { matchedKeyword } : {}),
     message:
       `选档驳回：任务要执行命令，但 ${label}档没有 bash（该档 allow 名单里没有命令工具）。` +
+      (contradiction
+        ? `任务书里出现命令类词「${matchedKeyword ?? ''}」，判成不需要执行命令，前后矛盾；`
+        : '') +
       `改任务书：${advice}把「只读/纯勘察」改成明确写「要用 bash 跑命令」，然后再开一张票。`,
   }
 }
