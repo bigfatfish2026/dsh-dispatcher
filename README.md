@@ -39,6 +39,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票的日志路径，相对路径按 `DSH_HOME` 解析 |
+| `store.backend` | string | `jsonl` | 票日志的后端。`jsonl` 是唯一实现（只追加的文件，格式不变、老数据不用迁移）；`redis` / `sqlite` 只认名字，选了在装载时报「还没实现」，不会悄悄退回文件。后端契约见 `src/store/backend.ts` |
 | `staleMinutes` | number | `30` | 列表里 `!` 的阈值：多久没更新算「卡住」。只影响 `dispatch_list` 的标记，不再驱动提醒 |
 | `maxOpen` | number | `4` | 同时开着的票上限，`done` / `dropped` 不占名额 |
 | `briefMaxColumns` | number | `34` | 票摘要 `brief` 的长度上限，单位是显示列宽：汉字算 2 列、半角算 1 列。34 列 = 17 个汉字，是 2026-11-02 小屏实测的第二行宽度（10px 字号、可用宽 172px，能放 17 汉字或 28 ASCII） |
@@ -57,7 +58,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `maxWaitMs` | number | `5000` | `job_output` 最多占用主会话多久 |
 | `routerRestrict` | boolean | `true` | 给每个非 worker 会话装 `routerTools` 白名单 |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | 这个文件存在时，任何会话都不装白名单 |
-| `routerTools` | string[] | 32 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS`：只收本包自己和宿主的内置工具 |
+| `routerTools` | string[] | 33 个名字 | 主会话保留的全局工具名，默认值见 `src/config.ts` 的 `DEFAULT_ROUTER_TOOLS`：只收本包自己和宿主的内置工具 |
 | `extraRouterTools` | string[] | 空 | 别的插件注册、也该留在主会话的工具名。接在 `routerTools` 后面，原样透传；没注册的名字由 router 丢掉并告警。默认空＝本仓库不替任何外部插件点名 |
 | `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从每个 worker subagent 的工具 schema 里摘掉；跟 `routerRestrict` 各自独立 |
 | `workerDenyTools` | string[] | 7 个名字 | worker 看不见的工具名：写记忆那七个，`DEFAULT_WORKER_DENY_TOOLS` |
@@ -83,7 +84,8 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `dispatch_touch` | 改状态，可附一行进展说明（`status` 必填） |
 | `dispatch_list` | 列票，`!` 是卡住的，`»n` 是 worker 还没收到的消息，`«n` 是没读的报告；每行都带 `brief` |
 | `dispatch_send` | 往票里追加一条给 worker 的消息 |
-| `dispatch_report` | 记一份报告，不结束这张票 |
+| `dispatch_report` | 记一份报告，不结束这张票；不推送，主会话用 `dispatch_reports` 来取 |
+| `dispatch_reports` | 读票上的报告正文；默认只给未读，读完标记已读（`dispatch_list` 的 `«n` 跟着归零）。`limit` 默认 10、上限 50，被挡下的不标记；`includeRead` 连已读一起给；省略 `id` 就是所有还有未读的未结票，已关票要按 id 点名 |
 | `dispatch_close` | 交付了就关票 |
 | `dispatch_sweep` | 立刻跑一次巡检，不等定时器：重开票、给活着的 worker 推消息、清掉已关票的积压报告、看一眼僵尸票。不推报告 |
 | `progress_note` | 主会话自己干长活时，把一行进度直接推到主人 QQ 上；不叫醒会话、不写盘。worker 不调它——worker 的进度一律 `dispatch_report` 进票，绕过会话直接推手机，主会话在票里就看不见了 |
@@ -104,7 +106,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 一张票带两条队列，都是日志里的行，重启也丢不了：等 worker 收的消息（`dispatch_send`）和 worker 交回来的报告（`dispatch_report`）。每条有自己的 id 和一个 `delivered` 标记。
 
-`dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，主会话下一轮自己扫 `dispatch_list` 时读到——`«n` 就是这张票还没读的报告条数。巡检不替主会话收集报告：它只把排队消息推给还活着的 worker，把「已经 `done` 却又收到新消息」的票重新打开（只改状态、不叫醒人）——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。已关票上没人会再读的报告由巡检静默清账（补一条 `delivered`），也不推送。
+`dispatch_send` 在 worker 会话活着且空闲时当场送达，否则留在队列。`dispatch_report` 不叫醒任何人，报告正文也不推送：`dispatch_list` 只显示 `«n`（这张票还没读的报告条数），正文由主会话用 `dispatch_reports` 自己取，取走的当场记 `delivered`，`«n` 归零。巡检不替主会话收集报告：它只把排队消息推给还活着的 worker，把「已经 `done` 却又收到新消息」的票重新打开（只改状态、不叫醒人）——这就是原型的 `tickets.wake`；`dropped` 是人叫停的，不再开。已关票上没人会再读的报告由巡检静默清账（补一条 `delivered`），也不推送。
 
 ## 票的生命周期
 

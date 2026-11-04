@@ -214,7 +214,7 @@ describe('apply', () => {
     expect(host.denied).toEqual([[...DEFAULT_WORKER_DENY_TOOLS, ...WORKER_FORBIDDEN_TOOLS]])
     // A worker never gets an allow list, and never reaches `restrict` twice.
     expect(host.restricted).toHaveLength(1)
-    expect(host.infos.join('\n')).toContain('worker subagents hide 12')
+    expect(host.infos.join('\n')).toContain('worker subagents hide 13')
   })
 
   // README「谁写 status」：worker 手上只该有 dispatch_report 和 dispatch_send，

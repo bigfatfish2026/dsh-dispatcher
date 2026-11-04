@@ -39,6 +39,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; a relative path resolves against `DSH_HOME` |
+| `store.backend` | string | `jsonl` | Storage backend for the ticket log. `jsonl` is the only implementation (the append-only file, same format, no migration); `redis` / `sqlite` are accepted names that fail loud at load time instead of quietly falling back to the file. The contract is at the top of `src/store/backend.ts` |
 | `staleMinutes` | number | `30` | Silence after which a ticket counts as stale in `dispatch_list` (the `!` mark). It no longer drives any announcement |
 | `maxOpen` | number | `4` | Cap on concurrently open tickets; `done` / `dropped` do not take a slot |
 | `briefMaxColumns` | number | `34` | Length cap for a ticket's `brief`, in character columns: a CJK character counts 2, a half-width one 1. 34 columns is 17 汉字 — the little screen's second line as measured on 2026-11-02 (10px type, 172px usable width, 17 汉字 or 28 ASCII characters) |
@@ -57,7 +58,7 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `maxWaitMs` | number | `5000` | Longest a `job_output` wait may hold the main session |
 | `routerRestrict` | boolean | `true` | Give every non-worker session the `routerTools` whitelist |
 | `routerEscapeFile` | string | `~/.dsh/no-restrict` | While this file exists the whitelist is not installed on any session |
-| `routerTools` | string[] | 32 names | Global tool names the main session keeps; the default list is `DEFAULT_ROUTER_TOOLS` in `src/config.ts`, and holds only this package's own tools plus the host's built-ins |
+| `routerTools` | string[] | 33 names | Global tool names the main session keeps; the default list is `DEFAULT_ROUTER_TOOLS` in `src/config.ts`, and holds only this package's own tools plus the host's built-ins |
 | `extraRouterTools` | string[] | empty | Tool names registered by other plugins that should stay on the main session. Appended after `routerTools`, passed through as written; names nothing registered are dropped with a warning. Empty by default: this repo names no external plugin |
 | `workerToolDeny` | boolean | `true` | Take `workerDenyTools` out of every worker subagent's tool schema; independent of `routerRestrict` |
 | `workerDenyTools` | string[] | 7 names | Tool names a worker does not see: the seven write-side memory tools, `DEFAULT_WORKER_DENY_TOOLS` in `src/config.ts` |
@@ -82,7 +83,8 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `dispatch_touch` | Change status, with an optional one-line note (`status` is required) |
 | `dispatch_list` | List tickets; `!` marks one that has gone quiet, `»n` queued messages, `«n` unread reports. Every row carries `brief` |
 | `dispatch_send` | Queue one more message for a ticket's worker |
-| `dispatch_report` | Record a report on a ticket without ending it |
+| `dispatch_report` | Record a report on a ticket without ending it; nothing is pushed, the main session reads it with `dispatch_reports` |
+| `dispatch_reports` | Read the report text on tickets; by default only unread ones, and each one returned is marked read (so `«n` in `dispatch_list` drops to zero). `limit` defaults to 10 and caps at 50, and entries the limit cut off stay unread; `includeRead` returns the whole history; omitting `id` reads every open ticket that still has unread reports, while a closed ticket has to be named |
 | `dispatch_close` | Close a ticket once the work is delivered |
 | `dispatch_sweep` | Run a sweep now instead of waiting for the timer: reopen tickets, push queued messages to live 小鱼, clear reports left on closed tickets, judge the zombie tickets. It does not deliver reports |
 | `progress_note` | Push one line of progress straight to the owner's QQ while the main session itself is on a long job; wakes no session and writes nothing to disk. Workers do not call it — a worker's progress goes into the ticket with `dispatch_report` |
@@ -103,7 +105,7 @@ Tickets written before the field existed simply have no `brief`: `foldEvents` le
 
 A ticket carries two queues, both lines in the same log, so a restart loses nothing: messages waiting for the worker (`dispatch_send`) and reports the worker handed back (`dispatch_report`). Each entry has its own id and a `delivered` mark.
 
-`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone; the main session reads reports on its next turn with `dispatch_list`, where a ticket's `«n` counts the reports it has not read. A sweep does not collect reports for the main session: it pushes queued messages to live workers and reopens a `done` ticket that received more mail (status only, nobody is woken) — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut. Reports left on a closed ticket have no reader left, so a sweep clears them silently by appending a `delivered` mark; it never pushes one.
+`dispatch_send` delivers at once when the worker session is alive and idle, and otherwise leaves the message queued. `dispatch_report` never wakes anyone, and no report text is ever pushed: `dispatch_list` only shows a ticket's `«n` (reports not read yet), and the main session pulls the text with `dispatch_reports`, which marks what it returns as read and takes `«n` back to zero. A sweep does not collect reports for the main session: it pushes queued messages to live workers and reopens a `done` ticket that received more mail (status only, nobody is woken) — the prototype's `tickets.wake`. A `dropped` ticket is a person's stop and stays shut. Reports left on a closed ticket have no reader left, so a sweep clears them silently by appending a `delivered` mark; it never pushes one.
 
 ## The ticket lifecycle
 

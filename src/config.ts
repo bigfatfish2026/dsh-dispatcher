@@ -25,6 +25,8 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   'dispatch_list',
   'dispatch_send',
   'dispatch_report',
+  // 2026-11-04：报告正文只从票里读，主会话得有个自己取的入口。
+  'dispatch_reports',
   'dispatch_touch',
   'dispatch_sweep',
   // 2026-11-01 加：主会话自己也要能打点，不然它干长活时主人照样干等。

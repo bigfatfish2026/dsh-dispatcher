@@ -58,6 +58,9 @@ const STATUSES = ['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as
  */
 export const WORKER_FORBIDDEN_TOOLS = [
   'dispatch_open',
+  // 2026-11-04：报告只归主会话读——worker 读了自己那张票上别的小鱼写的报告，
+  // «n 就被它悄悄清掉，主会话还以为没人交活。
+  'dispatch_reports',
   'dispatch_touch',
   'dispatch_close',
   'dispatch_sweep',
@@ -967,7 +970,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     defineTool({
       name: 'dispatch_sweep',
       description:
-        'Run one sweep now instead of waiting for the timer: reopen tickets that got mail after they ended, push queued messages to live 小鱼, clear report entries left on closed tickets, and report zombie tickets in one line. It does not deliver reports — read those with dispatch_list.',
+        'Run one sweep now instead of waiting for the timer: reopen tickets that got mail after they ended, push queued messages to live 小鱼, clear report entries left on closed tickets, and report zombie tickets in one line. It does not deliver reports — read those with dispatch_reports.',
       parameters: {},
       output: {
         schema: {
@@ -1059,7 +1062,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     defineTool({
       name: 'dispatch_report',
       description:
-        'Record a report on a ticket without ending it. The main session reads it on its next turn or sweep, and it survives a restart because it lives in the ticket log. A 小鱼 (a subagent) calls this with the ticket id it was given.',
+        'Record a report on a ticket without ending it. Nothing is pushed: the main session reads it with dispatch_reports, which also marks it read (dispatch_list shows «n unread until then). It survives a restart because it lives in the ticket log. A 小鱼 (a subagent) calls this with the ticket id it was given.',
       parameters: {
         id: { type: 'string', required: true, description: 'Ticket id.' },
         text: { type: 'string', required: true, description: 'What the 小鱼 has to say: result, numbers, where the work stands.' },
@@ -1081,6 +1084,159 @@ export function apply(ctx: Context, config: ConfigShape): void {
         const { ticket } = store.appendReport(args.id, args.text)
         const after = store.get(ticket.id)!
         return { id: ticket.id, pendingReports: pending(after.reports).length }
+      },
+    }),
+  )
+
+  // ── 读报告：票上的正文只在这里取，读一条记一条已读 ──────────────
+  // 报告不是推送（2026-11-02 那次洪水之后，巡检和 announce 都不带正文了），所以
+  // 主会话得有个「自己取」的入口：不读，«n 就一直挂着；读完这一轮真返回的每一条
+  // 都补一条 delivered，下一轮 dispatch_list 就干净了。被 limit 挡下的不算读过，
+  // 下一轮取到的条数跟剩下的 «n 严格对齐。
+  /** 一条报告最多回多少字：再长就截断并标 truncated，别把一轮上下文撑爆。 */
+  const REPORT_TEXT_MAX = 4000
+  ctx.tools.register(
+    defineTool({
+      name: 'dispatch_reports',
+      description:
+        'Read the report text on tickets. By default only unread reports are returned, and every report returned is marked read: after this call, «n in dispatch_list counts what is still unread. Nothing is pushed to this session — this is the only place report text is read. A 小鱼 (a subagent) cannot call this.',
+      parameters: {
+        id: {
+          type: 'string',
+          description:
+            'Ticket id. Omit to read every open ticket that still has unread reports, oldest ticket first. A closed ticket has to be named explicitly.',
+        },
+        limit: {
+          type: 'number',
+          description:
+            'How many reports to return in one call, oldest first. Default 10, at most 50. Reports the limit cut off are not marked read, so the next call picks them up.',
+        },
+        includeRead: {
+          type: 'boolean',
+          description: 'Also return reports already read — the whole history of the ticket. Default false: unread only.',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            tickets: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string' },
+                  status: { type: 'string' },
+                  goal: { type: 'string' },
+                  unread: { type: 'number' },
+                  reports: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        n: { type: 'number' },
+                        id: { type: 'string' },
+                        at: { type: 'string' },
+                        text: { type: 'string' },
+                        read: { type: 'boolean' },
+                        truncated: { type: 'boolean' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            /** Reports actually returned this call. */
+            returned: { type: 'number' },
+            /** Of those, how many were unread and are now marked read. */
+            markedRead: { type: 'number' },
+          },
+        },
+        render: (_args, value) => {
+          const tickets = value.tickets ?? []
+          if (tickets.length === 0) return [{ type: 'text', text: 'no reports' }]
+          const blocks = tickets.map((ticket) => {
+            const head = `ticket ${ticket.id} ${ticket.status}${ticket.unread ? ` (${ticket.unread} unread left)` : ''}：${ticket.goal}`
+            const body = (ticket.reports ?? []).map(
+              (report) =>
+                `  #${report.n}${report.read ? ' (read)' : ''} ${report.text}${report.truncated ? ' …[truncated]' : ''}`,
+            )
+            return [head, ...body].join('\n')
+          })
+          return [{ type: 'text', text: blocks.join('\n') }]
+        },
+      },
+      async execute(args) {
+        // limit：默认 10，上限 50；不是数就当没给。被它挡下的报告一条都不标。
+        const asked = Number(args.limit)
+        const budget = Number.isFinite(asked) ? Math.min(50, Math.max(1, Math.trunc(asked))) : 10
+        const includeRead = args.includeRead === true
+        const wanted = typeof args.id === 'string' ? args.id.trim() : ''
+
+        let candidates: TicketSnapshot[]
+        if (wanted) {
+          const one = store.get(wanted)
+          // 坏票号当场报错：静默回一份空报告会让主会话以为「这张票没交活」。
+          if (!one) throw new Error(`unknown ticket: ${wanted}`)
+          candidates = [one]
+        } else {
+          // 省略 id = 所有还有未读的未结票。已关票要走 id 点名才读得到正文。
+          candidates = store
+            .list()
+            .filter((ticket) => isOpen(ticket.status) && pending(ticket.reports ?? []).length > 0)
+        }
+
+        const tickets: Array<{
+          id: string
+          status: string
+          goal: string
+          unread: number
+          reports: Array<{ n: number; id: string; at: string; text: string; read: boolean; truncated?: boolean }>
+        }> = []
+        let returned = 0
+        let markedRead = 0
+        for (const ticket of candidates) {
+          if (returned >= budget) break
+          const reports: Array<{ n: number; id: string; at: string; text: string; read: boolean; truncated?: boolean }> = []
+          for (let index = 0; index < ticket.reports.length && returned < budget; index += 1) {
+            const entry = ticket.reports[index]!
+            if (!includeRead && entry.delivered) continue
+            const chars = Array.from(entry.text)
+            const truncated = chars.length > REPORT_TEXT_MAX
+            reports.push({
+              // n 是这张票完整报告列表里的 1 起序号，跟读没读无关：同一份报告永远
+              // 同一个号，主会话隔一轮回来对账不会串号。
+              n: index + 1,
+              id: entry.id,
+              at: entry.at,
+              text: truncated ? chars.slice(0, REPORT_TEXT_MAX).join('') : entry.text,
+              read: entry.delivered,
+              ...(truncated ? { truncated: true } : {}),
+            })
+            returned += 1
+            if (!entry.delivered) {
+              // 记账走门面的 quietly：delivered 事件落在 handleTicketEvent 的
+              // default 分支上空转，不自激。
+              store.quietly(() => store.markDelivered(ticket.id, 'report', entry.id))
+              markedRead += 1
+            }
+          }
+          if (reports.length === 0) continue
+          const fresh = store.get(ticket.id)
+          tickets.push({
+            id: ticket.id,
+            status: ticket.status,
+            goal: ticket.goal,
+            // 读完这一轮之后还剩多少未读：被 limit 挡下的还挂在票上，下一轮取到的
+            // 条数跟这个数严格对齐，读完归零。
+            unread: fresh ? pending(fresh.reports).length : 0,
+            reports,
+          })
+        }
+        return { tickets, returned, markedRead }
       },
     }),
   )
