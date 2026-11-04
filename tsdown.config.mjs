@@ -4,7 +4,9 @@ import { defineConfig } from 'tsdown'
 // It is also the self-contained `prepare` script for git installs: no project
 // references, no type checking (see guide §7.1 "build-script catch").
 export default defineConfig({
-  entry: { index: 'src/index.ts', 'tickets-cli': 'src/cli.ts' },
+  // migrate: scripts/migrate-to-sqlite.ts 的入口；单独一个 entry 是为了不把
+  // 插件入口（要 cordis/schemastery）拖进迁移这种离线脚本。
+  entry: { index: 'src/index.ts', 'tickets-cli': 'src/cli.ts', migrate: 'src/store/migrate.ts' },
   format: ['esm'],
   platform: 'node',
   target: 'node22',

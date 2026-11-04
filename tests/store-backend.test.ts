@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { TicketStore, createTicketBackend, foldEvents } from '../src/store'
+import { TicketStore, createTicketBackend, foldEvents, resolveDbFile } from '../src/store'
 import type { TicketBackend } from '../src/store/backend'
 import type { TicketEvent } from '../src/store'
 import { JsonlTicketStore } from '../src/store/jsonl'
+import { SqliteTicketStore } from '../src/store/sqlite'
 
 const dirs: string[] = []
 
@@ -56,10 +57,32 @@ describe('存储后端选择', () => {
     expect(backend.location).toBe(file)
   })
 
-  it('redis / sqlite 只留名字，选了就抛未实现', () => {
-    for (const backend of ['redis', 'sqlite'] as const) {
-      expect(() => createTicketBackend({ backend, stateFile: tempFile() })).toThrow(/还没实现/)
-    }
+  it('redis 只留名字，选了就抛未实现', () => {
+    expect(() => createTicketBackend({ backend: 'redis', stateFile: tempFile() })).toThrow(/还没实现/)
+  })
+
+  it('库文件路径推导：.jsonl → .db，别的名字追加 .db，不拿日志文件当库', () => {
+    expect(resolveDbFile('/home/julia/.dsh/dispatcher/tickets.jsonl')).toBe(
+      '/home/julia/.dsh/dispatcher/tickets.db',
+    )
+    expect(resolveDbFile('/tmp/tickets.log')).toBe('/tmp/tickets.log.db')
+    expect(resolveDbFile('/tmp/tickets.db')).toBe('/tmp/tickets.db')
+    expect(resolveDbFile('/tmp/tickets.jsonl', '/tmp/custom/other.db')).toBe('/tmp/custom/other.db')
+  })
+
+  it('sqlite 已接：默认按 stateFile 换后缀，显式 dbFile 优先', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dispatcher-backend-'))
+    dirs.push(dir)
+    const stateFile = join(dir, 'tickets.jsonl')
+    const derived = createTicketBackend({ backend: 'sqlite', stateFile })
+    expect(derived).toBeInstanceOf(SqliteTicketStore)
+    expect(derived.location).toBe(join(dir, 'tickets.db'))
+    ;(derived as SqliteTicketStore).close()
+
+    const explicit = join(dir, 'custom', 'tickets.db')
+    const backend = createTicketBackend({ backend: 'sqlite', stateFile, dbFile: explicit })
+    expect(backend.location).toBe(explicit)
+    ;(backend as SqliteTicketStore).close()
   })
 
   it('不认识的后端名当场报错，不悄悄退回 jsonl', () => {

@@ -1,0 +1,13 @@
+{"kind":"published","id":"t-fixture-1","at":"2026-11-04T01:00:00.000Z","goal":"迁移夹具一","brief":"迁移夹具一","publisher":"session-main","preset":"t2","presetSource":"fallback","requestId":"req-1","dir":"/tmp/one"}
+{"kind":"spawned","id":"t-fixture-1","at":"2026-11-04T01:00:01.000Z","workerId":"worker-1","provider":"deepseek","preset":"t2"}
+{"kind":"queued","id":"t-fixture-1","at":"2026-11-04T01:00:02.000Z","input":{"id":"e-1","text":"顺手把测试跑了"}}
+{"kind":"delivered","id":"t-fixture-1","at":"2026-11-04T01:00:03.000Z","entry":{"kind":"input","id":"e-1"}}
+{"kind":"reported","id":"t-fixture-1","at":"2026-11-04T01:05:00.000Z","report":{"id":"e-2","text":"夹具一好了"},"source":"worker"}
+{"kind":"blocked","id":"t-fixture-1","at":"2026-11-04T01:06:00.000Z","reason":"等外部条件"}
+{"kind":"resumed","id":"t-fixture-1","at":"2026-11-04T01:07:00.000Z","workerId":"worker-1","epoch":1}
+{"kind":"ended","id":"t-fixture-1","at":"2026-11-04T01:20:00.000Z","workerId":"worker-1","stopReason":"done","epochReports":1}
+{"kind":"closed","id":"t-fixture-1","at":"2026-11-04T01:21:00.000Z","outcome":"done","note":"交付","voidedInputs":0}
+{"id":"t-fixture-2","at":"2026-11-01T05:45:11.843Z","goal":"老行夹具","status":"open","dir":"/tmp/two"}
+{"id":"t-fixture-2","at":"2026-11-01T05:45:11.844Z","owner":"worker-old","status":"running"}
+{"id":"t-fixture-2","at":"2026-11-01T05:50:00.000Z","report":{"id":"e-3","text":"老票报告"}}
+{"id":"t-fixture-2","at":"2026-11-01T05:51:00.000Z","status":"done"}

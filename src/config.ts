@@ -105,8 +105,13 @@ export interface Config {
    * fixed; this picks who reads and appends it.
    */
   store?: {
-    /** 'jsonl' (default) | 'redis' | 'sqlite'. The last two fail loud for now. */
+    /** 'jsonl' (default) | 'sqlite' (implemented) | 'redis' (placeholder). */
     backend?: TicketBackendName
+    /**
+     * sqlite 库文件；空串 = 跟着 `stateFile` 换后缀（tickets.jsonl →
+     * tickets.db）。相对路径按 DSH_HOME 解析。jsonl 后端不看这一栏。
+     */
+    file?: string
   }
   /**
    * 桌面快照文件：每次票变化后落一份只读 JSON，给桌宠这类不能每 2 秒 fork 一个
@@ -213,10 +218,15 @@ export const Config: Schema<Config> = Schema.object({
     backend: Schema.union(['jsonl', 'redis', 'sqlite'] as const)
       .default('jsonl')
       .description(
-        'Ticket log backend. jsonl is the only implementation today. redis and sqlite are accepted names that fail loud at load time until they exist; a new backend must satisfy the contract at the top of src/store/backend.ts.',
+        'Ticket log backend. jsonl is the default and stays the default; sqlite stores the same append-only events in a SQLite file (node:sqlite). redis is a name that fails loud until it exists. A backend must satisfy the contract at the top of src/store/backend.ts.',
+      ),
+    file: Schema.string()
+      .default('')
+      .description(
+        'SQLite database file. Empty means "next to the log": tickets.jsonl becomes tickets.db in the same directory. Relative paths resolve against the DSH home. Ignored by the jsonl backend.',
       ),
   })
-    .default({ backend: 'jsonl' })
+    .default({ backend: 'jsonl', file: '' })
     .description('Storage selection for the ticket log; see store.backend.'),
   snapshotFile: Schema.string()
     .default('')
