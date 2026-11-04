@@ -108,6 +108,15 @@ export interface Config {
     backend?: TicketBackendName
   }
   /**
+   * 桌面快照文件：每次票变化后落一份只读 JSON，给桌宠这类不能每 2 秒 fork 一个
+   * node 进程的消费者。空串 = 跟着日志走（同目录的 `tickets.snapshot.json`）。
+   */
+  snapshotFile: string
+  /** 关掉快照文件（测试或不需要桌宠时用）。 */
+  snapshotEnabled: boolean
+  /** 快照里未结票之外再带最近多少张已结票；0 = 只带未结票。 */
+  snapshotRecentClosed: number
+  /**
    * 默认档。**没有代码默认值**：值由 profile 给（今天 `t1`），配置和档位注册表
    * 都不给就拒绝开票。空串 = 没配（schemastery 的 null 默认不落地，用空串表达
    * 「没配」比塞一个假档名诚实）。
@@ -132,8 +141,13 @@ export interface Config {
    * screen's second line can hold; defaults to BRIEF_MAX_COLUMNS.
    */
   briefMaxColumns: number
-  /** 巡检间隔，分钟。只看状态、只发信号，不改票。 */
-  sweepMinutes: number
+  /** 巡检间隔，毫秒。只看状态、只发信号，不改票。0 = 关定时器（只由过时的 sweepMinutes 折算出来）。 */
+  sweepMs: number
+  /**
+   * 已过时，改用 `sweepMs`。显式配置时它说了算：按 `sweepMinutes × 60000`
+   * 折算成 `sweepMs`，装载时 warn 一句；0 = 关定时器。不配置就用 `sweepMs`。
+   */
+  sweepMinutes?: number
   /** waiting 多久算「该催一下」，分钟。 */
   waitingMinutes: number
   /** blocked 多久算「人忘了」，分钟。 */
@@ -191,6 +205,19 @@ export const Config: Schema<Config> = Schema.object({
   })
     .default({ backend: 'jsonl' })
     .description('Storage selection for the ticket log; see store.backend.'),
+  snapshotFile: Schema.string()
+    .default('')
+    .description(
+      'Read-only snapshot file for cross-process consumers (desk pet). Written atomically after every ticket commit. Empty means "next to the log": the log directory plus tickets.snapshot.json. Relative paths resolve against the DSH home.',
+    ),
+  snapshotEnabled: Schema.boolean()
+    .default(true)
+    .description('Write the read-only snapshot file after every ticket commit.'),
+  snapshotRecentClosed: Schema.natural()
+    .default(20)
+    .description(
+      'Closed tickets kept in the snapshot in addition to every open one. Counts in the snapshot are always computed over the whole log, so the "N open" figure stays exact.',
+    ),
   // 没有代码默认值：档位名单在 profile 的 agent-preset-registry 里，这里只接一个名字。
   defaultPreset: Schema.string()
     .default('')
@@ -232,10 +259,16 @@ export const Config: Schema<Config> = Schema.object({
     .description(
       'Longest ticket brief, measured in character columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字, measured 2026-11-02. dispatch_open requires a brief and rejects a blank one.',
     ),
-  sweepMinutes: Schema.natural()
-    .default(5)
+  sweepMs: Schema.number()
+    .min(500)
+    .default(10_000)
     .description(
-      'Minutes between maintenance passes. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. 0 turns the timer off.',
+      'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. The timer skips a beat when the previous pass is still queued, so a slow pass never stacks up.',
+    ),
+  sweepMinutes: Schema.number()
+    .min(0)
+    .description(
+      'Deprecated: use sweepMs. When set explicitly it wins (sweepMs = sweepMinutes × 60000) and the plugin logs a warning at load. 0 turns the timer off. Leave it out to use sweepMs.',
     ),
   waitingMinutes: Schema.natural()
     .default(20)
@@ -337,4 +370,24 @@ export function routerAllowList(config: Pick<Config, 'routerTools' | 'extraRoute
     allow.push(name)
   }
   return allow
+}
+
+/** 过时键的告警口径：整句写死，测试和文档都按这一句核。 */
+export const LEGACY_SWEEP_WARNING = 'sweepMinutes 已过时，改用 sweepMs'
+
+/**
+ * 巡检间隔从哪儿来：显式配了 `sweepMinutes` 就按分钟折算（老 yml 里
+ * `sweepMinutes: 0` 关定时器的写法还得照旧生效），否则用 `sweepMs`。
+ */
+export function resolveSweepMs(config: Pick<Config, 'sweepMs'> & { sweepMinutes?: number }): number {
+  const legacy = config.sweepMinutes
+  if (legacy === undefined || legacy === null) return config.sweepMs
+  return Math.max(0, Math.round(legacy * 60_000))
+}
+
+/** 显式配了过时键就返回要 warn 的那一句，没配返回 undefined。 */
+export function legacySweepWarning(config: { sweepMinutes?: number }): string | undefined {
+  const legacy = config.sweepMinutes
+  if (legacy === undefined || legacy === null) return undefined
+  return `${LEGACY_SWEEP_WARNING}（按 sweepMinutes=${legacy} 折算，0 = 关定时器）`
 }

@@ -45,7 +45,8 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `briefMaxColumns` | number | `34` | 票摘要 `brief` 的长度上限，单位是显示列宽：汉字算 2 列、半角算 1 列。34 列 = 17 个汉字，是 2026-11-02 小屏实测的第二行宽度（10px 字号、可用宽 172px，能放 17 汉字或 28 ASCII） |
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 会话不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文；整段重写就能改口径，空字符串（或只有空白）等于不注入 |
-| `sweepMinutes` | number | `5` | 巡检间隔；`0` 关掉定时巡检，只剩手动的 `dispatch_sweep` |
+| `sweepMs` | number | `10000` | 巡检间隔，毫秒，最小 500；上一拍还堵在队列里就跳过这一拍，不堆空转 |
+| `sweepMinutes` | number | 空 | **已过时**，改用 `sweepMs`；显式配了按 `×60000` 折算并 warn 一句，`0` 仍是关定时巡检 |
 | `zombieMinutes` | number | `20` | 多久没有任何进展算疑似僵尸票，只推一次。只查 `open` / `running`；票里有 `ownerId`（会话 id）且活表里已经没这个会话，或者 owner 带 uuid 片段（裸 uuid、`session-` 前缀、`subagent 34b183b9` 这类短标签）而扫不到，就判 `worker-gone`，不受这个值约束。`小丙` 这种抽不出片段的纯文字标签只能等这一档兜底 |
 | `noReportMinutes` | number | `5` | `waiting` 但票里一条报告都没有的票，落下来多久就推一次（「小鱼退了但没交活」）。单独一项、不吃 `zombieMinutes`：小鱼已经退了，没有值得再等的东西。补上报告之后就不再盯 |
 | `notifyOwner` | boolean | `true` | 卡住的票要不要叫醒主人会话 |
@@ -101,6 +102,49 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 超长的 `brief` 照样被截：预算里先扣掉「…」这 2 列，正文切到 32 列，总宽正好 34，显示侧不用自己算宽度。
 
 老票没有这个字段：`foldEvents` 读到没有 `brief` 的事件不会出错（字段留空），读取方用 `briefOf()` 从 `goal` 现算一遍当兜底，所以 `dispatch_list` 里任何一张票都能拿到一句能直接上屏的 `brief`。写入必填、读取回落，是两条路径。
+
+## 只读出口（CLI / service / 快照）
+
+桌宠、`/tickets` 指令和脚本都别再各自解析 `tickets.jsonl`：票的语义只有 dispatcher 这一份，统一从这里出。后端以后换 redis/sqlite，这一层的形状不变。
+
+命令行（`package.json` 的 `bin` 就是它）：
+
+```bash
+dsh-dispatcher tickets --json                  # 全部票
+dsh-dispatcher tickets --json --open-only      # 只要未结票（--open 是别名）
+dsh-dispatcher tickets --json --id t-abc       # 单票，查不到退出码 1
+dsh-dispatcher tickets --json --recent 20      # 未结票 + 最近 20 张结票
+dsh-dispatcher tickets --state /path/tickets.jsonl
+```
+
+`--json` 的形状固定，键序固定，`v` 是 schema 版本：
+
+```json
+{"v":1,"generatedAt":"2026-11-04T09:12:33.000Z","counts":{"open":1,"running":2,"waiting":1,"blocked":0,"openTotal":4},"tickets":[...]}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 票号 |
+| `brief` | string | 上屏的一句话（老票从 `goal` 现算） |
+| `goal` | string | 完整目标 |
+| `status` | string | 六状态之一 |
+| `owner` | string \| null | 人话标签 |
+| `createdAt` / `updatedAt` / `closedAt` / `statusSince` | ISO 8601 | 建票 / 最后动静 / 关票 / 进入当前状态的时刻；`closedAt` 开着是 null |
+| `workerAlive` | boolean \| null | 只是标记：仅 waiting/blocked 有意义 |
+| `pendingInputs` / `pendingReports` | number | 没投出去的消息 / 没读的报告 |
+| `reportsCount` | number | 全部报告条数（含已读） |
+| `ageMinutes` | number | 距 `statusSince` 的分钟数，以 `generatedAt` 为参考 |
+| `stale` | boolean | waiting/blocked 超时该催了 |
+| `epoch` / `epochReports` | number | 第几轮派活 / 本轮报告数 |
+| `preset` / `presetSource` | string \| null | 档位与来源 |
+| `dir` / `note` / `device` | string \| null | 工作目录 / 说明 / 机器 |
+
+时间一律 ISO 8601（UTC，带 `Z`），不用 epoch ms。`counts` 按全量日志算，不受过滤影响；屏上的「N 未结」直接取 `counts.openTotal`，不用自己数。
+
+进程内用（`/tickets` 指令、别的插件）：`ctx.get('dispatcher/tickets')` 拿到 `TicketReadout`，`payload(selection)` 给同样的 JSON，`select()` 给带 `goal` 的 `TicketView`，`get(id)` 查单张——不用起子进程。
+
+桌宠读文件：每次票写完，插件会同步原子重写 `$DSH_HOME/dispatcher/tickets.snapshot.json`（`snapshotFile` 可改，空串 = 跟着日志同目录；`snapshotEnabled: false` 关掉）。内容是**全部未结票 + 最近 `snapshotRecentClosed` 张结票**（默认 20），字段和 `--json` 完全一致，`counts` 仍按全量算。写法是临时文件 + `rename`，读方任何时刻都只会读到完整的一份；内容没变（只有 `generatedAt` 会变）就不落盘，稳态不空写。
 
 ## 两条队列
 
@@ -200,7 +244,7 @@ persona、plan policy、手递手规程这些非工具段一概不碰，判据�
 
 ## 巡检与僵尸票
 
-每 `sweepMinutes` 分钟（默认 5；设 `0` 关掉定时器，只剩手动 `dispatch_sweep`）看一遍票，按顺序做四件事：把「结束后又收到消息」的票重开（只改状态，不叫醒主会话）、把排队消息推给还活着的 worker、把已关票上没人会读的报告静默清账、把僵尸票查一遍并在检出时推一条 `followup` 给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）。报告不推：未结票的报告留在 pending 上，主会话用 `dispatch_list` 自己扫。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。
+每 `sweepMs` 毫秒（默认 10000；设 `0` 关掉定时器）看一遍票，按顺序做四件事：把「结束后又收到消息」的票重开（只改状态，不叫醒主会话）、把排队消息推给还活着的 worker、把已关票上没人会读的报告静默清账、把僵尸票查一遍并在检出时推一条 `followup` 给主人会话（`source.kind` 标 `dsh-dispatcher`，跟真人的话区分开）。报告不推：未结票的报告留在 pending 上，主会话用 `dispatch_list` 自己扫。会话正忙就跳过，下一轮再来，一样不丢——队列在日志里，不在内存里。
 
 僵尸票查两类。主池是 `open` 和 `running`；`blocked` 是人按着没动，跳过；`done` / `dropped` 已经结束，也不算。另一类是 `waiting` 但票里**一条报告都没有**——小鱼退了没交活，票落 `waiting` 之后就没人看了，所以单独盯这一档，阈值是 `noReportMinutes`（默认 5），跟 `zombieMinutes` 互不影响。`waiting` 且已经有报告的票不进池：那是主会话该收的活，不是失联。主池判据两档：
 

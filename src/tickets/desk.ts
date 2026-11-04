@@ -16,7 +16,7 @@
  *   方看见（工具报错），不许吞掉——票和现实不一致时，人得知道。
  */
 import { briefOf, isOpen, minutesSince, pending } from '../store'
-import type { Actor, PresetSource, TicketEvent, TicketSnapshot, TicketStatus } from '../store'
+import type { Actor, TicketEvent, TicketSnapshot, TicketStatus } from '../store'
 import { newEntryId, newTicketId } from '../store/log'
 import type { TicketLog } from '../store/log'
 import type { Clock } from './clock'
@@ -27,6 +27,8 @@ import { decidePreset, normalizeBrief, publishTicket } from './publish'
 import type { Classifier, PresetCatalog, TicketIntent, TicketReceipt } from './publish'
 import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
 import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
+import { ticketView } from './view'
+import type { TicketView } from './view'
 
 export type {
   Classifier,
@@ -58,7 +60,8 @@ export interface DeskConfig {
   blockedMinutes: number
   /** 0 = 不发「跑了很久」提醒。 */
   runningReminderMinutes: number
-  sweepMinutes: number
+  /** 巡检间隔，毫秒。0 = 不起定时器。 */
+  sweepMs: number
   /** disposed 之后多久才认「真没了」，挡掉正常重启的抖动。 */
   freshMinutes: number
   autoReport: boolean
@@ -82,7 +85,7 @@ export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   waitingMinutes: 20,
   blockedMinutes: 60,
   runningReminderMinutes: 0,
-  sweepMinutes: 5,
+  sweepMs: 10_000,
   freshMinutes: 2,
   autoReport: true,
   noReportSignal: true,
@@ -123,26 +126,8 @@ export interface DeskDeps {
   warn?: (message: string) => void
 }
 
-/** 工具面看到的票：只有该看的，没有内部字段。 */
-export interface TicketView {
-  id: string
-  goal: string
-  brief: string
-  status: TicketStatus
-  statusSince: string
-  ageMinutes: number
-  stale: boolean
-  dir?: string
-  note?: string
-  workerAlive?: boolean
-  device?: string
-  preset?: string
-  presetSource?: PresetSource
-  epoch: number
-  epochReports: number
-  pendingInputs: number
-  pendingReports: number
-}
+/** 工具面看到的票：换算在 `tickets/view.ts`，这里原样转出去。 */
+export type { TicketView } from './view'
 
 export interface SendReceipt {
   id: string
@@ -215,6 +200,8 @@ export class TicketDesk {
   private readonly reminded = new Map<string, string>()
   private attached = false
   private timer: unknown
+  /** 上一拍巡检还在 serialize 队列里排队或正在跑：闸着，这一拍直接跳过。 */
+  private sweeping = false
   private stopped = false
 
   constructor(private readonly deps: DeskDeps) {
@@ -501,10 +488,18 @@ export class TicketDesk {
       subscribe('agent/status', (payload) => this.handleStatus(payload))
       subscribe('agent/disposed', (payload) => this.handleDisposed(payload))
     }
-    if (this.config.sweepMinutes > 0) {
+    if (this.config.sweepMs > 0) {
       this.timer = this.clock.setInterval(() => {
-        void this.maintain().catch((error) => this.fail('sweep', undefined, error))
-      }, this.config.sweepMinutes * 60_000)
+        // 闸：上一拍还堵在 serialize 队列里（或正在跑）就跳过这一拍，
+        // 不往队列里堆空转的 maintain。
+        if (this.sweeping) return
+        this.sweeping = true
+        void this.maintain()
+          .catch((error) => this.fail('sweep', undefined, error))
+          .finally(() => {
+            this.sweeping = false
+          })
+      }, this.config.sweepMs)
     }
   }
 
@@ -576,29 +571,13 @@ export class TicketDesk {
   }
 
   private view(ticket: TicketSnapshot): TicketView {
-    const ageMinutes = minutesSince(ticket.statusSince, this.clock.now())
-    const stale =
-      (ticket.status === 'waiting' && ageMinutes >= this.config.waitingMinutes) ||
-      (ticket.status === 'blocked' && ageMinutes >= this.config.blockedMinutes)
-    return {
-      id: ticket.id,
-      goal: ticket.goal,
-      brief: briefOf(ticket, this.config.briefMaxColumns),
-      status: ticket.status,
-      statusSince: ticket.statusSince,
-      ageMinutes,
-      stale,
-      ...(ticket.dir ? { dir: ticket.dir } : {}),
-      ...(ticket.note ? { note: ticket.note } : {}),
-      ...(ticket.workerAlive !== undefined ? { workerAlive: ticket.workerAlive } : {}),
-      ...(ticket.device ? { device: ticket.device } : {}),
-      ...(ticket.preset ? { preset: ticket.preset } : {}),
-      ...(ticket.presetSource ? { presetSource: ticket.presetSource } : {}),
-      epoch: ticket.epoch,
-      epochReports: ticket.epochReports,
-      pendingInputs: pending(ticket.inputs).length,
-      pendingReports: pending(ticket.reports).length,
-    }
+    // 换算只此一份（`tickets/view.ts`）：CLI、service、快照文件与工具读数同源。
+    return ticketView(ticket, {
+      briefMaxColumns: this.config.briefMaxColumns,
+      waitingMinutes: this.config.waitingMinutes,
+      blockedMinutes: this.config.blockedMinutes,
+      now: this.clock.now(),
+    })
   }
 
   private receiptFor(ticket: TicketSnapshot, duplicate: boolean): TicketReceipt {

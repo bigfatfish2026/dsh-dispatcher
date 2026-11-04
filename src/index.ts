@@ -9,9 +9,10 @@
  * 也没有第二条队列：`serialize` 就是这个文件里那条 `ticketQueue`，desk 拿着它跑。
  */
 import { randomUUID } from 'node:crypto'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { Config, DEFAULT_HANDOFF_POLICY, routerAllowList } from './config'
+import { Config, DEFAULT_HANDOFF_POLICY, legacySweepWarning, resolveSweepMs, routerAllowList } from './config'
 import type { Config as ConfigShape } from './config'
 import { createTicketBackend, resolveStateFile } from './store'
 import type { Actor, TicketStatus } from './store'
@@ -21,6 +22,8 @@ import type { Serialize, TicketView } from './tickets/desk'
 import { createLlmClassifier } from './tickets/classify'
 import type { LlmService } from './tickets/classify'
 import { createNotifier } from './tickets/notify'
+import { TICKETS_SERVICE, TicketReadout } from './tickets/readout'
+import { TicketSnapshotFile } from './tickets/snapshot'
 import type { PresetCatalog } from './tickets/publish'
 import type { SubagentSeam } from './tickets/workers'
 import { bindRouter } from './router'
@@ -150,6 +153,47 @@ export function apply(ctx: Context, config: ConfigShape): void {
     },
   )
 
+  // ── 统一只读出口 ────────────────────────────────────────────────
+  // `/tickets` 指令（进程内）与桌宠（读文件/子进程）看的是同一份读数：CLI、
+  // `dispatcher/tickets` 这个 service、桌面快照文件都从 TicketReadout 出，而
+  // TicketReadout 只认 store 折好的快照。以后日志换 redis，消费者的形状不变。
+  const readout = new TicketReadout(log, {
+    briefMaxColumns: config.briefMaxColumns,
+    waitingMinutes: config.waitingMinutes,
+    blockedMinutes: config.blockedMinutes,
+  })
+  const provider = (ctx as unknown as { provide?: (name: string, value: unknown) => unknown }).provide
+  if (typeof provider === 'function') {
+    try {
+      provider.call(ctx, TICKETS_SERVICE, readout)
+    } catch (error) {
+      // 热重载时同名服务可能还没被上一份 fiber 释放：降级成只有 CLI/文件可用。
+      warn(`[dispatcher] ${TICKETS_SERVICE} 服务没挂上：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // 桌面快照：每次 commit 之后同步重写，内容没变就不落盘。空 snapshotFile 跟着
+  // 日志走（同目录的 tickets.snapshot.json），所以默认就是 $DSH_HOME/dispatcher/。
+  const snapshotFile = (config.snapshotFile ?? '').trim()
+  const snapshotPath = snapshotFile
+    ? resolveStateFile(snapshotFile)
+    : join(dirname(resolveStateFile(config.stateFile)), 'tickets.snapshot.json')
+  if (config.snapshotEnabled ?? true) {
+    const snapshots = new TicketSnapshotFile(
+      readout,
+      { file: snapshotPath, recentClosed: config.snapshotRecentClosed ?? 20 },
+      warn,
+    )
+    snapshots.write()
+    const stop = log.onCommitted(() => {
+      snapshots.write()
+    })
+    ctx.effect(() => () => {
+      stop()
+    }, 'dsh-dispatcher.snapshot')
+    info(`[dispatcher] 只读快照 -> ${snapshotPath}`)
+  }
+
   // 全插件只有这一条队列：票台的每一次写都排在它上面，工具调用之间不会互相插队。
   let ticketQueue: Promise<void> = Promise.resolve()
   const serialize: Serialize = <T>(work: () => Promise<T>): Promise<T> => {
@@ -236,6 +280,11 @@ export function apply(ctx: Context, config: ConfigShape): void {
     return false
   }
 
+  // 巡检间隔：新键 sweepMs 说了算，老键 sweepMinutes 显式配了才折算并 warn 一句。
+  const sweepMs = resolveSweepMs(config)
+  const legacySweep = legacySweepWarning(config)
+  if (legacySweep) warn(`[dispatcher] ${legacySweep}`)
+
   const desk = createDesk({
     log,
     serialize,
@@ -270,7 +319,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       waitingMinutes: config.waitingMinutes,
       blockedMinutes: config.blockedMinutes,
       runningReminderMinutes: config.runningReminderMinutes,
-      sweepMinutes: config.sweepMinutes,
+      sweepMs,
       freshMinutes: config.freshMinutes,
       autoReport: config.autoReport,
       noReportSignal: config.noReportSignal,
