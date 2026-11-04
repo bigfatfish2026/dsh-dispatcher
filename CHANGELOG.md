@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1 - 2026-11-04
+
+### Fixed
+
+2026-11-04 — 修「翻日志/解压/查会话记录被判成只读档」：三处一起改。分类器 prompt 把原来那句「只读看文件、只查记忆都算 no」换成硬判据——跑 bash/脚本、grep/find/sed/awk、zstd/gzip 解压、journalctl/systemctl、git、ps/top、curl、编译、跑测试、统计排序去重都算要命令；日志、会话记录、备份包不是普通文本，查它们必须用命令；只有读普通文本/图片、查记忆、网页搜索才算不用命令，拿不准就 yes + t1。选档守卫 rule2 不再信 `needsCommand === false`：false 时也跑关键词，任务书里出现命令类词就按矛盾驳回，错误信息点名命中的词（「任务书里出现命令类词「grep」，判成不需要执行命令」）；undefined 维持原样只走关键词兜底。默认关键词表补 15 个：grep、zstd、gunzip、sed、awk、curl、journalctl、解压、日志、会话记录、cat、排序、统计、跑一遍、执行（拉丁词整词、大小写不敏感，`digit`/`category`/`dispatch_report` 不误伤；「读 README」不含「日志」不拦）。
+
+Tests: `tests/preset-guard.test.ts` 新增 5 条（新词表逐词、三条 false+命令词驳回、三条只读负例放行、false+有 bash 放行），`tests/classify.test.ts` 新增 5 条（4 条 NEEDS_COMMAND 格式契约：grep 会话→yes、README/记忆/放歌→no；1 条新 prompt 四例断言）并按新 prompt 更新旧断言。全量 36 个文件 421 条全绿，`tsc --noEmit` 干净，`npm run build` 通过。
+
 ## 2.0.0 - 2026-11-04
 
 ### Added
