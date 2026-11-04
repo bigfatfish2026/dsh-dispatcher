@@ -24,7 +24,7 @@ import type { PromptFilterBinding } from './prompt'
  */
 
 /** The slice of `ctx.tools` this module needs. */
-export interface RouterTools {
+interface RouterTools {
   restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
   get(name: string): unknown
 }
@@ -53,12 +53,12 @@ export interface RouterAgent {
  * leave a worker with nothing to work with, which is a configuration mistake
  * rather than a rule, so it is refused. Without it the check is skipped.
  */
-export interface RouterRegistry {
+interface RouterRegistry {
   get(name: string): unknown
   names?(): readonly string[]
 }
 
-export interface RouterOptions {
+interface RouterOptions {
   /** Global tool names the main session keeps. */
   allow: readonly string[]
   /** Tool names a worker subagent must not see; the main session ignores it. */
@@ -82,7 +82,7 @@ export interface RouterOptions {
   registry?: RouterRegistry
 }
 
-export type RouterOutcome =
+type RouterOutcome =
   /** The restriction is installed. */
   | 'installed'
   /** A worker subagent with no deny list: nothing to take away. */

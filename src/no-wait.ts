@@ -12,7 +12,7 @@
  */
 
 /** Limits the guard enforces on the main session, in milliseconds. */
-export interface NoWaitLimits {
+interface NoWaitLimits {
   /** Longest a single command may hold the main session. */
   maxCommandMs: number
   /** Longest a `job_output` wait may hold the main session. */

@@ -13,15 +13,15 @@ import type { TicketSnapshot } from './store'
  */
 
 /** 没有活表可查时的默认静默阈值，单位分钟。 */
-export const DEFAULT_ZOMBIE_MINUTES = 20
+const DEFAULT_ZOMBIE_MINUTES = 20
 
 /** waiting 但一条报告都没有的票，默认盯多少分钟。 */
-export const DEFAULT_NO_REPORT_MINUTES = 5
+const DEFAULT_NO_REPORT_MINUTES = 5
 
 /** 新建票的宽限：dispatch_open 写 owner 与 subagent 注册之间可能差几秒。 */
-export const DEFAULT_FRESH_MINUTES = 2
+const DEFAULT_FRESH_MINUTES = 2
 
-export type ZombieReason = 'worker-gone' | 'silent' | 'no-report'
+type ZombieReason = 'worker-gone' | 'silent' | 'no-report'
 
 export interface ZombieHit {
   ticket: TicketSnapshot
@@ -46,9 +46,9 @@ export interface ZombieHit {
  * `false`，不再用「抽不出 hex 片段就当没法比」那道兜底；为假时还是老的 owner
  * 规则（裸 uuid / `session-` / 短标签都认）。
  */
-export type AliveLookup = (id: string, exact?: boolean) => boolean | undefined
+type AliveLookup = (id: string, exact?: boolean) => boolean | undefined
 
-export interface ZombieOptions {
+interface ZombieOptions {
   now?: Date
   /** 静默阈值（分钟）。 */
   zombieMinutes?: number
@@ -86,7 +86,7 @@ function fingerprintOf(ticket: TicketSnapshot): string {
 }
 
 /** 最后活动时间：最后一条报告的时间，没有报告就看票自己的 updatedAt。 */
-export function lastActivity(ticket: TicketSnapshot): string {
+function lastActivity(ticket: TicketSnapshot): string {
   const last = ticket.reports[ticket.reports.length - 1]
   return last?.at ?? ticket.updatedAt
 }
@@ -163,7 +163,7 @@ export function shouldPush(hit: ZombieHit, pushed: ReadonlyMap<string, string>):
 }
 
 /** goal 截断，摘要里不铺整句任务书。 */
-export function shortGoal(goal: string, limit = 40): string {
+function shortGoal(goal: string, limit = 40): string {
   const text = goal.trim().replace(/\s+/g, ' ')
   return text.length > limit ? `${text.slice(0, limit)}…` : text
 }

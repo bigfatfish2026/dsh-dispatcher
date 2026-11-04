@@ -27,14 +27,14 @@
  */
 
 /** The slice of one assembled prompt section this module needs. */
-export interface PromptSection {
+interface PromptSection {
   name: string
   order?: number
   text: string
 }
 
 /** One tool schema in {@link PromptAssembly.tools}. */
-export interface PromptToolSchema {
+interface PromptToolSchema {
   name: string
 }
 
@@ -44,7 +44,7 @@ export interface PromptAssembly {
   tools?: readonly PromptToolSchema[]
 }
 
-export type PromptAssemblyNext = () => Promise<PromptAssembly>
+type PromptAssemblyNext = () => Promise<PromptAssembly>
 
 export type PromptAssemblyHook = (
   assembly: PromptAssembly,
@@ -79,7 +79,7 @@ const MULTI_SEGMENT = /[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g
 const WORD = /[A-Za-z][A-Za-z0-9]*/g
 
 /** The test a section's tools have to pass to keep that section in the prompt. */
-export type ToolFamily = (toolName: string) => boolean
+type ToolFamily = (toolName: string) => boolean
 
 /**
  * The tool group a section explains, or `undefined` for any other section.
@@ -167,13 +167,13 @@ export function prunesToolSection(
 }
 
 /** What one prune pass did, so the caller can say it once. */
-export interface PruneResult {
+interface PruneResult {
   assembly: PromptAssembly
   removed: string[]
 }
 
 /** How one prune pass decides which sections go. */
-export interface PruneOptions {
+interface PruneOptions {
   /**
    * Drop every tool-guidance section, whatever the session can still call.
    *
@@ -235,7 +235,7 @@ export function pruneToolSections(
 }
 
 /** The narrow slice of a scoped agent context this module installs into. */
-export interface PromptScope {
+interface PromptScope {
   effect(callback: () => () => void, label?: string): unknown
   /**
    * The host's scoped event bus. Typed as `unknown` on purpose: cordis' `on` is
@@ -245,7 +245,7 @@ export interface PromptScope {
   on?: unknown
 }
 
-export interface PromptFilterOptions {
+interface PromptFilterOptions {
   /** The whitelist, used only to widen the vocabulary. */
   allow: readonly string[]
   /** Passed through to {@link pruneToolSections}; see {@link PruneOptions}. */
