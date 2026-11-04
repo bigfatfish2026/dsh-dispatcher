@@ -38,7 +38,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxDepth: 2,
     maxOpen: 8,
     briefMaxColumns: 34,
-    sweepMinutes: 0,
+    // 定时器关掉：插件层测的是接线，不是拍子。schema 的最小值 500 只校验 yml，
+    // 这里直接给 desk 的配置，0 = 不起定时器。
+    sweepMs: 0,
     waitingMinutes: 20,
     blockedMinutes: 60,
     runningReminderMinutes: 0,
@@ -53,6 +55,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxWaitMs: 5000,
     routerRestrict: true,
     routerEscapeFile: join(dir, 'no-restrict'),
+    snapshotFile: '',
+    snapshotEnabled: true,
+    snapshotRecentClosed: 20,
     routerTools: [...DEFAULT_ROUTER_TOOLS],
     extraRouterTools: [],
     workerToolDeny: true,
@@ -190,6 +195,13 @@ export function fakePluginHost(
     effect: (callback: () => () => void) => callback(),
     get(name: string) {
       return services[name]
+    },
+    provide(name: string, value: unknown) {
+      const owner = name
+      services[owner] = value
+      return () => {
+        if (services[owner] === value) delete services[owner]
+      }
     },
     on(event: string, listener: unknown) {
       const list = listeners.get(event) ?? []

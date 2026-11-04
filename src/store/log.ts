@@ -21,6 +21,21 @@ export function newEntryId(now: Date = new Date()): string {
   return `e-${now.getTime().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
+/**
+ * 票的稳定顺序：createdAt 升序，同一时刻按 id 兜底。
+ *
+ * createdAt 是 `toISOString()` 出来的定长 ISO 串，裸 `<` 比字节和比时间同义；
+ * 换掉 `localeCompare` 是因为它走 ICU，457 张票一次排序实测 49µs，
+ * 巡检每 10 秒跑一轮不值当。
+ */
+function byCreatedAt(a: TicketSnapshot, b: TicketSnapshot): number {
+  if (a.createdAt < b.createdAt) return -1
+  if (a.createdAt > b.createdAt) return 1
+  if (a.id < b.id) return -1
+  if (a.id > b.id) return 1
+  return 0
+}
+
 export class TicketLog {
   /** 事件从哪儿来、往哪儿写；所有读写都走它，这个文件里没有一行 fs。 */
   private readonly backend: TicketBackend
@@ -36,6 +51,8 @@ export class TicketLog {
   private loaded = false
   /** 内部写入（巡检自己的重开、投递记账）不许再广播，否则事件自激。 */
   private quiet = 0
+  /** 每次 commit 落定后的旁路回调（快照文件挂这儿）；失败不许影响票的写。 */
+  private readonly committed = new Set<() => void>()
 
   /**
    * `source` 给路径就按 jsonl 打开（测试和工具都这么用），给一个 TicketBackend
@@ -69,12 +86,24 @@ export class TicketLog {
 
   list(): TicketSnapshot[] {
     this.refresh()
-    return [...this.state.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    return [...this.state.values()].sort(byCreatedAt)
   }
 
   get(id: string): TicketSnapshot | undefined {
     this.refresh()
     return this.state.get(id)
+  }
+
+  /**
+   * 每次 `commit` 落定后调一次（投影已折好、广播已发）。只读旁路用：桌面快照
+   * 文件据此在票变化后立刻重写。回调抛错在这儿被吞掉——票已经写进日志了，
+   * 不能因为一份展示用的文件把 `dispatch_open` 弄失败；由挂回调的人自己记日志。
+   */
+  onCommitted(listener: () => void): () => void {
+    this.committed.add(listener)
+    return () => {
+      this.committed.delete(listener)
+    }
   }
 
   /**
@@ -109,6 +138,14 @@ export class TicketLog {
     this.loaded = true
     if (this.emit && this.quiet === 0) {
       this.emit({ id: event.id, at: event.at, kind: kindOf(event) })
+    }
+    // 旁路回调放在最后：投影已经折好，回调里读到的是这一条写下的状态。
+    for (const listener of [...this.committed]) {
+      try {
+        listener()
+      } catch {
+        // 见 onCommitted 的注释：票写成功就是成功，展示层的错不该回滚它。
+      }
     }
   }
 

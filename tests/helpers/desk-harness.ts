@@ -188,6 +188,8 @@ export interface Harness {
 export function makeDesk(
   options: {
     config?: Partial<DeskConfig>
+    /** 换掉串行队列：测「队列被占住」时塞一个不放手的手闸。 */
+    serialize?: Serialize
     presets?: PresetCatalog
     classify?: Classifier
     now?: Date
@@ -213,7 +215,7 @@ export function makeDesk(
   }
   const desk = new TicketDesk({
     log,
-    serialize: makeSerialize(),
+    serialize: options.serialize ?? makeSerialize(),
     clock,
     bus: { emit: (channel, payload) => bus.push({ channel, payload }) },
     host,

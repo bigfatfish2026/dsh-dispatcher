@@ -4,7 +4,7 @@ import { defineConfig } from 'tsdown'
 // It is also the self-contained `prepare` script for git installs: no project
 // references, no type checking (see guide §7.1 "build-script catch").
 export default defineConfig({
-  entry: { index: 'src/index.ts' },
+  entry: { index: 'src/index.ts', 'tickets-cli': 'src/cli.ts' },
   format: ['esm'],
   platform: 'node',
   target: 'node22',

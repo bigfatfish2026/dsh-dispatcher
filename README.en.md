@@ -45,7 +45,8 @@ Restart the instance afterwards; the plugin only loads on startup. Tickets defau
 | `briefMaxColumns` | number | `34` | Length cap for a ticket's `brief`, in character columns: a CJK character counts 2, a half-width one 1. 34 columns is 17 汉字 — the little screen's second line as measured on 2026-11-02 (10px type, 172px usable width, 17 汉字 or 28 ASCII characters) |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; subagent sessions are skipped |
 | `handoffPolicyText` | string | the shipped block | The hand-off rules themselves; rewrite the whole block to change the wording, an empty string (or whitespace only) means "do not inject" |
-| `sweepMinutes` | number | `5` | Sweep interval; `0` turns the timer off and leaves only the manual `dispatch_sweep` |
+| `sweepMs` | number | `10000` | Sweep interval in milliseconds, minimum 500; a beat is skipped while the previous pass is still queued, so passes never stack up |
+| `sweepMinutes` | number | unset | **Deprecated**, use `sweepMs`; when set it wins (× 60000) and logs a warning, `0` still turns the timer off |
 | `zombieMinutes` | number | `20` | Silence after which an `open` / `running` ticket is reported once as a suspected zombie. A ticket whose `ownerId` (session id) is no longer in the live registry, or whose owner carries a uuid fragment (bare uuid, `session-` prefix, or a short label like `subagent 34b183b9`) that the registry does not have, is `worker-gone` regardless of this value. A plain-text label like `小丙` has no fragment to compare and leaves only this timeout as a backstop |
 | `noReportMinutes` | number | `5` | A `waiting` ticket carrying no report at all is announced once after sitting that long (the worker left without handing anything back). A threshold of its own, not `zombieMinutes`: the worker is already gone, so there is nothing left to wait for. A report landing ends the watch |
 | `notifyOwner` | boolean | `true` | Wake the owner session about tickets that went quiet |
@@ -100,6 +101,47 @@ Besides the full `goal`, every ticket carries a `brief`: a one-line summary for 
 An over-long `brief` is still cut: the budget reserves 2 columns for the `…` and the body stops at 32, so the whole line is exactly 34 columns wide and whoever renders it never has to measure it.
 
 Tickets written before the field existed simply have no `brief`: `foldEvents` leaves it unset instead of failing, and readers call `briefOf()` to derive one from `goal`. That means every row `dispatch_list` returns has a `brief` that fits, old tickets included. Required on write, derived on read: two separate paths.
+
+## One read-only exit (CLI / service / snapshot)
+
+The desk pet, the `/tickets` command and any script should stop parsing `tickets.jsonl` themselves: the ticket semantics live in one place, the dispatcher.
+
+```bash
+dsh-dispatcher tickets --json                  # every ticket
+dsh-dispatcher tickets --json --open-only      # open only (--open is an alias)
+dsh-dispatcher tickets --json --id t-abc       # one ticket; exit 1 when unknown
+dsh-dispatcher tickets --json --recent 20      # open + the 20 most recently closed
+dsh-dispatcher tickets --state /path/tickets.jsonl
+```
+
+The `--json` shape is fixed, including key order; `v` is the schema version:
+
+```json
+{"v":1,"generatedAt":"2026-11-04T09:12:33.000Z","counts":{"open":1,"running":2,"waiting":1,"blocked":0,"openTotal":4},"tickets":[...]}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | Ticket id |
+| `brief` | string | The one line for the screen (derived from `goal` on old tickets) |
+| `goal` | string | The full goal |
+| `status` | string | One of the six statuses |
+| `owner` | string \| null | Human label |
+| `createdAt` / `updatedAt` / `closedAt` / `statusSince` | ISO 8601 | Opened / last move / closed / entered current status; `closedAt` is null while open |
+| `workerAlive` | boolean \| null | A mark only: meaningful on waiting/blocked |
+| `pendingInputs` / `pendingReports` | number | Undelivered messages / unread reports |
+| `reportsCount` | number | All reports, read ones included |
+| `ageMinutes` | number | Minutes since `statusSince`, measured against `generatedAt` |
+| `stale` | boolean | waiting/blocked long enough to nudge |
+| `epoch` / `epochReports` | number | Hand-off round / reports in this round |
+| `preset` / `presetSource` | string \| null | Preset and where it came from |
+| `dir` / `note` / `device` | string \| null | Working directory / note / machine |
+
+Every time field is ISO 8601 (UTC, with `Z`), never epoch milliseconds. `counts` is computed over the whole log and is not affected by filters; read `counts.openTotal` for the "N open" figure instead of counting yourself.
+
+In process (the `/tickets` command, other plugins): `ctx.get('dispatcher/tickets')` returns a `TicketReadout`; `payload(selection)` yields the same JSON, `select()` yields `TicketView`s (with `goal`), and `get(id)` looks one up — no subprocess needed.
+
+For the desk pet: after every ticket write the plugin synchronously rewrites `$DSH_HOME/dispatcher/tickets.snapshot.json` atomically (`snapshotFile` overrides the path, empty means "next to the log"; `snapshotEnabled: false` turns it off). It contains **every open ticket plus the `snapshotRecentClosed` most recently closed ones** (default 20), with exactly the `--json` fields; `counts` is still computed over the whole log. The write is temp file + `rename`, so a reader only ever sees a complete document, and nothing is written when the content (everything but `generatedAt`) is unchanged.
 
 ## Queues
 
@@ -193,7 +235,7 @@ Two ways out. `mkdir -p ~/.dsh && touch ~/.dsh/no-restrict` and the whitelist is
 
 ## Sweeps and zombie tickets
 
-Every `sweepMinutes` (default 5; `0` turns the timer off and leaves only the manual `dispatch_sweep`) the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail (status only, the owner is not woken), push queued messages to workers that are still alive, clear the reports left on closed tickets, and judge the zombie tickets — one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking) only when a zombie is found. Reports are never pushed: an open ticket's reports stay pending and the main session reads them with `dispatch_list`. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory.
+Every `sweepMs` (default 10000; `0` turns the timer off) the plugin looks at its own tickets and does four things in order: reopen a `done` ticket that received more mail (status only, the owner is not woken), push queued messages to workers that are still alive, clear the reports left on closed tickets, and judge the zombie tickets — one `followup` message (`source.kind` is `dsh-dispatcher`, so it is distinguishable from a person talking) only when a zombie is found. Reports are never pushed: an open ticket's reports stay pending and the main session reads them with `dispatch_list`. A busy session is skipped and retried on the next sweep; nothing is lost, because the queue is in the log rather than in memory.
 
 Two pools of candidates. The main one is `open` and `running`; `blocked` is held by a person and skipped, and `done` / `dropped` are over. The second is a `waiting` ticket that carries **no report at all** — the worker left without handing anything back, and nothing looked at such a ticket once it landed in `waiting`. That branch runs on `noReportMinutes` (default 5) and never on `zombieMinutes`. A `waiting` ticket that already holds a report is not a candidate: that is work for the main session to collect, not a lost ticket. The main pool has two judgements:
 

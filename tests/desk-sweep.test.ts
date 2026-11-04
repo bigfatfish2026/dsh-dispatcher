@@ -3,8 +3,8 @@ import { flush, INTENT, makeDesk } from './helpers/desk-harness'
 
 const minutes = (count: number) => count * 60_000
 
-/** 手动巡检的用例把自动定时器关掉：sweepMinutes 0，advance 不会顺手点着它。 */
-const MANUAL = { config: { defaultPreset: 't1', sweepMinutes: 0 } }
+/** 手动巡检的用例把自动定时器关掉：sweepMs 0，advance 不会顺手点着它。 */
+const MANUAL = { config: { defaultPreset: 't1', sweepMs: 0 } }
 
 function idleSignals(h: ReturnType<typeof makeDesk>) {
   return h.bus.filter((entry) => entry.channel === 'dispatcher/ticket-idle')
@@ -65,7 +65,7 @@ describe('巡检信号', () => {
 
   it('runningReminderMinutes > 0 才会响', async () => {
     const h = makeDesk({
-      config: { defaultPreset: 't1', sweepMinutes: 0, runningReminderMinutes: 30 },
+      config: { defaultPreset: 't1', sweepMs: 0, runningReminderMinutes: 30 },
     })
     const { id } = await h.desk.open(INTENT, h.main)
     h.clock.advance(minutes(29))
@@ -95,20 +95,20 @@ describe('巡检信号', () => {
     expect(idleSignals(h)).toHaveLength(2)
   })
 
-  it('attach 之后按 sweepMinutes 自己跑：不用谁手动调', async () => {
-    // 这一条要的就是自动定时器：别的用例关掉它，这里用默认的 5 分钟。
-    const h = makeDesk()
+  it('attach 之后按默认 sweepMs 自己跑：10 秒一拍，不用谁手动调', async () => {
+    // 这一条要的就是自动定时器：别的用例关掉它，这里用默认的 10 秒。
+    // waitingMinutes 调成 0，第一拍就该发信号，好数拍子。
+    const h = makeDesk({ config: { defaultPreset: 't1', waitingMinutes: 0 } })
     const { id } = await h.desk.open(INTENT, h.main)
     h.desk.attach()
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
-    // 5 分钟一格：前 3 格都不到 20 分钟。
-    for (let i = 0; i < 3; i += 1) {
-      h.clock.advance(minutes(5))
-      await flush()
-    }
+    expect(h.log.get(id)!.status).toBe('waiting')
+    // 差 5 秒不算一拍。
+    h.clock.advance(5_000)
+    await flush()
     expect(idleSignals(h)).toHaveLength(0)
-    h.clock.advance(minutes(5))
+    h.clock.advance(5_000)
     await flush()
     expect(idleSignals(h)).toHaveLength(1)
   })
