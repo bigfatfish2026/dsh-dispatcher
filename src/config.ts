@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { BRIEF_MAX_COLUMNS } from './store'
+import { DEFAULT_COMMAND_KEYWORDS } from './tickets/preset-guard'
 import type { TicketBackendName } from './store/backend'
 
 // Tunable configuration must be a Schemastery Schema, never a plain object:
@@ -130,6 +131,18 @@ export interface Config {
   classifyEffort: string
   /** 选档最多等多久，毫秒。到点就回落默认档，不阻塞开票。 */
   classifyTimeoutMs: number
+  /**
+   * 允许档位镜像。选出来的档不在这里就驳回。空数组 = 不校验（给不想开这道
+   * 门的人留的后路）；正常部署抄 profile 里 tool-subagent 的 allowedAgentPresets。
+   */
+  allowedPresets: string[]
+  /**
+   * 「要跑命令」的关键词兜底表。命中且档里没有命令工具 → 驳回。含否定的分句
+   * 先剔掉（「不许跑命令」不算）。表可改，命中词会写进日志。
+   */
+  commandKeywords: string[]
+  /** 选档一致性校验的总开关。默认开；关掉就回到 2026-11-04 之前的裸选。 */
+  rejectOnMismatch: boolean
   /** 传给 `startActivation` 的 provider 名。 */
   provider: string
   /** 往任务的活里带一层子会话：1 = 小鱼不能再派小鱼。 */
@@ -243,6 +256,21 @@ export const Config: Schema<Config> = Schema.object({
     .default(8000)
     .description(
       'How long one classification may take, in milliseconds. On timeout the classifier is abandoned and the ticket opens on defaultPreset: a slow model must never block dispatch_open.',
+    ),
+  allowedPresets: Schema.array(Schema.string())
+    .default([])
+    .description(
+      'Mirror of the presets this deployment may select, e.g. [t0, t1, ...]. A classification outside this list is rejected. Empty array disables the check; the real allowlist lives in tool-subagent.allowedAgentPresets, which this plugin cannot read, so it is copied here and checked against the registry at load.',
+    ),
+  commandKeywords: Schema.array(Schema.string())
+    .default([...DEFAULT_COMMAND_KEYWORDS])
+    .description(
+      'Fallback keywords meaning "this ticket has to execute commands". A hit rejects a preset whose tool list has no command tool (bash/shell/run_command/...). Clauses containing 不许/不要/禁止/别/无需/不用 are ignored first. The matched word is logged so the table can be tuned.',
+    ),
+  rejectOnMismatch: Schema.boolean()
+    .default(true)
+    .description(
+      'Master switch for the preset consistency guard. true: reject a ticket whose preset cannot do the work (missing bash while the task needs commands, or a preset outside allowedPresets). false: no check, no rejection — the pre-2026-11-04 behaviour.',
     ),
   provider: Schema.string()
     .default('spawn')

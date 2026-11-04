@@ -136,7 +136,8 @@ describe('TicketStore', () => {
 
     const second = store.open('second')
     const listed = store.list()
-    expect(listed.map((ticket) => ticket.id)).toEqual([first.id, second.id])
+    // 同一毫秒开两张票时，id 的随机盐决定 list() 的兜底顺序；这里只比集合，不比顺序。
+    expect(listed.map((ticket) => ticket.id).sort()).toEqual([first.id, second.id].sort())
     // 坏行不是悄悄消失的：跳过之后留一条 warn。
     expect(warnings.join('\n')).toMatch(/skipped 1 line/)
   })
@@ -151,7 +152,7 @@ describe('TicketStore', () => {
     const second = store.open('second')
 
     const listed = store.list()
-    expect(listed.map((ticket) => ticket.id)).toEqual([first.id, second.id])
+    expect(listed.map((ticket) => ticket.id).sort()).toEqual([first.id, second.id].sort())
     expect(() =>
       foldEvents([null as never, { id: 't-1', at: '2026-11-01T00:00:00.000Z', goal: 'still folds' }]),
     ).not.toThrow()

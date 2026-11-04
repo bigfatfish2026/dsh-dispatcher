@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../../src/config'
+import { DEFAULT_COMMAND_KEYWORDS } from '../../src/tickets/preset-guard'
 import type { Config } from '../../src/config'
 import { apply, ticketEventQueue } from '../../src/index'
 import type { PromptAssemblyHook } from '../../src/prompt'
@@ -34,6 +35,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     classifyModel: 'deepseek/deepseek-flash',
     classifyEffort: 'off',
     classifyTimeoutMs: 8000,
+    allowedPresets: [],
+    commandKeywords: [...DEFAULT_COMMAND_KEYWORDS],
+    rejectOnMismatch: true,
     provider: 'spawn',
     maxDepth: 2,
     maxOpen: 8,
@@ -309,6 +313,13 @@ export function mountPlugin(
           { id: 't2', name: '只读' },
         ],
         defaultId: 't1',
+        // 真宿主读的是档位声明全文；这里给最小可解析的样子：t2 只读，其余能跑。
+        readDocument: async (id: string) => ({
+          content:
+            id === 't2'
+              ? "- name: 'dsh-preset-toolset'\n  config:\n    allow:\n      - read\n      - grep\n"
+              : "- name: 'dsh-preset-toolset'\n  config:\n    allow:\n      - bash\n      - read\n      - write\n",
+        }),
       },
       ...(options.services ?? {}),
     },

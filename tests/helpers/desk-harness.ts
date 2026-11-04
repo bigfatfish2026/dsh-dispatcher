@@ -11,6 +11,7 @@ import type { FakeClock } from '../../src/tickets/clock'
 import { TicketDesk, deskConfig } from '../../src/tickets/desk'
 import type { DeskConfig, DeskDeps, Serialize } from '../../src/tickets/desk'
 import type { Classifier, PresetCatalog, PresetInfo } from '../../src/tickets/publish'
+import type { PresetTools } from '../../src/tickets/preset-guard'
 import type { AgentLookup, SubagentActivation, SubagentSeam, SubagentSpec } from '../../src/tickets/workers'
 
 /** 内存后端：能数行数、能指定「哪一条写不进」，其余照契约来。 */
@@ -111,13 +112,32 @@ export const TEST_PRESETS: PresetInfo[] = [
   { id: 't2', name: '慢活' },
 ]
 
-export function fakePresets(list: PresetInfo[] = TEST_PRESETS, defaultId?: string): PresetCatalog {
-  return { list: async () => list, defaultId: () => defaultId }
+/**
+ * 假注册表。`toolMap` 是「每个档的工具面」：给 Error 测 rule0（装不上），
+ * 不给就是 undefined（没挂 toolset = 全局工具面，能跑命令）。
+ */
+export type FakeToolSpec = Record<string, PresetTools | Error | undefined>
+
+export function fakePresets(
+  list: PresetInfo[] = TEST_PRESETS,
+  defaultId?: string,
+  toolMap?: FakeToolSpec,
+): PresetCatalog {
+  return {
+    list: async () => list,
+    defaultId: () => defaultId,
+    async tools(id: string) {
+      if (!toolMap) return undefined
+      const value = toolMap[id]
+      if (value instanceof Error) throw value
+      return value
+    },
+  }
 }
 
 /** 分类器：想说哪档就说哪档；`hang` 用来测超时。 */
 export function fakeClassifier(
-  answer: string | { preset: string; why?: string } | undefined | 'hang' | Error,
+  answer: string | { preset: string; why?: string; needsCommand?: boolean } | undefined | 'hang' | Error,
 ): Classifier & { calls: number } {
   const classifier = {
     calls: 0,

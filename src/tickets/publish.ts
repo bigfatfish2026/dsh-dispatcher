@@ -11,6 +11,7 @@
  */
 import { briefIsBlank, truncateColumns } from '../store'
 import type { PresetSource, TicketEvent, TicketStatus } from '../store'
+import type { PresetTools } from './preset-guard'
 import type { Clock } from './clock'
 import type { WorkerPool } from './workers'
 import { textBlocks } from './workers'
@@ -27,6 +28,11 @@ export interface PresetCatalog {
   list(): Promise<PresetInfo[]>
   /** 注册表自己认的默认档；配置没写时的兜底。 */
   defaultId?(): string | undefined
+  /**
+   * 一个档的工具面（allow/deny 名单）。读不到就抛：选档守卫按「档装不上」
+   * 驳回，不猜。没挂 toolset 的档返回 undefined（没减工具）。
+   */
+  tools(id: string): Promise<PresetTools | undefined>
 }
 
 export interface ClassifyInput {
@@ -41,6 +47,11 @@ export interface ClassifyInput {
 export interface ClassifyChoice {
   preset: string
   why?: string
+  /**
+   * 这轮要不要真的执行命令。三态：true 必须查、false 不查关键词、
+   * undefined（模型没给）只走关键词兜底。
+   */
+  needsCommand?: boolean
 }
 
 /** 分类器：给一段活，说该用哪个档。假实现见测试，真实现接 LLM。 */
@@ -52,6 +63,8 @@ export interface PresetDecision {
   preset: string
   source: PresetSource
   why?: string
+  /** 分类器声明的「要跑命令」；没给就 undefined，交给关键词兜底。 */
+  needsCommand?: boolean
 }
 
 export interface DecideInput {
@@ -160,7 +173,14 @@ export async function decidePreset(input: DecideInput): Promise<PresetDecision> 
     warn(`分类器给了不存在的档 ${picked}，用默认档 ${fallback.preset}`)
     return { ...fallback, why: `分类器给了不存在的档 ${picked}` }
   }
-  return { preset: picked, source: 'llm', ...(why ? { why } : {}) }
+  return {
+    preset: picked,
+    source: 'llm',
+    ...(why ? { why } : {}),
+    ...(typeof choice === 'object' && choice?.needsCommand !== undefined
+      ? { needsCommand: choice.needsCommand }
+      : {}),
+  }
 }
 
 /** 一行摘要：空的不许进日志，长了按当前上限截。 */

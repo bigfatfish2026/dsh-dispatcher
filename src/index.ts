@@ -22,9 +22,12 @@ import type { Serialize, TicketView } from './tickets/desk'
 import { createLlmClassifier } from './tickets/classify'
 import type { LlmService } from './tickets/classify'
 import { createNotifier } from './tickets/notify'
+import { createSweepFacts } from './tickets/sweep-facts'
 import { TICKETS_SERVICE, TicketReadout } from './tickets/readout'
 import { TicketSnapshotFile } from './tickets/snapshot'
 import type { PresetCatalog } from './tickets/publish'
+import { parseToolsetDocument } from './tickets/preset-guard'
+import type { PresetTools } from './tickets/preset-guard'
 import type { SubagentSeam } from './tickets/workers'
 import { bindRouter } from './router'
 import type { RouterAgent, RouterBinding } from './router'
@@ -101,6 +104,8 @@ interface PresetRegistry {
   /** 注册表自己认的默认档。 */
   defaultId?: string
   composedPreset?: (ctx: unknown) => string | undefined
+  /** 一个档的声明（plugins 的 YAML 文本）。选档守卫拿它读 allow/deny。 */
+  readDocument?: (id: string) => Promise<{ content?: string }>
 }
 
 interface AgentHeader {
@@ -211,6 +216,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const llmOf = () => service<LlmService>(ctx, 'llm')
   const registryOf = () => service<PresetRegistry>(ctx, 'agentPresets')
 
+  let warnedNoReadDocument = false
+
+  /** 选档守卫的工具面缓存；解析失败不缓存（下一次还会重新读一遍）。 */
+  const presetToolsCache = new Map<string, PresetTools | undefined>()
+  ctx.on('tools/change', () => {
+    presetToolsCache.clear()
+  })
+
   const presets: PresetCatalog = {
     async list() {
       const registry = registryOf()
@@ -233,7 +246,51 @@ export function apply(ctx: Context, config: ConfigShape): void {
       const id = registryOf()?.defaultId
       return typeof id === 'string' && id ? id : undefined
     },
+    async tools(id) {
+      // 档位声明是 YAML 文本，读一次解一次太浪费：按 id 缓存。热重载时插件
+      // 整份重来，缓存跟着没了；tools/change（MCP 工具上下线）也清一次。
+      if (presetToolsCache.has(id)) return presetToolsCache.get(id)
+      const registry = registryOf()
+      if (typeof registry?.readDocument !== 'function') {
+        // 宿主注册表没有读声明这一口（老版本）：工具面未知，按「没减工具」算，
+        // 不拿没依据的猜测去驳回，但要说一声——这道门此时只剩两档。
+        if (!warnedNoReadDocument) {
+          warnedNoReadDocument = true
+          warn('[dispatcher] 档位注册表没有 readDocument，选档校验只能看档名，读不到工具面')
+        }
+        return undefined
+      }
+      const document = await registry.readDocument(id)
+      const content = typeof document?.content === 'string' ? document.content : ''
+      if (!content.trim()) throw new Error(`档 ${id} 的声明是空的`)
+      const tools = parseToolsetDocument(content)
+      presetToolsCache.set(id, tools)
+      return tools
+    },
   }
+
+
+  // 允许档位镜像是从 profile 手抄的：启动时对一遍注册表，抄错的名字要吭声。
+  void (async () => {
+    const allowed = config.allowedPresets ?? []
+    if (allowed.length === 0) return
+    const rows = await presets.list()
+    if (rows.length === 0) return // 注册表还没就绪：不误报。
+    const known = new Set(rows.map((row) => row.id))
+    const missing = allowed.filter((id) => !known.has(id))
+    if (missing.length > 0) {
+      warn(`[dispatcher] allowedPresets 里有注册表没有的档：${missing.join(' / ')}（这几档永远选不到）`)
+    }
+  })()
+
+  /**
+   * 巡检事实：主会话该知道的票台近况。它走动态上下文（下一段的 assemble 钩子），
+   * 不走 `followup`——注进去的 user 消息会被模型当成主人发的话。
+   *
+   * `dispatch_list` / `dispatch_read` / `dispatch_close` 见过哪些票，就把对应条目
+   * 摘掉；没读的继续挂着。
+   */
+  const sweepFacts = createSweepFacts()
 
   /**
    * 主会话自己挂的档（可选探测）。主会话通常没挂档——profile 里 `agentPreset`
@@ -307,11 +364,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
     presets,
     classify: config.presetStrategy === 'static' ? undefined : classifier,
     routerPreset,
-    notifier: createNotifier({ wake, quiet: false, warn }),
+    notifier: createNotifier({ wake, facts: sweepFacts, quiet: false, warn }),
     config: {
       defaultPreset: config.defaultPreset,
       presetStrategy: config.presetStrategy,
       classifyTimeoutMs: config.classifyTimeoutMs,
+      allowedPresets: config.allowedPresets,
+      commandKeywords: config.commandKeywords,
+      rejectOnMismatch: config.rejectOnMismatch,
       provider: config.provider,
       maxDepth: config.maxDepth,
       maxOpen: config.maxOpen,
@@ -350,6 +410,24 @@ export function apply(ctx: Context, config: ConfigShape): void {
       }
     })
   }
+
+  // ── 巡检事实：走动态上下文快照，不往主会话里塞 user 消息 ────────
+  // 宿主每次都把上下文重新渲染成一条 runtime-context 快照；文本没变就不落盘，
+  // 变了才追加一条新的。模型看见的是「环境状态」，不是谁下的命令——这就是
+  // 巡检提醒不再被主会话当成主人说话的根。worker 不需要票台近况，跳过。
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const assembled = await next()
+    const header = (context as { agent?: { session?: { header?: AgentHeader } } })?.agent?.session?.header
+    if (header?.origin === 'subagent') return assembled
+    const text = sweepFacts.text()
+    if (!text) return assembled
+    // interpolate: false —— 票的 brief 是自由文本，别让 {{…}} 被当成提示词变量。
+    const contexts = Array.isArray(assembled.contexts) ? assembled.contexts : []
+    return {
+      ...assembled,
+      contexts: [...contexts, { name: 'dispatcher:sweep', text, interpolate: false }],
+    }
+  })
 
   // ── 等待守卫：主会话不许把回话卡在长命令上 ──────────────────────
   // 提示词里写了「别自己耗着」也可能被忽略；这一层是真拦住。装在各会话的 ctx
@@ -554,6 +632,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
           ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
           ...(args.includeRead === true ? { includeRead: true } : {}),
         })
+        // 看过的票从巡检事实里摘掉：下一轮快照里它就不出现了。
+        for (const ticket of page.tickets) sweepFacts.forget(ticket.id, ['report', 'no-report'])
         let returned = 0
         let markedRead = 0
         const tickets = page.tickets.map((ticket) => {
@@ -624,6 +704,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
           ...(args.note ? { note: args.note } : {}),
           actor: actorOf(exec),
         })
+        // 收工的票不再需要巡检提醒：条目全摘。
+        sweepFacts.forget(receipt.id)
         return { id: receipt.id, status: receipt.status, closed: receipt.closed, openCount: receipt.openCount }
       },
     }),
@@ -706,6 +788,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
         const views = desk
           .list({ all: all || wanted !== undefined })
           .filter((view) => !wanted || view.status === wanted)
+        // 列表里已经出现过的票，不必再在巡检快照里重复一遍。
+        for (const view of views) sweepFacts.forget(view.id)
         return {
           openCount: desk.list().length,
           tickets: views.map((view) => ({
