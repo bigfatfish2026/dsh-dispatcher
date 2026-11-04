@@ -1,6 +1,39 @@
 # Changelog
 
-## 未发布 - 2026-11-03
+## 2.0.0 - 2026-11-04
+
+### Added
+
+2026-11-04 — 选档一致性校验：分类器挑了干不了这活的档，就不开票。原来「任务要跑命令、档里没有 bash」也能开出票来，小鱼一上手就撞墙，票挂在小屏上等人收尸。现在档定了、票还没建之前过三道规则，按顺序判：档在注册表里且声明的工具面读得到（`preset-guard.ts` 解 `dsh-preset-toolset` 的 allow/deny；读不到按「档装不上」驳回，不猜）、档在 `allowedPresets` 里（空数组 = 不校验）、要跑命令的活必须落在真有命令工具的档上。驳回抛 `PresetRejectedError`，`dispatch_open` 把规则、档名、原因和建议档一起报回去；票一个事件都不写，日志留一行 `选档驳回 rule=… preset=… source=… brief=… goal=… 原因=…`。
+
+「要不要跑命令」是三态：分类器的 JSON 多一个 `needs_command`（true 必须查、false 不查关键词、缺失走兜底），关键词表 `commandKeywords`（默认 17 个，含否定的分句先剔掉——「不许跑命令」不算），命中且档里没命令工具就驳回，命中的词写进日志方便调表。`rejectOnMismatch` 默认开，关掉回到 2026-11-04 之前的裸选。
+
+`allowedPresets` 是从 profile 手抄的镜像，插件读不到 `tool-subagent.allowedAgentPresets`，所以装载时对一遍注册表，抄错的名字 warn 一行。档位工具面按 id 缓存，`tools/change`（MCP 上下线）清空；宿主注册表没有 `readDocument` 这一口的老版本只 warn 一次，然后只查档名——门少一道，但不拿没依据的猜测驳回。
+
+Tests: 新增 `tests/preset-guard.test.ts` 22 条（三条规则、否定分句、关键词边界、建议档、错误文案），`tests/preset-guard-desk.test.ts` 8 条（驳回不落盘、关掉开关恢复裸选、缓存与 warn 次数）。全量 36 个文件 411 条全绿，`tsc --noEmit` 干净。
+
+### Changed
+
+2026-11-04 — 巡检提醒不再冒充主人说话。根子是投递通道：`followup` 注进主会话的是一条 user 消息，模型看见的和主人打的字一模一样；旧文案还写着「要看看就用 dispatch_read」，读起来就是主人下的命令，主会话于是回头对着提醒回话。现在 reportArrived / waiting / running / noReport 四类只记成「巡检事实」（`sweep-facts.ts`），挂到 `system-prompt/assemble` 上作为动态上下文 `dispatcher:sweep`：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是谁在说话。文本以 `dsh-dispatcher 巡检：…不是主人在说话。` 开头，一张票一行，陈述句，不点工具名；时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖。`interpolate: false`，票的 brief 里有 `{{…}}` 也不会被当成提示词变量。worker 会话（`header.origin === 'subagent'`）跳过这段上下文。
+
+读过就撤：`dispatch_read` / `dispatch_close` 和 `dispatch_list` 见过哪张票，就把对应条目摘掉，没读的继续挂着。摘在工具层而不是 `desk.list()` 里——小屏和 readout 的轮询也走 `desk.list()`，不能让它们替人「读过」。只有 `blocked` 超阈值真去 `followup`，开头 `[sweep] `，第二句明说「这是巡检提醒，不是主人在说话，看情况处理，不用回我」；宿主没有动态上下文这一口时其余三类退回唤醒，同样带前缀。事实表只在内存里，进程重启后由巡检重新发现，过期提醒不会被读回来。
+
+Tests: 新增 `tests/notify-facts.test.ts` 9 条（四类零 followup、blocked 唤醒文案、五分钟窗口内文本不变、`forget` 摘条目），`tests/sweep-snapshot.test.ts` 6 条（快照含票号、worker 不收、list/read/close 后条目消失、两次装配逐字相同）；`tests/handoff-policy.test.ts` 改成按追加段名断言，不再数 hook 个数。全量 36 个文件 411 条全绿，`tsc --noEmit` 干净。
+
+### Docs
+
+2026-11-04 — 只动文档和图，不动运行时。README 从 276/267 行收到 92 行，只留三块：基本思想、怎么用、注意事项；配置全表、事件模型、巡检与工具面挪进 `docs/internals.zh.md` / `docs/internals.en.md`（各 125 行）。
+
+README 里原来挂的两张图（`worker-ticket-lifecycle.zh/en.png` 泳道图、`ticket-state-machine.zh/en.png` 状态机图）画于 11-02 / 11-03，讲的还是 `dispatch_touch`、`dispatch_sweep` 那套已经不存在的工具面和 5 分钟巡检、复活闸门，图上还引着一批早已失效的 `index.ts` 行号。换成按 2.0 实现重画的四张时序图：`dispatcher-seq-open.zh/en.png`（一次派活：`dispatch_open` → 票台选档、校验、建票、spawn → 回执里没有 workerId）和 `dispatcher-seq-lifecycle.zh/en.png`（一张票的全程：报告、读报告、落到 `waiting`、`dispatch_send` 回 `running`、`blocked` 进出、每 10 秒巡检把四类事实写进动态上下文且只有 `blocked` 过阈值才发一条 `[sweep]` 提醒、`dispatch_close` 收工、收工后再派活被拒）。
+
+绘图脚本收进仓：`docs/sequences.py`，中英共用一套布局、只切文案，`python3 docs/sequences.py [zh|en|all]` 重出四张；自带两道自检（图上不许出现 2.0 删掉的三个玩具名、正文越框自动回缩字号，缩过头退非零）。旧的六个文件（两张图 × 中英 + 两个绘图脚本）删除，README 中英两版的图片引用和图注同步改掉。
+
+### Fixed
+
+2026-11-04 — 只动测试，不动运行时。`tests/index.test.ts` 里两处「开票后按顺序比 id」的断言（第 139、154 行）撞上同一毫秒的票号：票 id 是 `t-<毫秒 36 进制>-<4 位随机盐>`，两张票落在同一毫秒时时间戳段相同，`list()` 的兜底排序按 id 字典序，先后由随机盐决定，与插入顺序无关。本机复跑该文件 8 次红 5 次，CI 也挂在这一步（`pnpm test`）。断言改成两边都 `.sort()` 后比，仍然精确比「两张、两个具体 id」，只放弃无意义的同毫秒先后；`list()` 的 createdAt→id 排序契约一行没改。验证：该文件连跑 12 次全绿，全量 `npx vitest run` 两次 411 条全绿，`tsc --noEmit` 干净。
+
+## 1.5.0 - 2026-11-03
+
 
 ### Added
 
