@@ -4,6 +4,18 @@
 
 ### Added
 
+2026-11-04 — 新增 `dispatch_reports`：报告正文终于有人读得到。2026-11-02 那次洪水之后，巡检和 `announce` 都不再往主会话送正文，主会话手上却只剩 `dispatch_list` 里的 `«n` ——数字看得见、内容拿不到，等于每张票都得靠 worker 自己 `send_message` 喊一声。
+
+新工具插在 `dispatch_report` 后面：入参 `id?`（省略＝所有还有未读的未结票，已关票要按 id 点名）、`limit?`（默认 10、上限 50）、`includeRead?`（默认 false，只给未读；没有 `unreadOnly` 这种反义开关）。返回 `{tickets:[{id,status,goal,unread,reports:[{n,id,at,text,read,truncated?}]}],returned,markedRead}`：`n` 是这张票完整报告列表里的 1 起序号，同一份报告永远同一个号；`text` 超 4000 字截断并标 `truncated`（按码点切，不劈开代理对）。
+
+只把这一轮真正返回的条目记已读，被 `limit` 挡下的一条不标——`unread` 是读完之后的剩余数，下一轮取到的条数跟它严格对齐，读完归零。写回走 `store.quietly(() => store.markDelivered(...))`，`delivered` 事件落在 `handleTicketEvent` 的 default 分支上空转，不自激。
+
+僵尸指纹是 `reports.length|lastActivity|status`（`zombie.ts:84-86`）：标已读只追加一条 `delivered`，三个分量一个都没动，读报告不会引出假提醒，测试里拿 `evaluateZombies` 前后比过指纹。
+
+接线：`DEFAULT_ROUTER_TOOLS` 和 `WORKER_FORBIDDEN_TOOLS` 都加上 `dispatch_reports`（worker 读了自己那张票上的报告，`«n` 就被它悄悄清掉，主会话还以为没人交活）。顺手改了两处自相矛盾的描述：`dispatch_report` 原来写「主会话下一轮或巡检会读到」（巡检根本不读报告），改成「用 `dispatch_reports` 读，读完才算读过」；`dispatch_sweep` 里的「read those with `dispatch_list`」也指向新工具。
+
+Tests: 新增 `tests/reports-tool.test.ts` 8 条（未读过滤+读完 `«n` 归零、`limit` 挡下的不标记且下一轮接着读、`includeRead` 带全历史且不重复记账、省略 id 跨票取且不碰已关票、已关票按 id 读已读正文、4000 字截断且不截的不带 `truncated`、坏票 id 报错、读报告前后僵尸指纹不变）。全量 23 个文件 241 条全绿，`tsc --noEmit` 干净，`pnpm build` 通过。
+
 2026-11-04 — 票存储抽出后端接口。原来 `src/store.ts` 一个文件里既折票又直接 `openSync/writeSync` 写 jsonl，换个存储得把业务跟着改一遍。现在分成三层：`src/store/backend.ts` 是契约（`TicketBackend` 只有 `location` / `changed()` / `load()` / `append(event)` 四个原语，业务语义全留在门面上），`src/store/jsonl.ts` 的 `JsonlTicketStore` 是今天唯一的实现，`TicketStore` 只持有接口实例。开票、改状态、排 input、追加报告、标已读、清已关票的报告，统统是 `append()` 一条不可变事件——接 redis/sqlite 只要实现「读全量 + 原子追加 + 变更探测」，业务代码一行不改。
 
 配置新增 `store.backend`（默认 `jsonl`）。`redis` / `sqlite` 现在只认名字，选了在装载时抛「还没实现」，不会悄悄退回文件。日志格式、路径解析（相对 `DSH_HOME`）、一次 `writeSync` 追加、坏行跳过全部原样，老数据不用迁移。接口顶部写了五条后端验收标准：追加线性化/单写者、事件不可变、fold 可重放、崩溃后可恢复、`changed()` 只是优化。
