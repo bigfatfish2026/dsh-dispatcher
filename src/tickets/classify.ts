@@ -118,7 +118,8 @@ export function buildClassifySystem(presets: readonly PresetInfo[]): string {
     '档位：',
     ...presets.map(presetLine),
     '判据：这一轮要写盘、要改文件、要跑命令的，就一定不能给只会读的档；拿不准就给工具最全的那个常规档。',
-    '只输出两样：先一行档名（原样照抄上面的 id），再一句理由。别写解释、别写别的档。',
+    '另起一行写 NEEDS_COMMAND: yes 或 no——这轮要不要真的执行命令（只读看文件、只查记忆都算 no）。',
+    '只输出三样：第一行档名（原样照抄上面的 id），第二行一句理由，最后一行 NEEDS_COMMAND: yes|no。别写解释、别写别的档。',
   ].join('\n')
 }
 
@@ -138,6 +139,19 @@ function escapeRegExp(text: string): string {
  * 只认整词：`t1` 不能命中 `t10`，也不能命中 `at1x`。同一段里出现多个档名时
  * 取最先出现的那个——模型的第一个词通常就是结论。
  */
+/**
+ * 分类器的第三行：`NEEDS_COMMAND: yes|no`。
+ *
+ * 只有 yes / no 两态加「没写」；认 true/false 和中文是给模型手滑留的余地。
+ * 没写就返回 undefined——这时选档守卫只看关键词兜底，不把「没表态」当成「不要」。
+ */
+export function parseNeedsCommand(text: string): boolean | undefined {
+  const found = /NEEDS_COMMAND\s*[:：]\s*(yes|no|true|false|是|否)/i.exec(text)
+  if (!found?.[1]) return undefined
+  const value = found[1].toLowerCase()
+  return value === 'yes' || value === 'true' || value === '是'
+}
+
 export function parseChoice(text: string, presets: readonly PresetInfo[]): ClassifyChoice | undefined {
   const ids = presets.map((preset) => preset.id).filter((id) => id.length > 0)
   if (ids.length === 0) return undefined
@@ -162,7 +176,12 @@ export function parseChoice(text: string, presets: readonly PresetInfo[]): Class
     why = why.replace(/[\s。.;；]+$/, '').trim()
     // 理由不许太长：它是给人看的一行，不是模型的思考过程。
     const shortened = Array.from(why).slice(0, 120).join('')
-    return { preset: best.id, ...(shortened ? { why: shortened } : {}) }
+    const needsCommand = parseNeedsCommand(text)
+    return {
+      preset: best.id,
+      ...(shortened ? { why: shortened } : {}),
+      ...(needsCommand !== undefined ? { needsCommand } : {}),
+    }
   }
   return undefined
 }

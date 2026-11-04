@@ -21,11 +21,17 @@ afterEach(() => {
   while (tempDirs.length) rmSync(tempDirs.pop()!, { recursive: true, force: true })
 })
 
+type PromptAssembly = {
+  sections: Array<{ name: string; order?: number; text: string }>
+  contexts?: Array<{ name: string; text: string }>
+  tools?: unknown[]
+}
+
 type AssemblyHook = (
-  assembly: { sections: Array<{ name: string; order?: number; text: string }>; tools?: unknown[] },
+  assembly: PromptAssembly,
   context: unknown,
-  next: () => Promise<{ sections: Array<{ name: string; order?: number; text: string }>; tools?: unknown[] }>,
-) => Promise<{ sections: Array<{ name: string; order?: number; text: string }>; tools?: unknown[] }>
+  next: () => Promise<PromptAssembly>,
+) => Promise<PromptAssembly>
 
 /** A host that only has to answer the questions `apply` asks on the prompt path. */
 function promptHost() {
@@ -43,17 +49,24 @@ function promptHost() {
   return { ctx, hooks }
 }
 
-/** Run one turn through the installed hook and return the appended section. */
+/**
+ * Run one turn through every installed hook and return the appended section.
+ *
+ * There is always at least one hook now: the sweep-facts context hook. The
+ * hand-off hook only joins when the policy is on, so the two are told apart by
+ * what they append, not by how many hooks there are.
+ */
 async function injectedSection(config: Record<string, unknown>): Promise<string | undefined> {
   const parsed = Config({ stateFile: join(tempDir(), 'tickets.jsonl'), ...config } as never)
   const host = promptHost()
   apply(host.ctx as never, parsed)
-  // An empty block installs no hook at all, which is the point of the test.
-  if (host.hooks.length === 0) return undefined
-  expect(host.hooks).toHaveLength(1)
+  expect(host.hooks.length).toBeGreaterThan(0)
 
-  const base = { sections: [{ name: 'persona', text: 'base' }], tools: [] }
-  const assembled = await host.hooks[0](base, { agent: { session: { header: {} } } }, async () => base)
+  let assembled: PromptAssembly = { sections: [{ name: 'persona', text: 'base' }], contexts: [], tools: [] }
+  for (const hook of host.hooks) {
+    const current = assembled
+    assembled = await hook(current, { agent: { session: { header: {} } } }, async () => current)
+  }
   return assembled.sections.find((section) => section.name === 'dispatcher:handoff')?.text
 }
 
@@ -89,11 +102,6 @@ describe('handoff policy text comes from config', () => {
   })
 
   it('injects nothing when handoffPolicy is off, whatever the text says', async () => {
-    const host = promptHost()
-    apply(
-      host.ctx as never,
-      Config({ stateFile: join(tempDir(), 'tickets.jsonl'), handoffPolicy: false } as never),
-    )
-    expect(host.hooks).toHaveLength(0)
+    expect(await injectedSection({ handoffPolicy: false, handoffPolicyText: '不该出现' })).toBeUndefined()
   })
 })

@@ -25,6 +25,7 @@ import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
 import { decidePreset, normalizeBrief, publishTicket } from './publish'
 import type { Classifier, PresetCatalog, TicketIntent, TicketReceipt } from './publish'
+import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from './preset-guard'
 import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
 import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
 import { ticketView } from './view'
@@ -51,6 +52,12 @@ export interface DeskConfig {
   defaultPreset: string
   presetStrategy: 'llm' | 'static'
   classifyTimeoutMs: number
+  /** 允许档位镜像；空数组 = 不校验「档在不在允许清单里」。 */
+  allowedPresets: readonly string[]
+  /** 「要跑命令」的关键词兜底表。 */
+  commandKeywords: readonly string[]
+  /** 选档一致性校验总开关。 */
+  rejectOnMismatch: boolean
   /** 传给 `startActivation` 的 provider 名。 */
   provider: string
   maxDepth: number
@@ -78,6 +85,9 @@ export interface DeskConfig {
 export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   presetStrategy: 'llm',
   classifyTimeoutMs: 8000,
+  allowedPresets: [],
+  commandKeywords: DEFAULT_COMMAND_KEYWORDS,
+  rejectOnMismatch: true,
   provider: 'spawn',
   maxDepth: 2,
   maxOpen: 8,
@@ -349,6 +359,31 @@ export class TicketDesk {
         clock: this.clock,
         warn: this.warn,
       })
+
+      // 档定了、票还没建：这是最后一个没有副作用的点。档配不上这活就驳回，
+      // 不建票——票是小屏上给人看的，闪一张假票比报错更误导。
+      if (this.config.rejectOnMismatch) {
+        const catalog = await this.deps.presets.list()
+        const chosen = catalog.find((row) => row.id === decision.preset)
+        const rejection = await checkPresetChoice({
+          preset: decision.preset,
+          ...(chosen?.name ? { label: chosen.name } : {}),
+          ...(decision.needsCommand !== undefined ? { needsCommand: decision.needsCommand } : {}),
+          goal,
+          allowedPresets: this.config.allowedPresets,
+          keywords: this.config.commandKeywords,
+          toolsOf: (id) => this.deps.presets.tools(id),
+          candidates: catalog.map((row) => row.id),
+        })
+        if (rejection) {
+          const head = Array.from(goal).slice(0, 40).join('')
+          this.warn(
+            `[dispatcher] 选档驳回 rule=${rejection.rule} preset=${decision.preset} ` +
+              `source=${decision.source} brief=${brief} goal=${head} 原因=${rejection.reason}`,
+          )
+          throw new PresetRejectedError(rejection)
+        }
+      }
 
       const id = newTicketId(this.clock.now())
       return publishTicket({

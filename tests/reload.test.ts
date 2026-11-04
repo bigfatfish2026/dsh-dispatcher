@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
+import { DEFAULT_COMMAND_KEYWORDS } from '../src/tickets/preset-guard'
 import type { Config } from '../src/config'
 import { apply } from '../src/index'
 
@@ -27,6 +28,9 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     classifyModel: 'deepseek/deepseek-flash',
     classifyEffort: 'off',
     classifyTimeoutMs: 8000,
+    allowedPresets: [],
+    commandKeywords: [...DEFAULT_COMMAND_KEYWORDS],
+    rejectOnMismatch: true,
     provider: 'spawn',
     maxDepth: 2,
     maxOpen: 4,
