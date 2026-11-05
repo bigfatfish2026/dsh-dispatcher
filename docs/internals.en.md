@@ -18,7 +18,8 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; relative paths resolve against `DSH_HOME` |
-| `store.backend` | string | `jsonl` | Log backend. `jsonl` is the only implementation; `redis` / `sqlite` fail loud at load instead of quietly falling back |
+| `store.backend` | string | `jsonl` | Log backend. `jsonl` (default) is one event per line, append-only; `sqlite` stores the same events in a SQLite file (`node:sqlite`, WAL, transactions make one append all-or-nothing); `redis` is a name that fails loud at load instead of quietly falling back |
+| `store.file` | string | empty | SQLite database file; empty means "next to the log" (`tickets.jsonl` → `tickets.db` in the same directory). Relative paths resolve against `DSH_HOME`; ignored by the `jsonl` backend |
 | `snapshotFile` | string | empty | Read-only snapshot path; empty means "next to the log" |
 | `snapshotEnabled` | boolean | `true` | Rewrite the snapshot atomically after every ticket commit |
 | `snapshotRecentClosed` | number | `20` | Closed tickets included in the snapshot; `counts` still covers the whole log |

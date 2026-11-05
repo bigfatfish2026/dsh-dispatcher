@@ -160,3 +160,21 @@ systemctl --user start dsh-qqbot
 ```
 
 起来后 `node bin/tickets.mjs tickets --json` 应回到 jsonl 的读数。注意：**切换后新开的票只在 `tickets.db` 里**，回滚到 jsonl 会把它们藏起来；要保留就先导回 jsonl（当前没有反向迁移脚本，需要另做）。库文件不要删，留着还能再切回去。
+
+## i) 抬重启验收基线
+
+`/home/julia/pending_after_restart.sh`（切换当晚写的那份一次性验收脚本）把「切换那一刻的读数」写死成基线，重启后跑它比自己比、比库是否回退。**每次切换前后动过数据就得重算这几行**，否则要么误报 FAIL，要么放过真正的回退：
+
+| 常量 | 从哪读 |
+| --- | --- |
+| `BASE_SEQ` | `SELECT max(seq) FROM events` |
+| `JSONL_SIZE` / `JSONL_MTIME` | `stat -c '%s %Y' "$DSH_HOME/dispatcher/tickets.jsonl"`（冻结后这两个值不许再变） |
+| `MEMBASE_ROWS` | `node scripts/memory-query.mjs --list --json \| jq length`（在 dsh-memory 目录里跑） |
+| `MEMJSONL_SIZE` / `MEMJSONL_MTIME` | `stat -c '%s %Y' ~/fatfish/memory/memories.jsonl` |
+
+```bash
+node -e "const{DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(process.env.HOME+'/.dsh/dispatcher/tickets.db',{readOnly:true});console.log(d.prepare('select max(seq) seq,count(*) n from events').get())"
+stat -c '%s %Y' "$DSH_HOME/dispatcher/tickets.jsonl"
+```
+
+改完 `pending_after_restart.sh` 的 mtime 会挪到当下，脚本里 b 项（进程启动晚于脚本 mtime）在下次真重启前必然 FAIL，属预期——要连基线一起验就等重启之后再跑。基线和「为什么是这个数」的原因写进脚本头注释，别只留数字。

@@ -25,6 +25,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
 Restart the instance; the plugin loads at startup. Tickets default to `$DSH_HOME/dispatcher/tickets.jsonl`: one event per line, append-only.
+To use SQLite, set `store.backend: sqlite` (optionally `store.file`; without it the log path just swaps `.jsonl` for `.db`). Both the CLI and the in-process runtime follow that key; see [docs/switch-to-sqlite.md](docs/switch-to-sqlite.md) for switching, verification, rollback and the self-check baselines.
 
 ### Minimal config
 

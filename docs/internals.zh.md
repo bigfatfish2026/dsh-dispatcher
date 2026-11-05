@@ -18,7 +18,8 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票日志路径，相对路径按 `DSH_HOME` 解析 |
-| `store.backend` | string | `jsonl` | 票日志后端。`jsonl` 是唯一实现；`redis` / `sqlite` 只认名字，选了在装载时报错，不会悄悄退回文件 |
+| `store.backend` | string | `jsonl` | 票日志后端。`jsonl`（默认）一行一个事件、只追加；`sqlite` 把同一套事件存在 SQLite 文件里（`node:sqlite`，WAL，事务保证一次 append 整条可见）；`redis` 只留名字，选了在装载时报错，不会悄悄退回文件 |
+| `store.file` | string | 空 | sqlite 库文件；空 = 跟着 `stateFile` 换后缀（`tickets.jsonl` → 同目录 `tickets.db`）。相对路径按 `DSH_HOME` 解析，`jsonl` 后端不看这一栏 |
 | `snapshotFile` | string | 空 | 只读快照文件；空 = 跟日志同目录 |
 | `snapshotEnabled` | boolean | `true` | 每次票变化后原子重写快照 |
 | `snapshotRecentClosed` | number | `20` | 快照里额外带多少张已结票；`counts` 仍按全量算 |
