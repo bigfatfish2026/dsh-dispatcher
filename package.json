@@ -21,6 +21,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "migrate:sqlite": "npm run build && node scripts/migrate-to-sqlite.ts",
     "prepare": "tsdown"
   },
   "dependencies": {},

@@ -1,5 +1,7 @@
 import type { TicketEvent } from '../store'
+import { DEFAULT_STORE_BACKEND } from '../defaults'
 import { JsonlTicketStore } from './jsonl'
+import { SqliteTicketStore } from './sqlite'
 
 /**
  * 票日志的后端契约。换 redis / sqlite 时按这五条验收，一条不过就别接：
@@ -49,7 +51,7 @@ export interface TicketBackend {
   append(event: TicketEvent): void
 }
 
-/** 后端名字。redis / sqlite 只是先占位，还没实现。 */
+/** 后端名字。jsonl 是默认实现，sqlite 已接；redis 仍只是占位。 */
 export type TicketBackendName = 'jsonl' | 'redis' | 'sqlite'
 
 /** 选后端要的两样东西：`store.backend` 和已经解析好的日志路径。 */
@@ -58,24 +60,45 @@ export interface TicketBackendConfig {
   backend?: string
   /** 日志路径，已按 `resolveStateFile()` 解析过（相对路径落在 DSH_HOME 下）。 */
   stateFile: string
+  /**
+   * sqlite 后端的库文件；没配就按 `stateFile` 换个后缀（tickets.jsonl →
+   * tickets.db），所以默认落在同一个 dispatcher 目录里。
+   */
+  dbFile?: string
 }
 
 /**
- * 按 `store.backend` 选一个实现。默认 jsonl；redis / sqlite 现在只有名字，
- * 调用时抛「未实现」，别让它们悄悄退回 jsonl——配置写错了要当场知道。
+ * sqlite 库文件放哪：显式给了就用，否则把日志路径的后缀换掉。
+ *
+ * 只换最后一段的扩展名，目录原样保留——`~/.dsh/dispatcher/tickets.jsonl`
+ * 推导出 `~/.dsh/dispatcher/tickets.db`。`.jsonl` 之外的日志名（比如
+ * `tickets.log`）追加 `.db`，绝不让 SQLite 去打开日志文件本身。
+ */
+export function resolveDbFile(stateFile: string, dbFile?: string): string {
+  if (dbFile && dbFile.trim()) return dbFile
+  if (/\.jsonl$/i.test(stateFile)) return stateFile.replace(/\.jsonl$/i, '.db')
+  if (/\.(db|sqlite|sqlite3)$/i.test(stateFile)) return stateFile
+  return `${stateFile}.db`
+}
+
+/**
+ * 按 `store.backend` 选一个实现。默认 jsonl（不配就是老行为）；sqlite 已经
+ * 接上，写库失败会当场抛，不会静默退回 jsonl；redis 还只是名字，选了就抛
+ * 「未实现」——配置写错了要当场知道。
  */
 export function createTicketBackend(
   config: TicketBackendConfig,
   log?: (message: string) => void,
 ): TicketBackend {
-  const name = (config.backend ?? '').trim() || 'jsonl'
+  const name = (config.backend ?? '').trim() || DEFAULT_STORE_BACKEND
   switch (name) {
     case 'jsonl':
       return new JsonlTicketStore(config.stateFile, log)
-    case 'redis':
     case 'sqlite':
+      return new SqliteTicketStore(resolveDbFile(config.stateFile, config.dbFile), log)
+    case 'redis':
       throw new Error(
-        `store.backend: '${name}' 还没实现，现在只有 'jsonl'。接一个后端就照 src/store/backend.ts 顶上那五条契约写一个 TicketBackend，再在 createTicketBackend 里加一行。`,
+        `store.backend: 'redis' 还没实现，现在有 'jsonl'（默认）和 'sqlite'。接一个新后端就照 src/store/backend.ts 顶上那五条契约写一个 TicketBackend，再在 createTicketBackend 里加一行。`,
       )
     default:
       throw new Error(`store.backend 不认识的值：'${name}'（可选 jsonl / redis / sqlite）`)

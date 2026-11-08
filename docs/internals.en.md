@@ -18,7 +18,8 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | Ticket log path; relative paths resolve against `DSH_HOME` |
-| `store.backend` | string | `jsonl` | Log backend. `jsonl` is the only implementation; `redis` / `sqlite` fail loud at load instead of quietly falling back |
+| `store.backend` | string | `jsonl` | Log backend. `jsonl` (default) is one event per line, append-only; `sqlite` stores the same events in a SQLite file (`node:sqlite`, WAL, transactions make one append all-or-nothing); `redis` is a name that fails loud at load instead of quietly falling back |
+| `store.file` | string | empty | SQLite database file; empty means "next to the log" (`tickets.jsonl` → `tickets.db` in the same directory). Relative paths resolve against `DSH_HOME`; ignored by the `jsonl` backend |
 | `snapshotFile` | string | empty | Read-only snapshot path; empty means "next to the log" |
 | `snapshotEnabled` | boolean | `true` | Rewrite the snapshot atomically after every ticket commit |
 | `snapshotRecentClosed` | number | `20` | Closed tickets included in the snapshot; `counts` still covers the whole log |
@@ -116,7 +117,10 @@ dsh-dispatcher tickets --json                  # every ticket
 dsh-dispatcher tickets --json --open-only      # open tickets only
 dsh-dispatcher tickets --json --id t-abc       # one ticket; exit code 1 if absent
 dsh-dispatcher tickets --json --recent 20      # open tickets plus the last 20 closed
+dsh-dispatcher tickets --json --backend sqlite --db ~/.dsh/dispatcher/tickets.db
 ```
+
+With no flags the CLI follows the profile's `store.backend` / `store.file`, exactly like the in-process runtime; the default is still `jsonl`. `--backend <jsonl|sqlite>` picks a backend explicitly, `--db <path>` implies `--backend sqlite` and names the database (relative paths resolve against `DSH_HOME`), and `--state <path>` explicitly uses jsonl. Passing `--backend jsonl` together with `--db` is an error (exit 2); `redis` reports not-implemented and exits 2.
 
 The `--json` shape is fixed and `v` is the schema version. `counts` is computed over the whole log and is not affected by filters. Fields: `id`, `brief`, `goal`, `status`, `owner`, `createdAt` / `updatedAt` / `closedAt` / `statusSince`, `workerAlive`, `pendingInputs` / `pendingReports`, `reportsCount`, `ageMinutes`, `stale`, `epoch` / `epochReports`, `preset` / `presetSource`, `dir` / `note` / `device`. Times are ISO 8601 UTC.
 

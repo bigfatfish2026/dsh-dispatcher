@@ -18,8 +18,9 @@ import type {
 // `store/reducer.ts`，读写与投影在 `store/log.ts`。这个文件只剩「门面 + 与票
 // 无关的小工具」（brief 宽度、时间换算、待投递过滤）。TicketStore 的方法一个
 // 没少——删 `update({status})` 是第三期的事。
-export { createTicketBackend } from './store/backend'
+export { createTicketBackend, resolveDbFile } from './store/backend'
 export { JsonlTicketStore } from './store/jsonl'
+export { SqliteTicketStore } from './store/sqlite'
 export type { TicketBackend, TicketBackendConfig, TicketBackendName } from './store/backend'
 export type {
   Actor,

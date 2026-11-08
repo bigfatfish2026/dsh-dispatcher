@@ -8,17 +8,27 @@
  * 参数面（`--help` 打印的就是它）：
  *
  *   dsh-dispatcher tickets [--json] [--open-only] [--id <票号>]
- *                          [--recent <n>] [--state <路径>] [--help]
+ *                          [--recent <n>] [--state <路径>]
+ *                          [--backend <jsonl|sqlite>] [--db <路径>] [--help]
+ *
+ * 不传 `--backend` / `--db` / `--state` 时读 profile 的 `store.backend` 和
+ * `store.file`（没配就是 jsonl + `dispatcher/tickets.jsonl`）。`--state` 是显式
+ * 点名 jsonl 日志，给了就按 jsonl 读；`--db` 给了就把后端当成 sqlite。
  *
  * 不加 `--json` 打人看的一行一张票；`--json` 打固定形状的
  * `{v,generatedAt,counts,tickets}`，字段见 `tickets/readout.ts`。
  */
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
+import { DEFAULT_STATE_FILE, DEFAULT_STORE_BACKEND } from './defaults'
 import { BRIEF_MAX_COLUMNS, createTicketBackend } from './store'
 import { TicketLog } from './store/log'
 import { TicketReadout, TICKETS_SCHEMA_VERSION } from './tickets/readout'
+import type { CliConfig } from './cli-config'
 import type { ReadSelection } from './tickets/readout'
+
+export { loadCliConfig, parseDispatcherConfig } from './cli-config'
+export type { CliConfig } from './cli-config'
 
 export const USAGE = `用法：dsh-dispatcher tickets [选项]
 
@@ -29,11 +39,14 @@ export const USAGE = `用法：dsh-dispatcher tickets [选项]
   --open-only        只看未结票（open/running/waiting/blocked）；--open 是别名
   --id <票号>        只看这一张（关了也看得到）
   --recent <n>       未结票之外，再带最近 n 张已结票（默认全带）
-  --state <路径>     票日志路径；相对路径按 DSH_HOME 解析
-                     （默认 dispatcher/tickets.jsonl）
+  --state <路径>     显式点名 jsonl 日志；相对路径按 DSH_HOME 解析
+                     （不传就读 profile 的 stateFile，默认 dispatcher/tickets.jsonl）
+  --backend <值>     jsonl | sqlite；不传就读 profile 的 store.backend（默认 jsonl）
+  --db <路径>        sqlite 库文件，给了就等于 --backend sqlite；相对路径按 DSH_HOME
+                     解析。不传就用 profile 的 store.file，再不然跟 stateFile 换后缀
   --help, -h         打印这段
 
-退出码：0 正常；1 点名的票不存在；2 参数不对。
+退出码：0 正常；1 点名的票不存在；2 参数不对或打不开日志（含 redis 未实现）。
 时间字段一律 ISO 8601（UTC，带 Z），不用 epoch ms。`
 
 /** 输出与退出码的注入点：测试用它抓 stdout/stderr，bin 用 process。 */
@@ -47,16 +60,26 @@ const consoleIo: CliIo = {
   err: (text) => process.stderr.write(text),
 }
 
+/** CLI 的运行时注入：bin 传 profile 配置，测试传临时配置和固定时钟。 */
+export interface CliRunOptions {
+  config?: CliConfig
+  now?: () => Date
+}
+
 interface CliOptions {
   json: boolean
   openOnly: boolean
   id?: string
   recentClosed?: number
   state: string
+  backend?: string
+  db?: string
   help: boolean
 }
 
 class UsageError extends Error {}
+
+const BACKENDS = new Set(['jsonl', 'sqlite', 'redis'])
 
 function parse(argv: readonly string[]): CliOptions {
   const args = [...argv]
@@ -66,6 +89,7 @@ function parse(argv: readonly string[]): CliOptions {
   let sawOpen = false
   let sawRecent = false
   let sawId = false
+  let sawState = false
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     const value = (): string => {
@@ -73,6 +97,15 @@ function parse(argv: readonly string[]): CliOptions {
       if (next === undefined) throw new UsageError(`${arg} 后面缺一个值`)
       index += 1
       return next
+    }
+    // `--backend=sqlite` / `--db=/tmp/x.db` 也认，和迁移脚本的参数面一致。
+    if (arg?.startsWith('--backend=')) {
+      options.backend = arg.slice('--backend='.length)
+      continue
+    }
+    if (arg?.startsWith('--db=')) {
+      options.db = arg.slice('--db='.length)
+      continue
     }
     switch (arg) {
       case '--json':
@@ -97,6 +130,13 @@ function parse(argv: readonly string[]): CliOptions {
       }
       case '--state':
         options.state = value()
+        sawState = true
+        break
+      case '--backend':
+        options.backend = value()
+        break
+      case '--db':
+        options.db = value()
         break
       case '--help':
       case '-h':
@@ -108,6 +148,17 @@ function parse(argv: readonly string[]): CliOptions {
   }
   if (sawId && sawOpen) throw new UsageError('--id 和 --open-only 不能一起用（单票查询本身就是精确指定）')
   if (sawId && sawRecent) throw new UsageError('--id 和 --recent 不能一起用（单票查询不带别的票）')
+  if (sawState && !options.state.trim()) throw new UsageError('--state 后面要跟路径')
+  if (options.backend !== undefined && !options.backend.trim()) {
+    throw new UsageError('--backend 要一个值：jsonl | sqlite')
+  }
+  if (options.db !== undefined && !options.db.trim()) throw new UsageError('--db 后面要跟路径')
+  if (options.backend !== undefined && !BACKENDS.has(options.backend.trim())) {
+    throw new UsageError(`--backend 不认识的值：'${options.backend.trim()}'（可选 jsonl / sqlite）`)
+  }
+  if (options.db !== undefined && options.backend !== undefined && options.backend.trim() !== 'sqlite') {
+    throw new UsageError('--db 只能配 --backend sqlite（或者省略 --backend，鱼鱼会自己按 sqlite 算）')
+  }
   return options
 }
 
@@ -116,6 +167,35 @@ function resolveStatePath(configured: string): string {
   if (isAbsolute(configured)) return configured
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return join(home, configured)
+}
+
+/** 最终交给 createTicketBackend 的三样东西。 */
+interface StoreSelection {
+  backend: string
+  stateFile: string
+  dbFile?: string
+}
+
+/**
+ * 参数 > profile 配置 > 默认值。`--state` 是显式点名 jsonl 日志，所以它本身
+ * 就把后端钉成 jsonl；要读 sqlite 还得给 `--backend sqlite` 或 `--db`。
+ */
+function resolveStore(options: CliOptions, config: CliConfig): StoreSelection {
+  const configuredState = (config.stateFile ?? '').trim() || DEFAULT_STATE_FILE
+  const stateFile = resolveStatePath((options.state ?? '').trim() || configuredState)
+
+  const explicitBackend = options.backend?.trim()
+  const configuredBackend = (config.store?.backend ?? '').trim()
+  let backend: string
+  if (options.db !== undefined) backend = 'sqlite'
+  else if (explicitBackend) backend = explicitBackend
+  else if ((options.state ?? '').trim()) backend = DEFAULT_STORE_BACKEND
+  else backend = configuredBackend || DEFAULT_STORE_BACKEND
+
+  const configuredDb = (config.store?.file ?? '').trim()
+  const dbRaw = (options.db ?? '').trim() || configuredDb
+  const dbFile = backend === 'sqlite' && dbRaw ? resolveStatePath(dbRaw) : undefined
+  return { backend, stateFile, dbFile }
 }
 
 function ticketLine(view: { id: string; status: string; ageMinutes: number; brief: string; stale: boolean; pendingInputs: number; pendingReports: number }): string {
@@ -136,7 +216,11 @@ function selectionOf(options: CliOptions): ReadSelection {
 /**
  * 跑一次命令，返回退出码；不调 `process.exit()`，bin 和测试都能自己决定怎么收尾。
  */
-export function runTicketsCli(argv: readonly string[], io: CliIo = consoleIo): number {
+export function runTicketsCli(
+  argv: readonly string[],
+  io: CliIo = consoleIo,
+  runOptions: CliRunOptions = {},
+): number {
   let options: CliOptions
   try {
     options = parse(argv)
@@ -151,7 +235,14 @@ export function runTicketsCli(argv: readonly string[], io: CliIo = consoleIo): n
 
   let log: TicketLog
   try {
-    log = new TicketLog(createTicketBackend({ backend: 'jsonl', stateFile: resolveStatePath(options.state || 'dispatcher/tickets.jsonl') }))
+    const selected = resolveStore(options, runOptions.config ?? {})
+    log = new TicketLog(
+      createTicketBackend({
+        backend: selected.backend,
+        stateFile: selected.stateFile,
+        dbFile: selected.dbFile,
+      }),
+    )
   } catch (error) {
     io.err(`打开票日志失败：${error instanceof Error ? error.message : String(error)}\n`)
     return 2
@@ -160,6 +251,7 @@ export function runTicketsCli(argv: readonly string[], io: CliIo = consoleIo): n
     briefMaxColumns: BRIEF_MAX_COLUMNS,
     waitingMinutes: 20,
     blockedMinutes: 60,
+    now: runOptions.now,
   })
   const selection = selectionOf(options)
   const payload = readout.payload(selection)
