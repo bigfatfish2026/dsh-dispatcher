@@ -25,6 +25,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
 装完要重启实例才加载。票默认记在 `$DSH_HOME/dispatcher/tickets.jsonl`，一行一个事件，只追加。
+想换 SQLite 就在 config 里给 `store.backend: sqlite`（可选 `store.file` 指定库文件，不给就跟着日志换 `.db` 后缀），CLI 和进程内都按这一栏走；切换、校验、回滚与验收基线见 [docs/switch-to-sqlite.md](docs/switch-to-sqlite.md)。
 
 ### 最小配置
 

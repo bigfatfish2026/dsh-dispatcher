@@ -151,7 +151,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 票日志：唯一写者。第三个参数把每一条追加广播成 `dispatcher/ticket`，票台
   // 不靠它改状态（状态只在自己的事件处理里折），宿主和别的插件可以监听。
   const log = new TicketLog(
-    createTicketBackend({ backend: config.store?.backend, stateFile: resolveStateFile(config.stateFile) }, warn),
+    createTicketBackend(
+      {
+        backend: config.store?.backend,
+        stateFile: resolveStateFile(config.stateFile),
+        dbFile: config.store?.file ? resolveStateFile(config.store.file) : undefined,
+      },
+      warn,
+    ),
     warn,
     (event) => {
       ;(ctx as unknown as { emit?: (name: string, payload: unknown) => void }).emit?.('dispatcher/ticket', event)

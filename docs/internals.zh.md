@@ -18,7 +18,8 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `stateFile` | string | `dispatcher/tickets.jsonl` | 票日志路径，相对路径按 `DSH_HOME` 解析 |
-| `store.backend` | string | `jsonl` | 票日志后端。`jsonl` 是唯一实现；`redis` / `sqlite` 只认名字，选了在装载时报错，不会悄悄退回文件 |
+| `store.backend` | string | `jsonl` | 票日志后端。`jsonl`（默认）一行一个事件、只追加；`sqlite` 把同一套事件存在 SQLite 文件里（`node:sqlite`，WAL，事务保证一次 append 整条可见）；`redis` 只留名字，选了在装载时报错，不会悄悄退回文件 |
+| `store.file` | string | 空 | sqlite 库文件；空 = 跟着 `stateFile` 换后缀（`tickets.jsonl` → 同目录 `tickets.db`）。相对路径按 `DSH_HOME` 解析，`jsonl` 后端不看这一栏 |
 | `snapshotFile` | string | 空 | 只读快照文件；空 = 跟日志同目录 |
 | `snapshotEnabled` | boolean | `true` | 每次票变化后原子重写快照 |
 | `snapshotRecentClosed` | number | `20` | 快照里额外带多少张已结票；`counts` 仍按全量算 |
@@ -116,7 +117,10 @@ dsh-dispatcher tickets --json                  # 全部票
 dsh-dispatcher tickets --json --open-only      # 只要未结票
 dsh-dispatcher tickets --json --id t-abc       # 单票，查不到退出码 1
 dsh-dispatcher tickets --json --recent 20      # 未结票 + 最近 20 张结票
+dsh-dispatcher tickets --json --backend sqlite --db ~/.dsh/dispatcher/tickets.db
 ```
+
+不传参时按 profile 配置里的 `store.backend` / `store.file` 选后端，跟进程内一致；默认仍是 `jsonl`。`--backend <jsonl|sqlite>` 显式挑后端，`--db <路径>` 等价于 `--backend sqlite` 并指定库文件（相对路径按 `DSH_HOME` 解析），`--state <路径>` 显式走 jsonl。`--backend jsonl` 和 `--db` 同时给会报错退出码 2；`redis` 会报未实现退出码 2。
 
 `--json` 的形状固定，`v` 是 schema 版本，`counts` 按全量日志算、不受过滤影响。字段：`id`、`brief`、`goal`、`status`、`owner`、`createdAt` / `updatedAt` / `closedAt` / `statusSince`、`workerAlive`、`pendingInputs` / `pendingReports`、`reportsCount`、`ageMinutes`、`stale`、`epoch` / `epochReports`、`preset` / `presetSource`、`dir` / `note` / `device`。时间一律 ISO 8601（UTC）。
 
