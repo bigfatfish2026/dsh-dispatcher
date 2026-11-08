@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.0 - 2026-11-09
+
+### Added
+
+2026-11-09 — sqlite 存储后端可选（默认仍 jsonl），票 CLI 跟 `store.backend` 走：`config` 多了 `store.backend`（`jsonl` | `sqlite`）与 `store.sqlite.path`，选 sqlite 时票台读写 `~/.dsh/dispatcher/tickets.db`（WAL），事件表与 `meta` 里的 `schema_version` / `lastSeq` 对齐 jsonl 的序号；老库用 `scripts/migrate-to-sqlite.ts` 一次性搬，`scripts/verify-after-switch.sh` 做切换后验收。`tickets` CLI 不再写死 jsonl，读 profile 的 `store.backend`，也可用 `--backend` / `--db` 临时覆盖；默认配置不变，不切就跟 2.0.1 一样跑 jsonl。
+
+Tests: 新增 `tests/sqlite-backend.test.ts`、`tests/sqlite-crash.test.ts`（落盘与崩溃恢复）、`tests/migrate.test.ts`、`tests/cli-backend.test.ts`（CLI 跟后端），`tests/store-backend.test.ts` 补后端解析；全量 `npm test` 见发版记录。
+
 ## 2.0.1 - 2026-11-04
 
 ### Fixed

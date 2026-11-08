@@ -1,6 +1,6 @@
 {
   "name": "dsh-dispatcher",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Ticket log + hand-off tools for a DSH dispatcher: the main session answers, worker subagents do the work.",
   "type": "module",
   "main": "lib/index.js",
