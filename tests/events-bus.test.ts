@@ -38,13 +38,13 @@ interface Published {
 
 /**
  * 假 dsh-events：只实现 dispatcher 用到的那一小面。publish 写进同一个
- * events 表，`type` 用命名空间名、`payload` 是整条票事件、`ticketId` 留空——
- * 跟真 dsh-events 的 publish 一致（它不认票号，只认名字和 payload）。
+ * events 表，`type` 用命名空间名、`payload` 是整条票事件、`ticketId` 取
+ * 入参里带的票号——跟真 dsh-events 的 PublishInput 可选 ticketId 一致。
  */
 function fakeEvents(dbFile: string, options: { failWith?: { code: string; message: string } } = {}): {
   service: {
     defineEvent(def: { name: string; maxBytes?: number }): unknown
-    publish(input: { name: string; payload: unknown }): { seq: number; eventId: string }
+    publish(input: { name: string; payload: unknown; ticketId?: string }): { seq: number; eventId: string }
     registry: { get(name: string): unknown }
   }
   defs: string[]
@@ -73,7 +73,7 @@ function fakeEvents(dbFile: string, options: { failWith?: { code: string; messag
         limits.set(def.name, def.maxBytes ?? 64 * 1024)
         return def
       },
-      publish({ name, payload }) {
+      publish({ name, payload, ticketId }) {
         if (options.failWith) {
           throw Object.assign(new Error(options.failWith.message), { code: options.failWith.code })
         }
@@ -90,7 +90,7 @@ function fakeEvents(dbFile: string, options: { failWith?: { code: string; messag
         const event = payload as TicketEvent
         conn
           .prepare('INSERT INTO events(seq, ticketId, type, payload, ts) VALUES(?, ?, ?, ?, ?)')
-          .run(seq, '', name, JSON.stringify(event), event.at)
+          .run(seq, ticketId ?? '', name, JSON.stringify(event), event.at)
         conn.prepare("UPDATE meta SET value = ? WHERE key = 'lastSeq'").run(String(seq))
         published.push({ name, payload: event })
         return { seq, eventId: `ev-${seq}` }
@@ -288,9 +288,9 @@ describe('events 服务不在：一个字节都不变', () => {
     const ticket = direct.get(opened.id)!
     expect(ticket.status).toBe('running')
     expect(ticket.reports.map((entry) => entry.text)).toEqual(['回滚后补的一条'])
-    // 新行的 ticketId 仍是票号；publisher 老行的 ticketId 是空串，靠 payload 的 id 兜住。
+    // publisher 行和回滚后的直写行都带票号，按 ticketId 一列就能折全。
     const stored = rows(dbFile)
-    expect(stored.every((row) => row.type.startsWith('dispatcher.ticket.') || row.ticketId === opened.id)).toBe(true)
+    expect(stored.every((row) => row.ticketId === opened.id)).toBe(true)
     expect(stored[stored.length - 1]!.type).toBe('legacy')
   })
 
