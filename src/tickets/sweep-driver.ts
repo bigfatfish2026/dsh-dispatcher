@@ -73,6 +73,9 @@ export interface SweepEventsService {
 export interface SweepScheduleService {
   register(rule: { id: string; every: number; topic: string; catchUp: 'skip' }): unknown
   unregister(id: string): unknown
+  /** 规则表（后路探针用）：`list()` / `listRules()` 哪个有就用哪个，都没有就当规则还在。 */
+  list?(): unknown
+  listRules?(): unknown
 }
 
 /** 被驱动的票台：只需要「打一拍」和「换源」两个口。 */
@@ -101,11 +104,27 @@ export interface SweepDriver {
   /** 收摊：退订、撤规则、停 watchdog。 */
   dispose(): void
   mode(): 'interval' | 'tick'
-  status(): { mode: 'interval' | 'tick'; subscribed: boolean; registered: boolean; lastTickAt: number }
+  status(): {
+    mode: 'interval' | 'tick'
+    subscribed: boolean
+    registered: boolean
+    lastTickAt: number
+    serviceEventSeen: boolean
+    watchAttached: boolean
+  }
+  /** `attachServiceWatch` 挂监听时调：watchdog 才知道该不该收快档。 */
+  markServiceWatch(): void
+  /** `internal/service` 事件入口；就绪返回 true，调用方接着 reconcile。 */
+  noteServiceEvent(name: string, value: unknown): boolean
 }
 
 /** tick 断流判定：这么多拍没来就认死。 */
 const STALL_FACTOR = 3
+/**
+ * 降级后路的快档：监听挂着、`internal/service` 事件却一次没来过时，watchdog
+ * 收成 10 分钟一睁（阈值也按它），别傻等 3 个周期。
+ */
+const QUICK_WATCHDOG_MS = 10 * 60 * 1000
 /** 失败后的冷却：别每 10 秒重试一次把日志刷满（最短 1 分钟）。 */
 const RETRY_FACTOR = 30
 const MIN_RETRY_MS = 60_000
@@ -139,6 +158,10 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
   let eventsAnnounced = false
   let watchdog: unknown
   let stopped = false
+  /** 降级标记：`internal/service` 里收到过 schedule 事件没有。假的时候 watchdog 收快档。 */
+  let serviceEventSeen = false
+  /** 监听挂没挂：没挂的时候（单独用 driver）不该按「a 方案失效」收紧 watchdog。 */
+  let watchAttached = false
 
   function now(): number {
     return clock.now().getTime()
@@ -176,13 +199,55 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
 
   function startWatchdog(): void {
     stopWatchdog()
+    const quick = watchAttached && !serviceEventSeen
+    const quickStallMs = Math.min(QUICK_WATCHDOG_MS, stallMs)
     watchdog = clock.setInterval(() => {
       if (stopped || mode !== 'tick') return
       const idle = now() - lastTickAt
-      if (idle < stallMs) return
+      if (quick) {
+        // a 方案的后路：监听挂了但事件没来过，顺手查规则还在不在，丢了就地重挂。
+        // 重挂成功说明服务还在、tick 还会来，把表重新起算，别当场判死。
+        let rearmed = false
+        try {
+          rearmed = probeRule()
+        } catch (error) {
+          warn(`[dispatcher] 巡检探规则抛错：${messageOf(error)}`)
+        }
+        if (rearmed) {
+          lastTickAt = now()
+          return
+        }
+        if (idle < quickStallMs) return
+      } else if (idle < stallMs) {
+        return
+      }
       // 断流不是「少跑一拍」而是「再也不会跑」：必须当场把驱动源换回来。
       fallback(`[dispatcher] ${SWEEP_TOPIC} 断流：${Math.round(idle / 1_000)} 秒没收到 tick`)
-    }, every)
+    }, quick ? Math.min(QUICK_WATCHDOG_MS, every) : every)
+  }
+
+  /**
+   * 后路探针：`schedule.list()`/`listRules()` 哪个能用用哪个，查自己的规则还在不在。
+   * 没有列表接口就当它在（不多事）；查不到才清 `ruleRegistered` 让 reconcile 重挂。
+   */
+  function probeRule(): boolean {
+    if (mode !== 'tick' || stopped) return false
+    const service = schedule()
+    if (!service) return false
+    const read = typeof service.list === 'function' ? service.list : service.listRules
+    if (typeof read !== 'function') return false
+    let rules: unknown
+    try {
+      rules = read.call(service)
+    } catch (error) {
+      warn(`[dispatcher] 列规则失败（${codeOf(error)}）：${messageOf(error)}`)
+      return false
+    }
+    if (!Array.isArray(rules)) return false
+    if (rules.some((rule) => (rule as { id?: unknown } | undefined)?.id === SWEEP_RULE_ID)) return false
+    ruleRegistered = false
+    reconcile()
+    return ruleRegistered
   }
 
   function switchToTick(): void {
@@ -336,8 +401,40 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
     registerRule(scheduleService, () => switchToTick())
   }
 
+  /** 监听已挂（attachServiceWatch 调）：没收到事件时 watchdog 才收快档。 */
+  function markServiceWatch(): void {
+    if (watchAttached) return
+    watchAttached = true
+    // 监听挂上之前 watchdog 可能已经按慢档起了：立刻按快档重起，别等一个周期。
+    if (watchdog !== undefined) startWatchdog()
+  }
+
+  /**
+   * `internal/service` 事件入口：schedule 就绪/销毁。
+   *
+   * 就绪（value 非空）返回 true，调用方接着 reconcile——路径和「每拍巡检探到
+   * 服务」完全一样，换实例重挂的判定也复用 scheduleSeen。
+   *
+   * 销毁（value 为空）只清缓存标记：别在这里 reconcile，那会走 fallback 起
+   * 自己的定时器，服务马上要再来，纯属噪音；等真断流由 watchdog 判死。
+   */
+  function noteServiceEvent(name: string, value: unknown): boolean {
+    if (name !== 'schedule') return false
+    const firstSeen = !serviceEventSeen
+    serviceEventSeen = true
+    // 标记翻真后 watchdog 该回慢档：重起一次，别让它还按快档空转。
+    if (firstSeen && watchdog !== undefined) startWatchdog()
+    if (value) return true
+    scheduleSeen = undefined
+    ruleRegistered = false
+    absentAnnounced = false
+    return false
+  }
+
   return {
     reconcile,
+    markServiceWatch,
+    noteServiceEvent,
     tick(payload: unknown): void {
       handleTick(payload)
     },
@@ -355,6 +452,48 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
       subscribed: subscription !== undefined,
       registered: ruleRegistered,
       lastTickAt,
+      serviceEventSeen,
+      watchAttached,
     }),
+  }
+}
+
+/** `internal/service` 监听要的宿主面：`ctx.on` 的最薄抽象，测试里给个假的就行。 */
+export type ServiceEventOn = (
+  event: string,
+  listener: (name: string, value: unknown) => void,
+) => (() => void) | void
+
+/**
+ * 挂 `internal/service` 监听：schedule 就绪就重挂规则，不用等下一拍巡检。
+ *
+ * ⚠ 回调整只包 try/catch，这条是硬要求：dsh-events 的 emit 是
+ * `dispatch(...).map(cb => cb(...args))`，没有 try/catch，监听器抛错会冒到
+ * timer 的 provide/effect，可能把 timer 的 apply 弄挂。catch 里只 warn，绝不 rethrow。
+ *
+ * 不加 `{ global: true }`：同 root 同 isolate 就能收到（实测）。
+ */
+export function attachServiceWatch(
+  on: ServiceEventOn,
+  driver: Pick<SweepDriver, 'noteServiceEvent' | 'reconcile'> & Partial<Pick<SweepDriver, 'markServiceWatch'>>,
+  options: { warn?: (message: string) => void } = {},
+): () => void {
+  const warn = options.warn ?? ((): void => {})
+  driver.markServiceWatch?.()
+  const off = on('internal/service', (name: string, value: unknown) => {
+    try {
+      if (name !== 'schedule') return
+      if (!driver.noteServiceEvent(name, value)) return
+      driver.reconcile()
+    } catch (error) {
+      warn(`[dispatcher] internal/service 监听处理失败（name=${String(name)}）：${messageOf(error)}`)
+    }
+  })
+  return () => {
+    try {
+      off?.()
+    } catch (error) {
+      warn(`[dispatcher] 摘 internal/service 监听失败：${messageOf(error)}`)
+    }
   }
 }

@@ -25,7 +25,7 @@ import { createLlmClassifier } from './tickets/classify'
 import type { LlmService } from './tickets/classify'
 import { createNotifier } from './tickets/notify'
 import { createSweepFacts } from './tickets/sweep-facts'
-import { createSweepDriver } from './tickets/sweep-driver'
+import { attachServiceWatch, createSweepDriver } from './tickets/sweep-driver'
 import type { SweepDriver, SweepEventsService, SweepScheduleService } from './tickets/sweep-driver'
 import { realClock } from './tickets/clock'
 import { TICKETS_SERVICE, TicketReadout } from './tickets/readout'
@@ -494,7 +494,19 @@ export function apply(ctx: Context, config: ConfigShape): void {
   desk.onPulse(() => sweepDriver.reconcile())
   sweepDriver.reconcile()
   sweepDriverSlot.set(ctx as unknown as object, sweepDriver)
-  ctx.effect(() => () => sweepDriver.dispose(), 'dsh-dispatcher.sweep')
+  // schedule 一就绪就重挂规则，不用等下一拍巡检（也不等下一个 tick）。
+  // 监听器内部整只包了 try/catch：events 的 emit 不兜错，冒出去会弄挂 timer 的 apply。
+  const detachServiceWatch = attachServiceWatch(
+    (event, listener) => ctx.on(event as never, listener as never),
+    sweepDriver,
+    { warn },
+  )
+  ctx.effect(() => {
+    return () => {
+      detachServiceWatch()
+      sweepDriver.dispose()
+    }
+  }, 'dsh-dispatcher.sweep')
 
   // ── 派活规矩：只给主会话，小鱼有自己的任务书 ────────────────────
   const handoffText = config.handoffPolicy ? (config.handoffPolicyText ?? '').trim() : ''
