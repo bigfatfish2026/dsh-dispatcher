@@ -362,3 +362,52 @@ describe('events 服务半残：注册不上就整条退回去', () => {
     expect(rows(dbFile).map((row) => row.type)).toEqual(['published', 'spawned'])
   })
 })
+
+describe('服务晚到与消失：commit 时探测，不把结论定在 apply', () => {
+  it('apply 时没有 events，服务晚到后第一次 commit 就接上', async () => {
+    const dbFile = tempDb()
+    const events = fakeEvents(dbFile)
+    const host = mount(dbFile)
+    expect(host.infos.join('\n')).toContain('没有 events 服务：票事件走直写')
+
+    // dsh-events 比 dispatcher 晚 apply：直接把服务塞进宿主。
+    host.services.events = events.service
+
+    const opened = (await host.call('dispatch_open', { goal: '晚到', brief: 'b' })) as { id: string }
+    await host.settled()
+
+    expect(host.infos.join('\n')).toContain('票事件 -> dsh-events')
+    expect(events.published.map((entry) => entry.name)).toContain('dispatcher.ticket.published')
+    expect(rows(dbFile).every((row) => row.ticketId === opened.id)).toBe(true)
+  })
+
+  it('服务中途消失：下一次 commit 回直写，不拿旧 publisher 硬撑', async () => {
+    const dbFile = tempDb()
+    const events = fakeEvents(dbFile)
+    const host = mount(dbFile, events)
+    const opened = (await host.call('dispatch_open', { goal: '消失', brief: 'b' })) as { id: string }
+    await host.settled()
+
+    delete host.services.events
+    await host.call('dispatch_send', { id: opened.id, text: '继续' })
+    await host.settled()
+
+    const stored = rows(dbFile)
+    expect(stored[0]!.type).toBe('dispatcher.ticket.published')
+    expect(stored.at(-1)!.type).toBe('delivered')
+    expect(stored.at(-1)!.ticketId).toBe(opened.id)
+  })
+
+  it('服务对象没换就不重复注册类型', async () => {
+    const dbFile = tempDb()
+    const events = fakeEvents(dbFile)
+    const host = mount(dbFile, events)
+    const opened = (await host.call('dispatch_open', { goal: '缓存', brief: 'b' })) as { id: string }
+    await host.call('dispatch_send', { id: opened.id, text: '继续' })
+    await host.settled()
+    await host.call('dispatch_report', { id: opened.id, text: '一条' })
+    await host.settled()
+
+    expect(events.defs.sort()).toEqual(TICKET_EVENT_DEFS.map((def) => def.name).sort())
+  })
+})
