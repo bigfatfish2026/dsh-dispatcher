@@ -113,6 +113,10 @@ export function fakeSchedule(events?: FakeEvents): FakeSchedule {
         unregistered.push(id)
         return rules.delete(id)
       },
+      /** 后路探针查规则表用；真服务有这个面。 */
+      list() {
+        return [...rules.values()]
+      },
     },
   }
   return fake
