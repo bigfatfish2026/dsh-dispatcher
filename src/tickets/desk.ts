@@ -193,6 +193,15 @@ export interface MaintainReport {
   signals: number
 }
 
+/**
+ * 巡检由谁驱动：
+ * - `interval`：票台自己的定时器（`sweepMs`，默认 10 秒）；
+ * - `tick`：外部事件 `dispatcher.sweep.tick`（dsh-timer 的 `schedule` 规则）。
+ *
+ * 两者只能有一个活着。换源走 `driveSweep`，同一时刻切换，绝不留第二条。
+ */
+export type SweepSource = 'interval' | 'tick'
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -213,6 +222,10 @@ export class TicketDesk {
   /** 上一拍巡检还在 serialize 队列里排队或正在跑：闸着，这一拍直接跳过。 */
   private sweeping = false
   private stopped = false
+  /** 当前驱动源。默认自己的定时器；外部 tick 接管时切到 `tick`。 */
+  private sweepSource: SweepSource = 'interval'
+  /** 每一拍落定后的回调（驱动源探测挂这儿）；抛错不影响巡检。 */
+  private readonly pulseWatchers = new Set<() => void>()
 
   constructor(private readonly deps: DeskDeps) {
     this.config = deskConfig(deps.config)
@@ -523,19 +536,67 @@ export class TicketDesk {
       subscribe('agent/status', (payload) => this.handleStatus(payload))
       subscribe('agent/disposed', (payload) => this.handleDisposed(payload))
     }
-    if (this.config.sweepMs > 0) {
-      this.timer = this.clock.setInterval(() => {
-        // 闸：上一拍还堵在 serialize 队列里（或正在跑）就跳过这一拍，
-        // 不往队列里堆空转的 maintain。
-        if (this.sweeping) return
-        this.sweeping = true
-        void this.maintain()
-          .catch((error) => this.fail('sweep', undefined, error))
-          .finally(() => {
-            this.sweeping = false
-          })
-      }, this.config.sweepMs)
+    this.startInterval()
+  }
+
+  /** 跑一拍巡检，直接返回「这一拍有没有真跑」。 */
+  pulse(source: SweepSource = 'interval'): boolean {
+    if (this.stopped) return false
+    // 闸：上一拍还堵在 serialize 队列里（或正在跑）就跳过这一拍，不往队列里堆
+    // 空转的 maintain。两条驱动源共用这一个闸——interval 和订阅不可能同时进来。
+    if (this.sweeping) return false
+    this.sweeping = true
+    void this.maintain()
+      .catch((error) => this.fail('sweep', undefined, error))
+      .finally(() => {
+        this.sweeping = false
+        for (const watcher of this.pulseWatchers) {
+          try {
+            watcher()
+          } catch (error) {
+            this.warn(`sweep 拍后回调失败（${source}）：${messageOf(error)}`)
+          }
+        }
+      })
+    return true
+  }
+
+  /**
+   * 换驱动源。幂等：设成当前源什么都不做；设成 `tick` 立刻停自己的定时器，
+   * 设回 `interval` 立刻重新起（`sweepMs` 0 就是不起）。
+   */
+  driveSweep(source: SweepSource): void {
+    if (this.stopped || source === this.sweepSource) return
+    this.sweepSource = source
+    if (source === 'tick') this.stopInterval()
+    else this.startInterval()
+  }
+
+  /** 当前谁在驱动巡检。 */
+  get sweepDriver(): SweepSource {
+    return this.sweepSource
+  }
+
+  /** 挂一个「每拍落定后」的回调，返回撤销函数。重复挂同一个函数只算一次。 */
+  onPulse(watcher: () => void): () => void {
+    this.pulseWatchers.add(watcher)
+    return () => {
+      this.pulseWatchers.delete(watcher)
     }
+  }
+
+  private startInterval(): void {
+    if (this.stopped || this.config.sweepMs <= 0 || this.timer !== undefined) return
+    if (this.sweepSource !== 'interval') return
+    this.timer = this.clock.setInterval(() => {
+      this.pulse('interval')
+    }, this.config.sweepMs)
+  }
+
+  private stopInterval(): void {
+    if (this.timer === undefined) return
+    this.clock.clearInterval(this.timer)
+    this.timer = undefined
   }
 
   /** 巡检：只看状态、只发信号，不改任何票。 */
@@ -570,10 +631,8 @@ export class TicketDesk {
   /** 关台：停定时器、收回所有 worker。之后再 `attach` 不生效。 */
   async dispose(): Promise<void> {
     this.stopped = true
-    if (this.timer !== undefined) {
-      this.clock.clearInterval(this.timer)
-      this.timer = undefined
-    }
+    this.pulseWatchers.clear()
+    this.stopInterval()
     await this.pool.abortAll('desk disposed')
   }
 

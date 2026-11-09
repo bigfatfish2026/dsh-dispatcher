@@ -109,6 +109,8 @@ export interface FakePluginHost {
   services: Record<string, unknown>
   makeAgent(origin?: string): FakeAgent
   emit(name: string, payload: unknown): void
+  /** 跑一遍 `ctx.effect` 收回来的 disposer（倒序），停掉插件起的定时器与订阅。 */
+  dispose(): void
   call(name: string, args: Record<string, unknown>, options?: { agent?: FakeAgent; callId?: string }): Promise<unknown>
   definition(name: string): ToolDefinition
   names(): string[]
@@ -147,6 +149,7 @@ export function fakePluginHost(
   const createdListeners: Array<(payload: { agent: FakeAgent }) => unknown> = []
   const changeListeners: Array<() => unknown> = []
   const hooks: PromptAssemblyHook[] = []
+  const disposers: Array<() => void> = []
   const services: Record<string, unknown> = { ...(options.services ?? {}) }
 
   const fireChange = (): void => {
@@ -196,7 +199,13 @@ export function fakePluginHost(
       list: () => agents,
       get: (id: string) => agents.find((agent) => agent.session.id === id || agent.session.id === `session-${id}`),
     },
-    effect: (callback: () => () => void) => callback(),
+    effect: (callback: () => () => void) => {
+      // 真 Cordis 立刻跑 callback 并留着它返回的 disposer；这里也留着，
+      // 否则插件起的定时器/订阅在测试里没法收干净（`host.dispose()`）。
+      const stop = callback()
+      disposers.push(stop)
+      return stop
+    },
     get(name: string) {
       return services[name]
     },
@@ -265,6 +274,16 @@ export function fakePluginHost(
     hooks,
     services,
     makeAgent,
+    dispose() {
+      while (disposers.length) {
+        const stop = disposers.pop()
+        try {
+          stop?.()
+        } catch {
+          // 收尾炸了不影响别的用例：这一条就是个清理钩子。
+        }
+      }
+    },
     emit(name, payload) {
       for (const listener of listeners.get(name) ?? []) listener(payload)
     },

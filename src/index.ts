@@ -25,6 +25,9 @@ import { createLlmClassifier } from './tickets/classify'
 import type { LlmService } from './tickets/classify'
 import { createNotifier } from './tickets/notify'
 import { createSweepFacts } from './tickets/sweep-facts'
+import { createSweepDriver } from './tickets/sweep-driver'
+import type { SweepDriver, SweepEventsService, SweepScheduleService } from './tickets/sweep-driver'
+import { realClock } from './tickets/clock'
 import { TICKETS_SERVICE, TicketReadout } from './tickets/readout'
 import { TicketSnapshotFile } from './tickets/snapshot'
 import type { PresetCatalog } from './tickets/publish'
@@ -69,6 +72,9 @@ const STATUSES = ['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as
 /** 票事件队列的把手：测试等它排空，生产里没人用。 */
 export const ticketEventQueue = new WeakMap<object, () => Promise<void>>()
 
+/** 巡检驱动源的把手：测试点一下「再探一次」，生产里没人读。 */
+export const sweepDriverSlot = new WeakMap<object, SweepDriver>()
+
 /** `ctx.get` 拿不到就返回 undefined：票台少一个服务该是降级，不是崩溃。 */
 function service<T>(ctx: Context, name: string): T | undefined {
   const getter = (ctx as unknown as { get?: (key: string) => unknown }).get
@@ -82,6 +88,24 @@ function service<T>(ctx: Context, name: string): T | undefined {
   }
   const direct = (ctx as unknown as Record<string, unknown>)[name]
   return direct === undefined || direct === null ? undefined : (direct as T)
+}
+
+/**
+ * 只认 `ctx.get` 的服务探测。
+ *
+ * `ctx.events` 是 Cordis 自己的事件总线，属性读会被它遮住；`events` 服务必须
+ * 走 `ctx.get('events')` 才拿得到（见 dsh-events/plugin.js 的注释）。所以这里
+ * 不吃 `service()` 的属性兜底。
+ */
+function probed<T>(ctx: Context, name: string): T | undefined {
+  const getter = (ctx as unknown as { get?: (key: string) => unknown }).get
+  if (typeof getter !== 'function') return undefined
+  try {
+    const found = getter.call(ctx, name)
+    return found === undefined || found === null ? undefined : (found as T)
+  } catch {
+    return undefined
+  }
 }
 
 interface AgentLike {
@@ -450,6 +474,27 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ctx.effect(() => () => {
     void desk.dispose()
   }, 'dsh-dispatcher.desk')
+
+  // ── 巡检驱动源：dsh-timer 的 tick 优先，拿不到就自己数秒 ────────
+  // 发布和订阅同一刀上线：注册成功才停自己的 setInterval；schedule 不在、
+  // 注册被拒（含 EV-006）都保留自己的定时器，并各打一行日志说明当前谁在驱动。
+  // tick 中途断流由 driver 的 watchdog 兜回自己的定时器——巡检不会因为
+  // tick 没了就静默停摆，也不会出现两路同时驱动。
+  const sweepDriver = createSweepDriver({
+    desk,
+    events: () => probed<SweepEventsService>(ctx, 'events'),
+    schedule: () => probed<SweepScheduleService>(ctx, 'schedule'),
+    every: sweepMs,
+    clock: realClock,
+    info,
+    warn,
+  })
+  // 每拍落定后重新探一次：schedule 比 dispatcher 晚 apply、或者中途被撤掉，
+  // 都靠这一眼发现（第一次探测在下面）。
+  desk.onPulse(() => sweepDriver.reconcile())
+  sweepDriver.reconcile()
+  sweepDriverSlot.set(ctx as unknown as object, sweepDriver)
+  ctx.effect(() => () => sweepDriver.dispose(), 'dsh-dispatcher.sweep')
 
   // ── 派活规矩：只给主会话，小鱼有自己的任务书 ────────────────────
   const handoffText = config.handoffPolicy ? (config.handoffPolicyText ?? '').trim() : ''

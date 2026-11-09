@@ -71,7 +71,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 **小鱼不能写记忆。** 写记忆的七个工具从它的 schema 里摘掉了（`memory_save`、`memory_archive`、`memory_merge` 等），只许查。它也没有 `dispatch_block`——卡住就在报告里说清卡点，等人回话。
 
-**巡检只提醒，不改票。** 默认 10 秒一轮（`sweepMs`）：未读报告、干完没收工、干完没交报告都只是主会话眼前的一条近况，看过那张票就撤；只有 `blocked` 挂满 60 分钟会真叫你。不替谁收报告，也不把票改成 `done`。`maxOpen` 默认 8，`done` / `dropped` 不占名额，一直挂着的票会一直占着名额。
+**巡检只提醒，不改票。** 默认 10 秒一轮（`sweepMs`）；dsh-timer 在时这一拍由 `dispatcher.sweep.tick` 驱动，拿不到 schedule 服务就回落到自己的 10 秒定时器（注册被拒、tick 断流也一样回落，日志里会写明当前谁在驱动）：未读报告、干完没收工、干完没交报告都只是主会话眼前的一条近况，看过那张票就撤；只有 `blocked` 挂满 60 分钟会真叫你。不替谁收报告，也不把票改成 `done`。`maxOpen` 默认 8，`done` / `dropped` 不占名额，一直挂着的票会一直占着名额。
 
 **MCP 工具要逐条点名。** 主会话默认只保留白名单里的名字，MCP 工具既不在里面也不支持通配：想让它看见，就把每个注册名写进 `extraRouterTools`。写错一个名字只换一行告警，不会带崩白名单。
 
