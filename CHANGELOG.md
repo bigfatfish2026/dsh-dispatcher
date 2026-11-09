@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1 - 2026-11-09
+
+### Changed
+
+2026-11-09 — 提示词里的称呼改硬：主会话提到执行任务的子会话一律写「小鱼」，禁用「她」「它」「那只」「agent」这些第三人称，同时有多只写「几只小鱼」，措辞写明「这是硬规则，不是建议」。`personaPrefix`、`personaSuffix`、`handoffPolicyText` 三处同步（profile 覆盖 + 本仓默认值），其余条款一字未动。
+
+Tests: 全量 `npm test` 40 个文件 464 条全绿，`tsc --noEmit` 干净，`npm run build` 通过。
+
 ## 2.1.0 - 2026-11-09
 
 ### Added
