@@ -41,7 +41,7 @@ describe('sweep 驱动源的装配', () => {
       services: { events: events.service },
     })
     try {
-      expect(host.warnings.join('\n')).toContain('没有 schedule 服务')
+      expect(host.warnings.join('\n')).toContain('schedule 服务尚未就绪')
       const driver = sweepDriverSlot.get(host.ctx)!
       expect(driver.mode()).toBe('interval')
 

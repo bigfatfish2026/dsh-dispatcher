@@ -129,6 +129,20 @@ const QUICK_WATCHDOG_MS = 10 * 60 * 1000
 const RETRY_FACTOR = 30
 const MIN_RETRY_MS = 60_000
 
+/**
+ * 「没有 schedule」分三种原因说，别都写成「dsh-timer 未挂」把排障带错方向：
+ * 尚未就绪 / 已就绪但本插件没拿到句柄 / 规则被撤。文案跟 fatfish 各插件逐字一致。
+ */
+export const SCHEDULE_ABSENT = Object.freeze({
+  notReady: 'schedule 服务尚未就绪（dsh-timer 未挂或还没 apply）',
+  noHandle: 'schedule 服务已就绪过，但本插件没拿到句柄（inject/ctx.get 未生效，或服务正在重载）',
+  ruleRevoked: 'schedule 规则被撤（曾注册成功，现不在规则表里）',
+})
+
+function scheduleAbsentReason(seenInstance: boolean): string {
+  return seenInstance ? SCHEDULE_ABSENT.noHandle : SCHEDULE_ABSENT.notReady
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -373,7 +387,7 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
       } else if (!absentAnnounced) {
         absentAnnounced = true
         warn(
-          `[dispatcher] 没有 schedule 服务（dsh-timer 未挂），sweep 由自己的 ${every}ms 定时器驱动，等服务出现再切换`,
+          `[dispatcher] ${scheduleAbsentReason(scheduleSeen !== undefined)}，sweep 由自己的 ${every}ms 定时器驱动，等服务出现再切换`,
         )
       }
       return
@@ -394,6 +408,7 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
 
     if (mode === 'tick') {
       // 已经在 tick 模式但规则丢了（比如被谁 unregister 掉）：重挂，不换源。
+      info(`${SCHEDULE_ABSENT.ruleRevoked}，重挂规则 ${SWEEP_RULE_ID}`)
       registerRule(scheduleService, () => info(`[dispatcher] 规则 ${SWEEP_RULE_ID} 已重挂`))
       return
     }

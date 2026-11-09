@@ -21,7 +21,14 @@ export const realClock: Clock = {
   clearTimeout: (handle) => {
     clearTimeout(handle as ReturnType<typeof setTimeout>)
   },
-  setInterval: (callback, ms) => setInterval(callback, ms),
+  setInterval: (callback, ms) => {
+    const handle = setInterval(callback, ms)
+    // 巡检拍子不保活宿主：宿主还挂着 QQ 连接、票据服务和 events 订阅；
+    // 只剩这一个句柄时进程该退就退，别被一个 10 秒的 sweep 定时器拽住。
+    // 测试走 fakeClock，不走这里，存活语义不受影响。
+    handle.unref()
+    return handle
+  },
   clearInterval: (handle) => {
     clearInterval(handle as ReturnType<typeof setInterval>)
   },

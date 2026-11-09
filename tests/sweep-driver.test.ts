@@ -92,7 +92,7 @@ describe('sweep 由 dispatcher.sweep.tick 驱动', () => {
     expect(driver.mode()).toBe('interval')
     expect(h.desk.sweepDriver).toBe('interval')
     expect(schedule.registerCalls).toBe(0)
-    expect(h.warnings.join('\n')).toContain('没有 schedule 服务')
+    expect(h.warnings.join('\n')).toContain('schedule 服务尚未就绪')
 
     const base = calls()
     h.clock.advance(10_000)
@@ -101,6 +101,19 @@ describe('sweep 由 dispatcher.sweep.tick 驱动', () => {
     h.clock.advance(10_000)
     await flush()
     expect(calls()).toBe(base + 2)
+  })
+
+  it('schedule 拿到过又消失：措辞指向句柄，不再一律说「未挂」', () => {
+    const { h, refs, driver } = setup()
+    expect(driver.mode()).toBe('tick')
+
+    refs.schedule = undefined
+    driver.reconcile() // tick 模式 → fallback，一条「服务不在了」
+    driver.reconcile() // interval 模式，scheduleSeen 还在 → 分情况措辞那条
+
+    const absent = h.warnings.find((line) => line.includes('由自己的 10000ms 定时器驱动'))
+    expect(absent).toContain('已就绪过，但本插件没拿到句柄')
+    expect(absent).not.toContain('尚未就绪')
   })
 
   it('注册抛 EV-006：interval 保留、打一行 warn、冷却期内不反复重试', async () => {
