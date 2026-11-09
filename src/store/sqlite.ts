@@ -179,9 +179,20 @@ function ticketSeq(db: DatabaseSync, id: string): number {
   return typeof row?.seq === 'number' ? row.seq : 0
 }
 
-/** 只折一张票的全部事件；fold 是按票独立的，结果和整份重放一致。 */
+/**
+ * 只折一张票的全部事件；fold 是按票独立的，结果和整份重放一致。
+ *
+ * dsh-events 的 `publish` 现在不往 `events.ticketId` 里带票号（它只认事件名和
+ * payload），新行的 ticketId 是空串。所以这里除了按列查，还按 payload 里的
+ * `id` 兜一层：publisher 路径写下的行、以及「切回直写」后同一张票的后续行，
+ * 都能折到一起。老行 ticketId 非空，走前半句，不碰 JSON。
+ */
 export function foldTicket(db: DatabaseSync, id: string): TicketSnapshot | undefined {
-  const rows = db.prepare('SELECT payload FROM events WHERE ticketId = ? ORDER BY seq').all(id) as {
+  const rows = db
+    .prepare(
+      "SELECT payload FROM events WHERE ticketId = ? OR (ticketId = '' AND json_extract(payload, '$.id') = ?) ORDER BY seq",
+    )
+    .all(id, id) as {
     payload: string
   }[]
   const state = new Map<string, TicketSnapshot>()
@@ -362,6 +373,30 @@ export class SqliteTicketStore implements TicketBackend {
       const snapshot = foldTicket(this.db, event.id)
       if (snapshot) writeProjection(this.db, snapshot, seq)
     })
+    this.signature = this.currentSignature()
+    this.observed = true
+  }
+
+  /**
+   * 事件已经由 dsh-events publish 进同一张 `events` 表，这里只补投影。
+   *
+   * 投影的输入是门面内存里刚折好的快照，不是再查一遍 `events`：publish 已经
+   * 返回 seq，事务边界在 dsh-events 那边，这边只做一次 upsert。补投影失败
+   * 不抛给调用方——事件已经落库了，`rebuildProjection()` 随时能把它补回来，
+   * 不能因为展示用的投影让 `dispatch_open` 看起来失败。
+   */
+  adoptPublished(snapshot: TicketSnapshot, seq: number): void {
+    try {
+      this.transact(() => {
+        writeProjection(this.db, snapshot, seq)
+      })
+    } catch (error) {
+      this.log?.(
+        `[dispatcher] ticket db ${this.file}: 事件已 publish 但投影没写成（票 ${snapshot.id}，seq ${seq}）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
     this.signature = this.currentSignature()
     this.observed = true
   }

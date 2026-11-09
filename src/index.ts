@@ -16,6 +16,8 @@ import { Config, DEFAULT_HANDOFF_POLICY, legacySweepWarning, resolveSweepMs, rou
 import type { Config as ConfigShape } from './config'
 import { createTicketBackend, resolveStateFile } from './store'
 import type { Actor, TicketStatus } from './store'
+import { createTicketEventPublisher } from './store/bus'
+import type { TicketEventsService, TicketEventPublisher } from './store/bus'
 import { TicketLog } from './store/log'
 import { createDesk } from './tickets/desk'
 import type { Serialize, TicketView } from './tickets/desk'
@@ -150,19 +152,46 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   // 票日志：唯一写者。第三个参数把每一条追加广播成 `dispatcher/ticket`，票台
   // 不靠它改状态（状态只在自己的事件处理里折），宿主和别的插件可以监听。
+  //
+  // 第四道口是 dsh-events：服务在、后端也支持「外部落库 + 只补投影」时，
+  // 事件走 publish、类型在这里注册；服务不在就整条退回直写，行为跟以前一样。
+  // 这是硬要求：dsh-events 没挂载时票台必须完全照旧。
+  const backend = createTicketBackend(
+    {
+      backend: config.store?.backend,
+      stateFile: resolveStateFile(config.stateFile),
+      dbFile: config.store?.file ? resolveStateFile(config.store.file) : undefined,
+    },
+    warn,
+  )
+  const eventsService = service<TicketEventsService>(ctx, 'events')
+  let publisher: TicketEventPublisher | undefined
+  if (
+    eventsService &&
+    typeof eventsService.publish === 'function' &&
+    typeof eventsService.defineEvent === 'function'
+  ) {
+    if (typeof backend.adoptPublished !== 'function') {
+      info(`[dispatcher] events 服务在，但 ${backend.location} 不支持外部落库：票事件走直写`)
+    } else {
+      publisher = createTicketEventPublisher(eventsService, warn)
+      info(
+        publisher
+          ? '[dispatcher] 票事件 -> dsh-events（publish，类型已注册）'
+          : '[dispatcher] events 类型没注册上：票事件走直写',
+      )
+    }
+  } else {
+    info('[dispatcher] 没有 events 服务：票事件走直写')
+  }
+
   const log = new TicketLog(
-    createTicketBackend(
-      {
-        backend: config.store?.backend,
-        stateFile: resolveStateFile(config.stateFile),
-        dbFile: config.store?.file ? resolveStateFile(config.store.file) : undefined,
-      },
-      warn,
-    ),
+    backend,
     warn,
     (event) => {
       ;(ctx as unknown as { emit?: (name: string, payload: unknown) => void }).emit?.('dispatcher/ticket', event)
     },
+    publisher,
   )
 
   // ── 统一只读出口 ────────────────────────────────────────────────
