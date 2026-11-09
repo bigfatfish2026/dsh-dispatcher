@@ -164,25 +164,47 @@ export function apply(ctx: Context, config: ConfigShape): void {
     },
     warn,
   )
-  const eventsService = service<TicketEventsService>(ctx, 'events')
-  let publisher: TicketEventPublisher | undefined
-  if (
-    eventsService &&
-    typeof eventsService.publish === 'function' &&
-    typeof eventsService.defineEvent === 'function'
-  ) {
-    if (typeof backend.adoptPublished !== 'function') {
-      info(`[dispatcher] events 服务在，但 ${backend.location} 不支持外部落库：票事件走直写`)
-    } else {
-      publisher = createTicketEventPublisher(eventsService, warn)
-      info(
-        publisher
-          ? '[dispatcher] 票事件 -> dsh-events（publish，类型已注册）'
-          : '[dispatcher] events 类型没注册上：票事件走直写',
-      )
+  // 惰性探测：dsh-events 可能比 dispatcher 晚 apply（loader 并发，行序不保证），
+  // 所以 apply 时探到的「没有」不能定终身。每次 commit 再问一次：拿到服务就换
+  // 发布器，服务没了就清缓存回直写。
+  let cachedEvents: TicketEventsService | undefined
+  let cachedPublisher: TicketEventPublisher | undefined
+  let reportedNoBackend = false
+  const resolvePublisher = (): TicketEventPublisher | undefined => {
+    const current = service<TicketEventsService>(ctx, 'events')
+    if (!current) {
+      cachedEvents = undefined
+      cachedPublisher = undefined
+      return undefined
     }
-  } else {
-    info('[dispatcher] 没有 events 服务：票事件走直写')
+    // 服务对象没换就复用上次结论（包括「注册失败」），别每次 commit 都重试。
+    if (current === cachedEvents) return cachedPublisher
+    cachedEvents = current
+    if (typeof current.publish !== 'function' || typeof current.defineEvent !== 'function') {
+      cachedPublisher = undefined
+      return undefined
+    }
+    if (typeof backend.adoptPublished !== 'function') {
+      cachedPublisher = undefined
+      if (!reportedNoBackend) {
+        reportedNoBackend = true
+        info(`[dispatcher] events 服务在，但 ${backend.location} 不支持外部落库：票事件走直写`)
+      }
+      return undefined
+    }
+    cachedPublisher = createTicketEventPublisher(current, warn)
+    info(
+      cachedPublisher
+        ? '[dispatcher] 票事件 -> dsh-events（publish，类型已注册）'
+        : '[dispatcher] events 类型没注册上：票事件走直写',
+    )
+    return cachedPublisher
+  }
+
+  // apply 时先探一次，只为了把启动日志写清楚；结果不当作永久结论。
+  const publisher = resolvePublisher()
+  if (!publisher) {
+    info('[dispatcher] 没有 events 服务：票事件走直写（commit 时继续探测）')
   }
 
   const log = new TicketLog(
@@ -192,6 +214,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       ;(ctx as unknown as { emit?: (name: string, payload: unknown) => void }).emit?.('dispatcher/ticket', event)
     },
     publisher,
+    resolvePublisher,
   )
 
   // ── 统一只读出口 ────────────────────────────────────────────────

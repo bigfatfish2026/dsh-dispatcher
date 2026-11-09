@@ -48,8 +48,14 @@ export class TicketLog {
   /**
    * dsh-events 在时走 publish，不在时是 undefined、走 `backend.append`。
    * 这个字段一设，事件就不再由本进程 INSERT；投影仍由本进程补（见 commit）。
+   * 传了 `probe` 时由 commit 每次刷新，不在这里定终身。
    */
-  private readonly publisher?: TicketEventPublisher
+  private publisher?: TicketEventPublisher
+  /**
+   * commit 时的服务探测器。拿到发布器就用，拿不到就回直写；「取不到」不缓存，
+   * 因为 dsh-events 可能比 dispatcher 晚 apply（loader 并发，行序不保证）。
+   */
+  private readonly probe?: () => TicketEventPublisher | undefined
   /** 后端自己的日志口；投影补写失败时报一声，不影响票的写。 */
   private readonly log?: (message: string) => void
 
@@ -74,11 +80,25 @@ export class TicketLog {
     log?: (message: string) => void,
     emit?: (event: TicketBroadcast) => void,
     publisher?: TicketEventPublisher,
+    probe?: () => TicketEventPublisher | undefined,
   ) {
     this.backend = typeof source === 'string' ? new JsonlTicketStore(source, log) : source
     this.emit = emit
     this.publisher = publisher
+    this.probe = probe
     this.log = log
+  }
+
+  /**
+   * 每次 commit 探一次 dsh-events。探到就换发布器；服务没了就清缓存回直写。
+   * 缓存的是「服务对象 → 发布器」的映射，由 probe 自己维护；这里只保证
+   * 不把「暂时没有服务」记成永久结论。
+   */
+  private resolvePublisher(): TicketEventPublisher | undefined {
+    if (!this.probe) return this.publisher
+    const probed = this.probe()
+    this.publisher = probed
+    return probed
   }
 
   /** 这份日志在哪儿：jsonl 就是文件路径，别的后端是它自己的地址。 */
@@ -150,10 +170,11 @@ export class TicketLog {
     //
     // 有 dsh-events 时事件由它落库（publish），本进程只补投影；没有时照老路
     // 由后端 append。两条路都同步，调用点的回执形状不变。
-    if (this.publisher) {
+    const publisher = this.resolvePublisher()
+    if (publisher) {
       let seq: number | undefined
       try {
-        seq = this.publisher.publish(event)
+        seq = publisher.publish(event)
       } catch (error) {
         if ((error as { code?: unknown }).code !== EV_SCHEMA) throw error
         // 超大事件不能因为总线限制就丢：dsh-events 在落库前校验并拒收，这条
