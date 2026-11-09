@@ -90,4 +90,4 @@ pnpm run build  # tsdown → lib/
 
 ## License
 
-[Apache License 2.0](LICENSE) © 2026 dsh-dispatcher contributors.
+[MIT License](LICENSE) © 2026 蓝色大肥鱼.
