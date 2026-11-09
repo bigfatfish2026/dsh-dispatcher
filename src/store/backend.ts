@@ -1,4 +1,4 @@
-import type { TicketEvent } from '../store'
+import type { TicketEvent, TicketSnapshot } from '../store'
 import { DEFAULT_STORE_BACKEND } from '../defaults'
 import { JsonlTicketStore } from './jsonl'
 import { SqliteTicketStore } from './sqlite'
@@ -47,8 +47,20 @@ export interface TicketBackend {
   /**
    * 追加一条事件。这是唯一的写入口：后来的状态、排队的消息、报告、已读记账
    * 全是新事件，不改旧行。
+   *
+   * `adoptPublished` 在时，事件也可能是 dsh-events 已经落好库的：本后端只补
+   * 投影，不再 INSERT。没有这个方法的后端（jsonl）只能走 `append`，publisher
+   * 路径对它是关着的。
    */
   append(event: TicketEvent): void
+
+  /**
+   * 事件已由外部（dsh-events）写进同一个库，这里只把折好的投影落下来。
+   *
+   * 不做事件 INSERT、不分配 seq；`seq` 是 publish 返回的那条事件的 seq。
+   * 没有这个能力的后端不实现它——调用方据此判断能不能走 publish。
+   */
+  adoptPublished?(snapshot: TicketSnapshot, seq: number): void
 }
 
 /** 后端名字。jsonl 是默认实现，sqlite 已接；redis 仍只是占位。 */

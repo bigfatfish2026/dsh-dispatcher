@@ -9,7 +9,11 @@ import { JsonlTicketStore } from './jsonl'
 import { applyEvent } from './reducer'
 import { kindOf } from './events'
 import type { TicketBackend } from './backend'
+import type { TicketEventPublisher } from './bus'
 import type { EntryKind, TicketBroadcast, TicketEntry, TicketEvent, TicketSnapshot, TicketStatus } from './events'
+
+/** dsh-events 的 EV-002：payload 超限（注册的类型上限）。只认码，不认文案。 */
+const EV_SCHEMA = 'EV-002'
 
 export function newTicketId(now: Date = new Date()): string {
   const stamp = now.getTime().toString(36)
@@ -41,6 +45,13 @@ export class TicketLog {
   private readonly backend: TicketBackend
   /** Called after every append that is not internal; see `quietly`. */
   private readonly emit?: (event: TicketBroadcast) => void
+  /**
+   * dsh-events 在时走 publish，不在时是 undefined、走 `backend.append`。
+   * 这个字段一设，事件就不再由本进程 INSERT；投影仍由本进程补（见 commit）。
+   */
+  private readonly publisher?: TicketEventPublisher
+  /** 后端自己的日志口；投影补写失败时报一声，不影响票的写。 */
+  private readonly log?: (message: string) => void
 
   /**
    * 内存投影：ticketId → 折好的快照。list()/get() 从这儿读，不再每次整份重读
@@ -62,9 +73,12 @@ export class TicketLog {
     source: string | TicketBackend,
     log?: (message: string) => void,
     emit?: (event: TicketBroadcast) => void,
+    publisher?: TicketEventPublisher,
   ) {
     this.backend = typeof source === 'string' ? new JsonlTicketStore(source, log) : source
     this.emit = emit
+    this.publisher = publisher
+    this.log = log
   }
 
   /** 这份日志在哪儿：jsonl 就是文件路径，别的后端是它自己的地址。 */
@@ -133,9 +147,37 @@ export class TicketLog {
     this.refresh()
     // 原子追加归后端管（jsonl 是一次 O_APPEND 的 writeSync），这里只折刚写的
     // 这一行，不重读整份日志。
-    this.backend.append(event)
-    applyEvent(this.state, event)
-    this.loaded = true
+    //
+    // 有 dsh-events 时事件由它落库（publish），本进程只补投影；没有时照老路
+    // 由后端 append。两条路都同步，调用点的回执形状不变。
+    if (this.publisher) {
+      let seq: number | undefined
+      try {
+        seq = this.publisher.publish(event)
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== EV_SCHEMA) throw error
+        // 超大事件不能因为总线限制就丢：dsh-events 在落库前校验并拒收，这条
+        // 退回原来的直写，票和报告都保住；其它错误照旧往上抛。
+        const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8')
+        this.log?.(
+          `[dispatcher] 票 ${event.id} 的事件 ${bytes} 字节超过 dsh-events 上限，这条退回直写：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+        this.backend.append(event)
+        applyEvent(this.state, event)
+        this.loaded = true
+      }
+      if (seq !== undefined) {
+        applyEvent(this.state, event)
+        this.loaded = true
+        this.adopt(event, seq)
+      }
+    } else {
+      this.backend.append(event)
+      applyEvent(this.state, event)
+      this.loaded = true
+    }
     if (this.emit && this.quiet === 0) {
       this.emit({ id: event.id, at: event.at, kind: kindOf(event) })
     }
@@ -147,6 +189,17 @@ export class TicketLog {
         // 见 onCommitted 的注释：票写成功就是成功，展示层的错不该回滚它。
       }
     }
+  }
+
+  /** publisher 路径的投影补写；后端不支持就当场报错，别静默丢投影。 */
+  private adopt(event: TicketEvent, seq: number): void {
+    const adopt = this.backend.adoptPublished
+    if (!adopt) {
+      throw new Error(`后端 ${this.backend.location} 没有 adoptPublished，不能走 publish 路径`)
+    }
+    const snapshot = this.state.get(event.id)
+    if (!snapshot) return
+    adopt.call(this.backend, snapshot, seq)
   }
 
   open(goal: string, dir?: string, brief?: string): TicketSnapshot {
