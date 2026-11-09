@@ -182,17 +182,12 @@ function ticketSeq(db: DatabaseSync, id: string): number {
 /**
  * 只折一张票的全部事件；fold 是按票独立的，结果和整份重放一致。
  *
- * dsh-events 的 `publish` 现在不往 `events.ticketId` 里带票号（它只认事件名和
- * payload），新行的 ticketId 是空串。所以这里除了按列查，还按 payload 里的
- * `id` 兜一层：publisher 路径写下的行、以及「切回直写」后同一张票的后续行，
- * 都能折到一起。老行 ticketId 非空，走前半句，不碰 JSON。
+ * 票事件的 publish 把票号写进 `events.ticketId`（dsh-events 的 PublishInput
+ * 可选 ticketId），直写路径的行本来就带票号，所以这里只按列查，不再用
+ * `json_extract(payload, '$.id')` 兜底。
  */
 export function foldTicket(db: DatabaseSync, id: string): TicketSnapshot | undefined {
-  const rows = db
-    .prepare(
-      "SELECT payload FROM events WHERE ticketId = ? OR (ticketId = '' AND json_extract(payload, '$.id') = ?) ORDER BY seq",
-    )
-    .all(id, id) as {
+  const rows = db.prepare('SELECT payload FROM events WHERE ticketId = ? ORDER BY seq').all(id) as {
     payload: string
   }[]
   const state = new Map<string, TicketSnapshot>()

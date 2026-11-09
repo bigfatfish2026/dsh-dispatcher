@@ -65,7 +65,10 @@ export function ticketEventName(event: TicketEvent): string {
  */
 export interface TicketEventsService {
   defineEvent(def: TicketEventDefinition): unknown
-  publish(input: { name: string; payload: unknown }): { seq?: number | null; eventId?: string }
+  publish(input: { name: string; payload: unknown; ticketId?: string }): {
+    seq?: number | null
+    eventId?: string
+  }
   registry?: { get(name: string, version?: number): unknown }
 }
 
@@ -102,7 +105,8 @@ export function createTicketEventPublisher(
 
   return {
     publish(event: TicketEvent): number {
-      const result = events.publish({ name: ticketEventName(event), payload: event })
+      // 票号一起带上：dsh-events 落库时写进 events.ticketId，读侧不用再翻 payload。
+      const result = events.publish({ name: ticketEventName(event), payload: event, ticketId: event.id })
       const seq = result?.seq
       if (typeof seq !== 'number') {
         throw new Error(`dsh-events 没给 ${ticketEventName(event)} 返回 seq，票事件没落库`)
