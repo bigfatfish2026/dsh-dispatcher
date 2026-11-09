@@ -161,11 +161,14 @@ export interface Config {
    * screen's second line can hold; defaults to BRIEF_MAX_COLUMNS.
    */
   briefMaxColumns: number
-  /** 巡检间隔，毫秒。只看状态、只发信号，不改票。0 = 关定时器（只由过时的 sweepMinutes 折算出来）。 */
+  /**
+   * 巡检间隔，毫秒。只看状态、只发信号，不改票。0 = 关巡检（既不起定时器也不订阅 tick）。
+   * 非 0 时优先由 dsh-timer 的 `dispatcher.sweep.tick` 驱动，拿不到才回落到自己的定时器。
+   */
   sweepMs: number
   /**
    * 已过时，改用 `sweepMs`。显式配置时它说了算：按 `sweepMinutes × 60000`
-   * 折算成 `sweepMs`，装载时 warn 一句；0 = 关定时器。不配置就用 `sweepMs`。
+   * 折算成 `sweepMs`，装载时 warn 一句；0 = 关巡检。不配置就用 `sweepMs`。
    */
   sweepMinutes?: number
   /** waiting 多久算「该催一下」，分钟。 */
@@ -303,12 +306,12 @@ export const Config: Schema<Config> = Schema.object({
     .min(500)
     .default(10_000)
     .description(
-      'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. The timer skips a beat when the previous pass is still queued, so a slow pass never stacks up.',
+      'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. When dsh-timer is present the pass is driven by the dispatcher.sweep.tick event; otherwise this becomes the plugin\'s own interval. A beat is skipped when the previous pass is still queued, so a slow pass never stacks up. 0 disables maintenance entirely.',
     ),
   sweepMinutes: Schema.number()
     .min(0)
     .description(
-      'Deprecated: use sweepMs. When set explicitly it wins (sweepMs = sweepMinutes × 60000) and the plugin logs a warning at load. 0 turns the timer off. Leave it out to use sweepMs.',
+      'Deprecated: use sweepMs. When set explicitly it wins (sweepMs = sweepMinutes × 60000) and the plugin logs a warning at load. 0 turns maintenance off. Leave it out to use sweepMs.',
     ),
   waitingMinutes: Schema.natural()
     .default(20)
