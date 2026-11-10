@@ -218,9 +218,18 @@ export function makeDesk(
     device?: string
     /** 主会话当前挂的档（可选探测）。 */
     routerPreset?: string
+    /** 探路窗口：只拆不建，测试给个记账的假件就够。 */
+    probe?: DeskDeps['probe']
+    /** 票工具的兜底注册：测试给个记账的假件，看 desk 在哪儿把 workerId 递过去。 */
+    workerTools?: DeskDeps['workerTools']
+    /**
+     * 换掉事件后端：把上一份票台的事件重放进一个新后端，再开一只 desk，就是
+     * 「重启后新建 desk 接老日志」。不传就是空的。
+     */
+    backend?: MemoryBackend
   } = {},
 ): Harness {
-  const backend = new MemoryBackend()
+  const backend = options.backend ?? new MemoryBackend()
   const broadcasts: TicketBroadcast[] = []
   const log = new TicketLog(backend, undefined, (event) => broadcasts.push(event))
   const clock = fakeClock(options.now)
@@ -244,6 +253,8 @@ export function makeDesk(
     presets: options.presets ?? fakePresets(),
     classify: options.classify,
     ...(options.routerPreset ? { routerPreset: () => options.routerPreset } : {}),
+    ...(options.probe ? { probe: options.probe } : {}),
+    ...(options.workerTools ? { workerTools: options.workerTools } : {}),
     config,
     device: options.device ?? 'board-test',
     warn: (message) => warnings.push(message),

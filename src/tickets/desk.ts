@@ -15,17 +15,34 @@
  * - **写盘失败和 reconcile 失败不是一回事。** `commit` 同步、会抛；抛了就让调用
  *   方看见（工具报错），不许吞掉——票和现实不一致时，人得知道。
  */
+import { dirname } from 'node:path'
 import { briefOf, isOpen, minutesSince, pending } from '../store'
-import type { Actor, TicketEvent, TicketSnapshot, TicketStatus } from '../store'
+import type {
+  Actor,
+  ConflictWait,
+  IntentSpec,
+  TicketEvent,
+  TicketPlan,
+  TicketSnapshot,
+  TicketStatus,
+} from '../store'
 import { newEntryId, newTicketId } from '../store/log'
 import type { TicketLog } from '../store/log'
 import type { Clock } from './clock'
 import { realClock } from './clock'
 import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
-import { decidePreset, normalizeBrief, publishTicket } from './publish'
-import type { Classifier, PresetCatalog, TicketIntent, TicketReceipt } from './publish'
+import { judgeConflict, outOfScopePaths } from './conflict'
+import type { ConflictLevel, ConflictSide } from './conflict'
+import { normalizeResources } from './resources'
+import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
+import type { ProbePort, ProbeRegistry } from './probe'
+import type { WorkerToolPort } from './worker-tools'
+import type { Classifier, PresetCatalog, PresetDecision, TicketIntent, TicketReceipt } from './publish'
 import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from './preset-guard'
+import type { PresetRejection } from './preset-guard'
+import { auditClosedTickets, checkRevertIntent, normalizeUndo, REVERT_AUDIT_DAYS, RevertRejectedError } from './revert'
+import type { RevertAuditReport } from './revert'
 import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
 import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
 import { ticketView } from './view'
@@ -42,6 +59,13 @@ export type {
 } from './publish'
 export type { Clock } from './clock'
 export type { IdleReason, OwnerNotifier } from './notify'
+export type {
+  RevertAuditFinding,
+  RevertAuditKind,
+  RevertAuditReport,
+  RevertGateCode,
+  RevertGateDecision,
+} from './revert'
 
 /**
  * 票台自己的配置。刻意不复用插件那份 `Config`：那一份是给工具面读的，改它的
@@ -61,7 +85,17 @@ export interface DeskConfig {
   /** 传给 `startActivation` 的 provider 名。 */
   provider: string
   maxDepth: number
-  maxOpen: number
+  /**
+   * 同时干活的票上限：只数 `status === 'running' && phase !== 'blocked'` 的票。
+   *
+   * 名额拆成两个独立计数后这里只管执行；排队另有 `maxQueued`。老配置里的
+   * `maxOpen` 仍能加载，但不再参与计数（按默认 8 处理）。
+   */
+  maxExec: number
+  /** 同时排队的票上限：只数 `phase === 'blocked'` 的票（挂起等放行）。 */
+  maxQueued: number
+  /** 已废弃：名额拆成 `maxExec` / `maxQueued`，这个键只为老配置还能加载而留着。 */
+  maxOpen?: number
   briefMaxColumns: number
   waitingMinutes: number
   blockedMinutes: number
@@ -73,6 +107,12 @@ export interface DeskConfig {
   freshMinutes: number
   autoReport: boolean
   noReportSignal: boolean
+  /** 撤回审计的窗口（天）：只扫最近这些天结的 done 票。 */
+  revertAuditDays: number
+  /** 撤回审计的节流（毫秒）：0 = 巡检不跑审计。 */
+  revertAuditMs: number
+  /** 探路窗口的耐心（分钟）：到点还没交声明就降级，按 dir 整片当写进。 */
+  probeTimeoutMinutes: number
   /**
    * 同一个人同一件事在这个窗口内再开票视为重复。
    *
@@ -90,7 +130,8 @@ export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   rejectOnMismatch: true,
   provider: 'spawn',
   maxDepth: 2,
-  maxOpen: 8,
+  maxExec: 8,
+  maxQueued: 4,
   briefMaxColumns: 34,
   waitingMinutes: 20,
   blockedMinutes: 60,
@@ -100,6 +141,9 @@ export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   autoReport: true,
   noReportSignal: true,
   repeatWindowMinutes: 10,
+  revertAuditDays: REVERT_AUDIT_DAYS,
+  revertAuditMs: 60 * 60 * 1000,
+  probeTimeoutMinutes: 2,
 }
 
 export function deskConfig(partial: Partial<DeskConfig> & { defaultPreset: string }): DeskConfig {
@@ -130,6 +174,13 @@ export interface DeskDeps {
   /** 主会话当前挂的档（可选探测）；没有就不问。 */
   routerPreset?: () => string | undefined
   notifier?: OwnerNotifier
+  /** 探路窗口（`probe.ts`）：desk 只拆不建，装窗口在 `agent/created` 那一刀。 */
+  probe?: ProbePort & ProbeRegistry
+  /**
+   * 票工具的兜底注册（`worker-tools.ts`）：declare / report / touch 按 agent 层
+   * 装到 worker 身上，跟档位的 allow 名单无关。desk 只管在派活那两处把手伸过去。
+   */
+  workerTools?: WorkerToolPort
   config: Partial<DeskConfig> & { defaultPreset: string }
   /** 本机标识，写进 `device`。 */
   device?: string
@@ -158,11 +209,37 @@ export interface CloseReceipt {
   /** false = 本来就是终态，这次一个字节都没写。 */
   closed: boolean
   openCount: number
+  /** 关票时对账出的越界项（归一化资源串）；没有越界就没有这一栏。 */
+  outOfScope?: string[]
 }
 
 export interface BlockReceipt {
   id: string
   status: TicketStatus
+}
+
+/** 探路声明的回执：写到了哪张票、声明了几个文件几个资源。 */
+export interface DeclareReceipt {
+  id: string
+  status: TicketStatus
+  epoch: number
+  files: number
+  resources: number
+}
+
+/** 收尾自报的回执：写到了哪张票、这次报了几条、票上现在一共几条。 */
+export interface TouchReceipt {
+  id: string
+  paths: number
+  total: number
+}
+
+/** 记一条动作账本的回执：序号和这张票现在一共几条，方便下一条接着记。 */
+export interface ActionReceipt {
+  id: string
+  step: number
+  actions: number
+  at: string
 }
 
 export interface ReadLine {
@@ -182,6 +259,12 @@ export interface ReadTicket {
   status: TicketStatus
   pendingReports: number
   reports: ReadLine[]
+  /** 建票意图；老票没有这一栏。 */
+  intent?: IntentSpec
+  /** 探路方案；快路径或老票没有这一栏。 */
+  plan?: TicketPlan
+  /** 关票时对出来的越界项；没有越界或没对过账就没有这一栏。 */
+  outOfScope?: string[]
 }
 
 export interface ReadPage {
@@ -206,6 +289,30 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * 名额满了的拒绝文案：说清是哪个满、各多少张、上限多少。
+ *
+ * 两本账分开报，绝不把 8 + 4 加成一个 12——执行和排队是两种名额。
+ */
+function quotaFullText(
+  counts: { exec: number; queued: number },
+  full: { exec: boolean; queued: boolean },
+  limits: { maxExec: number; maxQueued: number },
+): string {
+  const exec = `正在干 ${counts.exec} 张（上限 ${limits.maxExec}）`
+  const queued = `排队 ${counts.queued} 张（上限 ${limits.maxQueued}）`
+  const which =
+    full.exec && full.queued
+      ? '执行和排队名额都满了'
+      : full.exec
+        ? '执行名额满了'
+        : '排队名额满了'
+  return `${which}：${exec}，${queued}：${full.exec ? '先关几张再开' : '先等放行再开'}`
+}
+
+/** 一条动作摘要的上限：账本是给人扫的，一句说清，别抄整份报告。 */
+const ACTION_SUMMARY_MAX = 300
+
 export class TicketDesk {
   private readonly config: DeskConfig
   private readonly log: TicketLog
@@ -217,6 +324,10 @@ export class TicketDesk {
   private readonly device?: string
   /** 提醒指纹：`id:reason:statusSince`。同一轮同一理由只提醒一次。 */
   private readonly reminded = new Map<string, string>()
+  /** 上一轮撤回审计的时刻；`undefined` = 还没跑过。 */
+  private lastAuditAt: number | undefined = undefined
+  /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
+  private lastRevertAudit: RevertAuditReport | undefined = undefined
   private attached = false
   private timer: unknown
   /** 上一拍巡检还在 serialize 队列里排队或正在跑：闸着，这一拍直接跳过。 */
@@ -314,6 +425,9 @@ export class TicketDesk {
           // 记完账再数：这一轮读走的就不算未读了。
           pendingReports: pending((this.log.get(ticket.id) ?? ticket).reports).length,
           reports: lines,
+          ...(ticket.intent ? { intent: ticket.intent } : {}),
+          ...(ticket.plan ? { plan: ticket.plan } : {}),
+          ...(ticket.outOfScope?.length ? { outOfScope: ticket.outOfScope } : {}),
         })
       }
       return { tickets: page }
@@ -347,9 +461,34 @@ export class TicketDesk {
       )
       if (repeat) return this.receiptFor(repeat, true)
 
+      // 分级闸：只对带 intent 的票生效，老票 / 老调用原样放行。拒绝在这里、
+      // 在名额和分类器之前——被拒的票一个字节都不写。
+      const gate = checkRevertIntent({ origin: intent.origin, intent: intent.intent })
+      if (gate.action === 'reject') {
+        const head = Array.from(goal).slice(0, 40).join('')
+        this.warn(
+          `[dispatcher] 撤回闸驳回 code=${gate.code} origin=${intent.origin ?? 'main'} brief=${brief} goal=${head} 原因=${gate.reason}`,
+        )
+        throw new RevertRejectedError(gate.code, gate.reason)
+      }
+      const hold = gate.action === 'downgrade' ? gate.reason : undefined
+
       const openCount = tickets.filter((ticket) => isOpen(ticket.status)).length
-      if (openCount >= this.config.maxOpen) {
-        throw new Error(`已经 ${openCount} 张票没收工（上限 ${this.config.maxOpen}）：先关几张再开`)
+      // 名额拆成两本账：正在干的和排队挂起的分开数，谁满了说谁，不合并成一个总数。
+      const execCount = tickets.filter(
+        (ticket) => ticket.status === 'running' && ticket.phase !== 'blocked',
+      ).length
+      const queuedCount = tickets.filter((ticket) => ticket.phase === 'blocked').length
+      const execFull = execCount >= this.config.maxExec
+      const queuedFull = queuedCount >= this.config.maxQueued
+      if (execFull || queuedFull) {
+        throw new Error(
+          quotaFullText(
+            { exec: execCount, queued: queuedCount },
+            { exec: execFull, queued: queuedFull },
+            { maxExec: this.config.maxExec, maxQueued: this.config.maxQueued },
+          ),
+        )
       }
 
       const parent = this.resolveAgent(actor.sessionId)
@@ -362,7 +501,12 @@ export class TicketDesk {
         classify: this.deps.classify,
         strategy: this.config.presetStrategy,
         defaultPreset: this.config.defaultPreset,
-        routerPreset: this.deps.routerPreset?.(),
+        // 探路票不继承主会话当前挂的档。子会话的会话档在 spawn 那一刻钉死
+        // （`SessionHeader.agentPreset` 是 durable 的，`tools.restrict` 只减
+        // 不加），放行后的执行轮是 followup 复用同一个会话，改不了档——探路轮
+        // 落成只读档就等于把执行轮的 write / bash / dispatch_touch 一起钉死。
+        // 主会话当前挂的档是它自己那一轮的事，不该落成这张票的会话档。
+        ...(intent.probe === true ? {} : { routerPreset: this.deps.routerPreset?.() }),
         requestPreset: intent.preset,
         goal,
         brief,
@@ -376,18 +520,7 @@ export class TicketDesk {
       // 档定了、票还没建：这是最后一个没有副作用的点。档配不上这活就驳回，
       // 不建票——票是小屏上给人看的，闪一张假票比报错更误导。
       if (this.config.rejectOnMismatch) {
-        const catalog = await this.deps.presets.list()
-        const chosen = catalog.find((row) => row.id === decision.preset)
-        const rejection = await checkPresetChoice({
-          preset: decision.preset,
-          ...(chosen?.name ? { label: chosen.name } : {}),
-          ...(decision.needsCommand !== undefined ? { needsCommand: decision.needsCommand } : {}),
-          goal,
-          allowedPresets: this.config.allowedPresets,
-          keywords: this.config.commandKeywords,
-          toolsOf: (id) => this.deps.presets.tools(id),
-          candidates: catalog.map((row) => row.id),
-        })
+        const rejection = await this.rejectPreset(decision, goal)
         if (rejection) {
           const head = Array.from(goal).slice(0, 40).join('')
           this.warn(
@@ -415,6 +548,9 @@ export class TicketDesk {
           ...(this.device ? { device: this.device } : {}),
         },
         openCount,
+        ...(hold ? { hold } : {}),
+        ...(this.deps.probe ? { probeWindows: this.deps.probe } : {}),
+        ...(this.deps.workerTools ? { workerTools: this.deps.workerTools } : {}),
       })
     })
   }
@@ -464,6 +600,101 @@ export class TicketDesk {
     })
   }
 
+  /**
+   * 这个 worker 名下的票，含已结的。
+   *
+   * `ticketsOf` 是巡检用的私有查找；declare 要按调用者反查归属，读的地方在
+   * 工具层，所以单开一个公开口子，别让工具去摸 `log.list()`。
+   */
+  ticketsOfWork(workerId: string): TicketView[] {
+    return this.ticketsOf(workerId).map((ticket) => this.view(ticket))
+  }
+
+  /**
+   * 探路交活：plan 与 intent 一起落成一条 `declared`。
+   *
+   * 票号**不由调用方给**：按 workerId 反查自己名下那张活票，别人的票写不进来。
+   * 查不到票、票已结束都直接报错——reducer 对终态票是静默丢弃，这里静默就等于
+   * 让子会话以为声明成功了。
+   *
+   * 不动 status（设计稿 §7 的红线）：转 planned 仍由主会话的动作写。
+   */
+  async declare(workerId: string, plan: TicketPlan, intent: IntentSpec): Promise<DeclareReceipt> {
+    return this.serialize(async () => {
+      const files = (plan.files ?? [])
+        .map((file) => {
+          const path = file.path.trim()
+          const what = file.what?.trim()
+          return { path, ...(what ? { what } : {}) }
+        })
+        .filter((file) => file.path)
+      const summary = plan.summary?.trim()
+      const resources =
+        (intent.impact?.paths?.length ?? 0) +
+        (intent.impact?.services?.length ?? 0) +
+        (intent.impact?.remotes?.length ?? 0)
+      if (!summary && files.length === 0 && resources === 0) {
+        throw new Error('declare 至少要给 plan 或 intent：空声明没法判定')
+      }
+
+      const target = this.liveTicketOf(workerId, '声明')
+
+      // 没给的那一栏沿用票上已有的：声明是补充，不是把开票时的意图清空。
+      const nextPlan = summary || files.length
+        ? { ...(summary ? { summary } : {}), ...(files.length ? { files } : {}) }
+        : target.plan ?? {}
+      const nextIntent = Object.keys(intent).length > 0 ? intent : target.intent ?? {}
+
+      this.commit({
+        kind: 'declared',
+        id: target.id,
+        at: this.at(),
+        cause: 'tool',
+        plan: nextPlan,
+        intent: nextIntent,
+        workerId,
+      })
+      // 重新声明会把 phase 从 blocked 折回 planned：排队作废，挂起那条也撤掉。
+      this.forgetBlocked(target.id)
+      const after = this.log.get(target.id)!
+      return {
+        id: target.id,
+        status: after.status,
+        epoch: after.epoch,
+        files: files.length,
+        resources,
+      }
+    })
+  }
+
+  /**
+   * 执行子会话收尾自报：这一轮实际动过的路径。
+   *
+   * 归属校验跟 declare 一模一样：票号不由调用方给，按 workerId 反查自己名下那张
+   * 活票，没票、票已结束都直接报错。路径先过 `normalizeResources`（裸绝对路径
+   * 在工具层补好 `file:`），落一条 `touch-reported`；reducer 按首次出现
+   * 顺序合并去重，分几次报不会互相覆盖。
+   *
+   * 不碰 status / statusSince / closedAt：收工的票也允许补记最后一轮。
+   */
+  async touch(workerId: string, paths: readonly string[]): Promise<TouchReceipt> {
+    return this.serialize(async () => {
+      const normalized = normalizeResources(paths)
+      if (normalized.length === 0) throw new Error('touch 至少要给一个路径')
+      const target = this.liveTicketOf(workerId, '报路径')
+      this.commit({
+        kind: 'touch-reported',
+        id: target.id,
+        at: this.at(),
+        cause: 'tool',
+        actor: 'worker',
+        paths: normalized,
+      })
+      const after = this.log.get(target.id)!
+      return { id: target.id, paths: normalized.length, total: after.touched?.length ?? 0 }
+    })
+  }
+
   async block(id: string, reason: string, actor?: Actor): Promise<BlockReceipt> {
     return this.serialize(async () => {
       if (actor?.kind === 'worker') throw new Error('worker 不能改票的状态：只能交报告')
@@ -474,8 +705,67 @@ export class TicketDesk {
       if (!clean) throw new Error('block 的理由不能为空')
       if (ticket.status === 'blocked') return { id, status: 'blocked' }
       this.commit({ kind: 'blocked', id, at: this.at(), cause: 'tool', reason: clean })
+      // 人工挂起：挂起那刻就往主会话的上下文里放一条。
+      this.rememberBlocked(ticket, { reason: clean })
       return { id, status: 'blocked' }
     })
+  }
+
+  /**
+   * 记一条动作账本：append-only，只追加 `action-logged`，不碰 status。
+   *
+   * 收工的票也允许补记——最后一步常在关票之后才落笔。`undo` 必须能过
+   * `normalizeUndo`（具体命令或具体路径），空话在这里就被挡下，不进日志。
+   */
+  async logAction(
+    id: string,
+    input: { summary: string; undo: unknown; step?: number },
+    actor: 'main' | 'worker' = 'main',
+  ): Promise<ActionReceipt> {
+    return this.serialize(async () => {
+      const ticket = this.log.get(id)
+      if (!ticket) throw new Error(`没有票 ${id}`)
+      const summary = typeof input.summary === 'string' ? input.summary.trim() : ''
+      if (!summary) throw new Error('summary 不能为空：写清这一步干了什么')
+      const length = [...summary].length
+      if (length > ACTION_SUMMARY_MAX) {
+        throw new Error(`summary 太长（${length} 字）：一句说清，最多 ${ACTION_SUMMARY_MAX} 字`)
+      }
+      const undo = normalizeUndo(input.undo)
+      const last = ticket.actions.reduce((max, action) => Math.max(max, action.step), 0)
+      const step = input.step === undefined ? last + 1 : input.step
+      if (!Number.isInteger(step) || step < 1) throw new Error('step 必须是正整数（1 起）')
+      if (ticket.actions.some((action) => action.step === step)) {
+        throw new Error(`票 ${id} 第 ${step} 步已经记过了：省略 step 自动取下一个序号`)
+      }
+      const at = this.at()
+      this.commit({
+        kind: 'action-logged',
+        id,
+        at,
+        cause: 'tool',
+        ticketId: id,
+        actor,
+        step,
+        summary,
+        undo,
+      })
+      // 回执里的条数从 commit 之后的投影读，别拿 commit 前的快照自己加一。
+      return { id, step, actions: this.log.get(id)!.actions.length, at }
+    })
+  }
+
+  /**
+   * 撤回收支审计（只读）。窗口按 `closedAt` 算，默认 `revertAuditDays` 天；
+   * 只看 `done` 票，`dropped` 是人主动停的，不算账。
+   */
+  async auditRevert(opts: { days?: number; now?: Date } = {}): Promise<RevertAuditReport> {
+    return this.serialize(async () => this.buildAudit(opts.now ?? this.clock.now(), opts.days))
+  }
+
+  /** 最近一次巡检产出的审计报告；还没跑过就是 undefined。 */
+  get lastAudit(): RevertAuditReport | undefined {
+    return this.lastRevertAudit
   }
 
   /**
@@ -495,6 +785,9 @@ export class TicketDesk {
       const outcome = opts.outcome ?? 'done'
       const note = opts.note?.trim()
       const voided = pending(ticket.inputs).length
+      // 越界对账（P4）：关票那一刻拿 touched 跟声明的 writes 比，没被覆盖的算越界。
+      // 没有声明 writes 就没有边界可比，outOfScopePaths 返回空，不留痕。
+      const outOfScope = outOfScopePaths(ticket.touched, ticket.intent?.writes)
       this.commit({
         kind: 'closed',
         id,
@@ -503,10 +796,22 @@ export class TicketDesk {
         outcome,
         ...(note ? { note } : {}),
         ...(voided > 0 ? { voidedInputs: voided } : {}),
+        ...(outOfScope.length > 0 ? { outOfScope } : {}),
       })
       // 先落盘再收 worker：反过来的话，abort 触发的 ended 可能先到，票还没进终态。
       if (ticket.workerId) await this.pool.abort(ticket.workerId, `票 ${id} 已收工`)
-      return { id, status: outcome, closed: true, openCount: this.openCount() }
+      // 收工了：这张票的挂起提醒不该再挂着（哪怕它本来就是排队票）。
+      this.forgetBlocked(id)
+      // 收工腾出了资源：排队里的票按开票顺序一审，能走的立刻派执行轮。
+      // 放行不写 status（这一批的红线），只把 phase 推到 running。
+      await this.releaseBlocked()
+      return {
+        id,
+        status: outcome,
+        closed: true,
+        openCount: this.openCount(),
+        ...(outOfScope.length > 0 ? { outOfScope } : {}),
+      }
     })
   }
 
@@ -606,6 +911,8 @@ export class TicketDesk {
       let signals = 0
       for (const ticket of this.log.list()) {
         if (!isOpen(ticket.status)) continue
+        // 探路超时：跟下面三档提醒各走各的，降级完这一张票就不再扫了。
+        if (ticket.phase === 'planning' && this.degradeProbe(ticket, now)) continue
         const since = minutesSince(ticket.statusSince, now)
 
         if (ticket.status === 'waiting' && since >= this.config.waitingMinutes) {
@@ -624,6 +931,9 @@ export class TicketDesk {
           if (this.signal(ticket, 'running-90m', since)) signals += 1
         }
       }
+      // 撤回审计是独立的一段：只扫窗口内 done 票、只发报告、不改任何票。
+      // 不塞进上面那个只扫 open 的循环，也不跟着它的 continue 走。
+      this.auditIfDue(now)
       return { signals }
     })
   }
@@ -662,6 +972,38 @@ export class TicketDesk {
 
   private openCount(): number {
     return this.log.list().filter((ticket) => isOpen(ticket.status)).length
+  }
+
+  private buildAudit(now: Date, days = this.config.revertAuditDays): RevertAuditReport {
+    return auditClosedTickets(this.log.list(), {
+      now,
+      days,
+      briefOf: (ticket) => briefOf(ticket, this.config.briefMaxColumns),
+    })
+  }
+
+  /**
+   * 巡检里的审计段：按 `revertAuditMs` 节流，只发 `dispatcher/revert-audit`，
+   * 不写票、不推手机。每 10 秒扫一遍 800 张 done 票不值当，默认一小时一次。
+   */
+  private auditIfDue(now: Date): void {
+    if (this.config.revertAuditMs <= 0) return
+    const last = this.lastAuditAt
+    if (last !== undefined && now.getTime() - last < this.config.revertAuditMs) return
+    this.lastAuditAt = now.getTime()
+    try {
+      const report = this.buildAudit(now)
+      this.lastRevertAudit = report
+      this.busEmit('dispatcher/revert-audit', {
+        days: report.days,
+        since: report.since,
+        scanned: report.scanned,
+        findings: report.findings.length,
+        text: report.text,
+      })
+    } catch (error) {
+      this.warn(`撤回审计失败：${messageOf(error)}`)
+    }
   }
 
   private view(ticket: TicketSnapshot): TicketView {
@@ -783,6 +1125,24 @@ export class TicketDesk {
       .filter((ticket) => ticket.workerId !== undefined && isSameWorker(ticket.workerId, workerId))
   }
 
+  /**
+   * 按 workerId 反查自己名下那张活票。declare 与 touch 共用：票号不由调用方给，
+   * 别人的票写不进来；没票、票已结束都直接报错，别让子会话以为写成功了。
+   */
+  private liveTicketOf(workerId: string, verb: string): TicketSnapshot {
+    const mine = this.ticketsOf(workerId)
+    if (mine.length === 0) throw new Error('没有挂在这个 worker 上的票')
+    const live = mine.filter((ticket) => isOpen(ticket.status))
+    if (live.length === 0) {
+      // 拿最近那张的号说清楚是哪张结束了，别只回一句「不行」。
+      const last = mine.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
+      throw new Error(`票 ${last.id} 已结束（${last.status}），不能再${verb}`)
+    }
+    // 一张 worker 名下正常情况下只有一张活票；多张时取最近动过的那张，并在
+    // 回执里带票号，别让子会话猜自己刚写到哪张上。
+    return live.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
+  }
+
   private signal(ticket: TicketSnapshot, reason: IdleReason, sinceMinutes: number): boolean {
     // 指纹带 statusSince：同一轮只提醒一次，waiting→running→waiting 能再提醒。
     const fingerprint = `${ticket.id}:${reason}:${ticket.statusSince}`
@@ -819,6 +1179,33 @@ export class TicketDesk {
         stopReason,
       })
       .catch((error) => this.warn(`缺报告提醒没发出去：${messageOf(error)}`))
+  }
+
+  /**
+   * 票挂起那刻记一条巡检事实。
+   *
+   * 走 facts 不走 followup：主会话下一个回合在 runtime context 里自己看得见。
+   * 两处登记（kind 联合、ORDER）都在 `sweep-facts.ts`，漏了会一直挂到 close。
+   */
+  private rememberBlocked(
+    ticket: TicketSnapshot,
+    extra: { waitOn?: readonly ConflictWait[]; reason?: string } = {},
+  ): void {
+    void this.notifier
+      .blocked({
+        ticketId: ticket.id,
+        brief: briefOf(ticket, this.config.briefMaxColumns),
+        ...(extra.waitOn?.length ? { waitOn: extra.waitOn } : {}),
+        ...(extra.reason ? { reason: extra.reason } : {}),
+      })
+      .catch((error) => this.warn(`挂起提醒没记上：${messageOf(error)}`))
+  }
+
+  /** 票放行或收工：把挂起那条摘掉。 */
+  private forgetBlocked(ticketId: string): void {
+    void this.notifier
+      .resumed(ticketId)
+      .catch((error) => this.warn(`挂起提醒没摘掉：${messageOf(error)}`))
   }
 
   /** 宿主信号统一入口：进队列、吞异常——宿主回调里抛错会打断别人的监听。 */
@@ -871,6 +1258,389 @@ export class TicketDesk {
     }
   }
 
+  // ── 冲突判定与排队 ──────────────────────────────────────────────────
+
+  /**
+   * 这张票在判定里长什么样。
+   *
+   * 声明里的 writes/reads 原样用。只有降级票（`degraded`：探路超时，声明没等到）
+   * 才按设计稿 §8 兜底：拿 `plan.files` 的父目录，连 plan 都没有才拿票的 dir
+   * 整片算写——它没声明清楚，不能当「不冲突」。
+   *
+   * 正常的票 writes 空就是纯读票：reads 里有什么只按只读算，不许顶成写。验证票
+   * 读一份文档却被判成写整片目录、跟别人撞上排队，就是这里以前无条件兜底造成的。
+   */
+  private conflictSide(ticket: TicketSnapshot): ConflictSide {
+    const writes = [...(ticket.intent?.writes ?? [])]
+    const reads = [...(ticket.intent?.reads ?? [])]
+    if (ticket.degraded === true && writes.length === 0) {
+      for (const file of ticket.plan?.files ?? []) {
+        const parent = dirname(file.path)
+        const uri = `dir:${parent}`
+        if (parent && parent !== '.' && !writes.includes(uri)) writes.push(uri)
+      }
+      if (writes.length === 0 && ticket.dir) writes.push(`dir:${ticket.dir}`)
+    }
+    return { writes, reads }
+  }
+
+  /**
+   * 拿这张票去撞现在所有没收工的票（自己不算）。
+   *
+   * 强冲突按排队序号（`seq` 升序，就是开票先后）记 `{ ticketId, resources }`，
+   * 弱冲突只留票号：前者拦、后者只是票面上一行提示。判定本身是纯函数，这里只管
+   * 挑对手和汇总；同一张对手票只记一次。没有 seq 的老票仍按 createdAt / id 排，
+   * 见 `store/log.ts` 的 `byQueueOrder`。
+   *
+   * 排在自己**后面**的排队票不算阻塞：它在等我先走（FIFO）。排在前面的排队票
+   * 照样拦——前排没放行，后面的不许抢跑。放行那条路靠这一条做到「依次放行」。
+   */
+  private judgeTicket(ticket: TicketSnapshot): {
+    level: ConflictLevel
+    waitOn: ConflictWait[]
+    weak: string[]
+  } {
+    const all = this.log.list()
+    const mine = this.conflictSide(ticket)
+    const myIndex = all.findIndex((row) => row.id === ticket.id)
+    const waitOn: ConflictWait[] = []
+    const weak: string[] = []
+    let strong = false
+    for (const [index, other] of all.entries()) {
+      if (other.id === ticket.id || !isOpen(other.status)) continue
+      if (other.phase === 'blocked' && index > myIndex) continue
+      const verdict = judgeConflict(mine, this.conflictSide(other))
+      if (verdict.level === 'none') continue
+      if (verdict.level === 'strong') {
+        strong = true
+        waitOn.push({ ticketId: other.id, resources: [...verdict.resources] })
+      } else if (!weak.includes(other.id)) {
+        weak.push(other.id)
+      }
+    }
+    return { level: strong ? 'strong' : weak.length > 0 ? 'weak' : 'none', waitOn, weak }
+  }
+
+  /**
+   * 判一张票的档装不装得上这活。返回驳回理由（undefined = 放行）。
+   *
+   * 开票和「重新 spawn 执行轮」走同一道守卫。守卫本身是纯函数，这里只负责把
+   * 注册表和配置递进去，别在两处各写一遍规则。
+   */
+  private async rejectPreset(decision: PresetDecision, goal: string): Promise<PresetRejection | undefined> {
+    const catalog = await this.deps.presets.list()
+    const chosen = catalog.find((row) => row.id === decision.preset)
+    return checkPresetChoice({
+      preset: decision.preset,
+      ...(chosen?.name ? { label: chosen.name } : {}),
+      ...(decision.needsCommand !== undefined ? { needsCommand: decision.needsCommand } : {}),
+      goal,
+      allowedPresets: this.config.allowedPresets,
+      keywords: this.config.commandKeywords,
+      toolsOf: (id) => this.deps.presets.tools(id),
+      candidates: catalog.map((row) => row.id),
+    })
+  }
+
+  /**
+   * 派执行轮：探路票收工（或降级）之后，原任务得真的落到一只子会话手上。
+   *
+   * 原 worker 还在就把这一轮任务书投回**同一个会话**，不再 spawn：`agent/status
+   * idle` 只说明这一轮说完了，会话还在活表里；探路那只已经把任务书、目录、声明
+   * 都摸过一遍，换一只等于白探（实测 seq 8423 判完冲突、7 ms 后又起了一只新
+   * worker，原来那只再没收到过话）。只有活表里真的拿不到它了——ended、服务重启
+   * 被 sweep、或者消息投不进去——才重新 spawn。降级轮走同一条路。
+   *
+   * 档不在这一轮重定：会话的档钉死在 spawn（`dsh-session` 的
+   * `SessionHeader.agentPreset` 是 durable 的，`dsh-tools` 的 `restrict` 只减不
+   * 加），followup 改不了工具面。所以开票时用的就得是这张票干活的档（见
+   * `open`：探路票不吃主会话当前挂的档），探路轮的只读靠探路窗口那三件 deny。
+   *
+   * 真要 spawn 新的一只时才重新 `decidePreset`，而且必须再过 `rejectPreset`
+   * 那道守卫：分类器给出「要命令却没 bash」的档就驳回去，票落 `gated`
+   * （status=waiting、note 写驳回理由），等主会话换档或改配置再放，不照派。
+   */
+  private async startTask(ticket: TicketSnapshot): Promise<boolean> {
+    const parent = this.resolveAgent(ticket.publisher)
+    if (!parent) {
+      this.warn(`票 ${ticket.id} 的发布会话不在活表（${ticket.publisher ?? '空'}），这一轮派不出去`)
+      return false
+    }
+    const brief = briefOf(ticket, this.config.briefMaxColumns)
+    const prompt = buildPrompt({
+      ticketId: ticket.id,
+      goal: ticket.goal,
+      brief,
+      ...(ticket.dir ? { dir: ticket.dir } : {}),
+      epoch: ticket.epoch + 1,
+      // 降级票没等到声明：执行轮改走「直接干、干完补一份」那套任务书。
+      round: ticket.degraded === true ? 'degraded' : 'task',
+      declared: {
+        ...(ticket.intent?.writes ? { writes: ticket.intent.writes } : {}),
+        ...(ticket.intent?.reads ? { reads: ticket.intent.reads } : {}),
+        ...(ticket.intent?.reversibility ? { reversibility: ticket.intent.reversibility } : {}),
+      },
+    })
+
+    const workerId = ticket.workerId
+    if (workerId && this.pool.alive(workerId) === true) {
+      try {
+        const messageId = await this.pool.send(workerId, parent, prompt)
+        this.commit({
+          kind: 'resumed',
+          id: ticket.id,
+          at: this.at(),
+          cause: 'reaction',
+          workerId,
+          messageId,
+          epoch: ticket.epoch + 1,
+          ...(this.device ? { device: this.device } : {}),
+        })
+        // 老会话的工具面在 spawn 时就装好了（`worker-tools.ts`）；这里再伸一次手
+        // 只为了插件热重载后那点漏网：装过就直接返回，不会重复注册。
+        this.deps.workerTools?.attach(workerId)
+        return true
+      } catch (error) {
+        // 活表里还在、话却投不进去：当成真没了，往下走 spawn 那条路。
+        this.warn(
+          `票 ${ticket.id} 的原 worker（${workerId}）接不住这一轮，改派新的一只：${messageOf(error)}`,
+        )
+      }
+    }
+
+    try {
+      const decision = await decidePreset({
+        presets: this.deps.presets,
+        classify: this.deps.classify,
+        strategy: this.config.presetStrategy,
+        defaultPreset: this.config.defaultPreset,
+        routerPreset: this.deps.routerPreset?.(),
+        goal: ticket.goal,
+        brief,
+        ...(ticket.dir ? { dir: ticket.dir } : {}),
+        ...(ticket.publisher ? { sessionId: ticket.publisher } : {}),
+        classifyTimeoutMs: this.config.classifyTimeoutMs,
+        clock: this.clock,
+        warn: this.warn,
+      })
+      if (this.config.rejectOnMismatch) {
+        const rejection = await this.rejectPreset(decision, ticket.goal)
+        if (rejection) {
+          const head = Array.from(ticket.goal).slice(0, 40).join('')
+          this.warn(
+            `[dispatcher] 执行轮选档驳回 rule=${rejection.rule} preset=${decision.preset} ` +
+              `source=${decision.source} brief=${brief} goal=${head} 原因=${rejection.reason}；` +
+              '票挂起等人换档，不照派',
+          )
+          this.commit({
+            kind: 'gated',
+            id: ticket.id,
+            at: this.at(),
+            cause: 'reaction',
+            reason: rejection.reason,
+          })
+          return false
+        }
+      }
+      await startWorker({
+        ticketId: ticket.id,
+        provider: this.config.provider,
+        preset: decision.preset,
+        label: buildLabel(ticket.id, brief),
+        prompt,
+        parent,
+        ...(ticket.dir ? { cwd: ticket.dir } : {}),
+        ...(this.config.maxDepth ? { maxDepth: this.config.maxDepth } : {}),
+        at: this.at(),
+        requestId: ticket.requestId ?? ticket.id,
+        ...(this.device ? { device: this.device } : {}),
+        pool: this.pool,
+        commit: (event) => this.commit(event),
+        ...(this.deps.workerTools ? { workerTools: this.deps.workerTools } : {}),
+        failure: `票 ${ticket.id} 的声明已就绪`,
+      })
+      return true
+    } catch (error) {
+      this.fail('dispatch', ticket.id, error)
+      return false
+    }
+  }
+
+  /**
+   * 判一次并决定派不派活。返回 true = 这一轮真派出去了。
+   *
+   * 强冲突只落 `conflict-checked`（phase=blocked + waitOn），一个字节的 status
+   * 都不写，票停在原地等放行；其余先落判定（phase=running + 弱冲突提示）再派
+   * 原任务。派不出去就把 phase 退回 planned——票面不许出现在干活其实没人。
+   */
+  private async admit(ticket: TicketSnapshot): Promise<boolean> {
+    const current = this.log.get(ticket.id) ?? ticket
+    if (!isOpen(current.status) || current.phase !== 'planned') return false
+    const verdict = this.judgeTicket(current)
+    if (verdict.level === 'strong') {
+      this.commit({
+        kind: 'conflict-checked',
+        id: current.id,
+        at: this.at(),
+        cause: 'reaction',
+        level: 'strong',
+        waitOn: verdict.waitOn,
+        ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
+      })
+      const blockedBy = verdict.waitOn.map((wait) => wait.ticketId).join('、')
+      this.warn(`票 ${current.id} 撞上 ${blockedBy}，先排队等放行`)
+      // 排队的那一刻写进巡检事实，主会话下一轮就能看见在等谁。
+      this.rememberBlocked(this.log.get(current.id) ?? current, { waitOn: verdict.waitOn })
+      return false
+    }
+    this.commit({
+      kind: 'conflict-checked',
+      id: current.id,
+      at: this.at(),
+      cause: 'reaction',
+      level: verdict.level,
+      waitOn: [],
+      ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
+    })
+    if (!(await this.startTask(current))) {
+      this.rollbackPlanned(current)
+      return false
+    }
+    return true
+  }
+
+  /**
+   * 派活没成：把 phase 退回 `planned`。
+   *
+   * 复用 `declared` 的折叠（只写 phase / plan / intent / degraded，不碰 status），
+   * 所以票面回到「方案就绪、等派活」——这正是设计稿 §11 说的 spawn 失败状态。
+   */
+  private rollbackPlanned(ticket: TicketSnapshot): void {
+    try {
+      this.commit({
+        kind: 'declared',
+        id: ticket.id,
+        at: this.at(),
+        cause: 'reaction',
+        plan: ticket.plan ?? {},
+        intent: ticket.intent ?? {},
+        ...(ticket.degraded ? { degraded: true } : {}),
+      })
+    } catch (error) {
+      this.fail('rollback', ticket.id, error)
+    }
+  }
+
+  /**
+   * 有票收工了，回头放行排队里的票。
+   *
+   * FIFO：按排队序号 `seq` 升序（就是开票先后；老票按 createdAt / id）扫
+   * `phase === 'blocked'`，一张一张来——先放行完这张、让它的 phase 落成
+   * running，再判下一张，否则三张票会同时看到「对手已经不在了」一起冲出去。
+   * 派不出去就留在队里，等下次收工再试。
+   */
+  private async releaseBlocked(): Promise<string[]> {
+    const released: string[] = []
+    for (const queued of this.log.list()) {
+      if (!isOpen(queued.status) || queued.phase !== 'blocked') continue
+      const current = this.log.get(queued.id)
+      if (!current || !isOpen(current.status) || current.phase !== 'blocked') continue
+      const verdict = this.judgeTicket(current)
+      if (verdict.level === 'strong') {
+        // 排队的对手换了（收工前又开了新的票占同一片）：重写名单；没变就不写，
+        // 不然每次收工都往日志里塞一遍同样的行。
+        if (!sameWait(current.waitOn ?? [], verdict.waitOn)) {
+          this.commit({
+            kind: 'conflict-checked',
+            id: current.id,
+            at: this.at(),
+            cause: 'reaction',
+            level: 'strong',
+            waitOn: verdict.waitOn,
+            ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
+          })
+          // 对手换了：事实里的名单跟着换，不另起一条。
+          this.rememberBlocked(this.log.get(current.id) ?? current, { waitOn: verdict.waitOn })
+        }
+        continue
+      }
+      this.commit({
+        kind: 'conflict-checked',
+        id: current.id,
+        at: this.at(),
+        cause: 'reaction',
+        level: verdict.level,
+        waitOn: [],
+        ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
+      })
+      if (!(await this.startTask(current))) {
+        this.rollbackPlanned(current)
+        continue
+      }
+      // 放行了：挂起那条从事实里撤掉，别让它一直挂在主会话的上下文里。
+      this.forgetBlocked(current.id)
+      released.push(current.id)
+    }
+    return released
+  }
+
+  /**
+   * 拆探路窗口：探路子会话 idle 下来，只读钳子该松。
+   *
+   * 纯释放——除了「票还停在 planning」时补一条空声明，不写别的东西：交过声明
+   * 的票（phase 已是 planned）这里一个字节都不落。补声明的 plan/intent 照抄票上
+   * 的（没有就是空对象），因为 idle 只说明「这一轮说完了」，没说清方案是什么。
+   */
+  private closeProbe(ticket: TicketSnapshot, sessionId: string): void {
+    const probe = this.deps.probe
+    if (!probe) return
+    probe.release(ticket.workerId ?? sessionId)
+    if (ticket.phase !== 'planning') return
+    const current = this.log.get(ticket.id) ?? ticket
+    // 这中间可能已经被别人的 commit 转成 planned（比如子会话刚交了声明）：再查一次。
+    if (current.phase !== 'planning') return
+    this.commit({
+      kind: 'declared',
+      id: current.id,
+      at: this.at(),
+      cause: 'lifecycle',
+      plan: current.plan ?? {},
+      intent: current.intent ?? {},
+      workerId: current.workerId ?? sessionId,
+    })
+  }
+
+  /**
+   * 探路超时：票停在 planning 太久，说明这只探路子会话要么没交活要么没了。
+   *
+   * 不拦巡检——它只是巡检里的一小段。降级的语义是「声明拿不到了」：按整片 dir
+   * 当写进兜底（设计稿 §8），票转 planned 并标 degraded，窗口拆掉；执行轮照常
+   * 由主会话的动作推进。
+   */
+  private degradeProbe(ticket: TicketSnapshot, now: Date): boolean {
+    const since = minutesSince(ticket.epochStartedAt ?? ticket.statusSince, now)
+    if (since < this.config.probeTimeoutMinutes) return false
+    const probe = this.deps.probe
+    probe?.releaseTicket(ticket.id)
+    try {
+      this.commit({
+        kind: 'declared',
+        id: ticket.id,
+        at: this.at(),
+        cause: 'timer',
+        plan: ticket.plan ?? {},
+        intent: ticket.intent ?? {},
+        degraded: true,
+        ...(ticket.workerId ? { workerId: ticket.workerId } : {}),
+      })
+    } catch (error) {
+      // 降级写不进去只喊一声：巡检不能因为一张票停在 planning 就整拍失败。
+      this.warn(`探路降级没写成（票 ${ticket.id}）：${messageOf(error)}`)
+      return false
+    }
+    return true
+  }
+
   /**
    * worker 变 idle：票该进 waiting，但先看队列——有排队的话这一轮还没完，
    * 投过去继续干（设计 §4 第 5 行）。投递失败就留在 running，等下一条或巡检。
@@ -881,6 +1651,16 @@ export class TicketDesk {
     if (record.status !== 'idle' || !sessionId) return
     for (const ticket of this.ticketsOf(sessionId)) {
       if (ticket.status !== 'running') continue
+      // 探路窗口先拆，再投排队的话：探路子会话 idle 下来就说明它这一轮说完了，
+      // 后面投进来的活要能写盘。拆窗口本身不碰 status，票还在 planning 才补声明。
+      this.closeProbe(ticket, sessionId)
+      const current = this.log.get(ticket.id) ?? ticket
+      // 探路收工就是判定那一刻：这一轮不是「进 waiting」，而是判冲突然派执行轮。
+      // 判输了就排队（phase=blocked），status 一个字节都不动，人就停在 idle。
+      if (current.phase === 'planned') {
+        await this.admit(current)
+        continue
+      }
       if (pending(ticket.inputs).length > 0) {
         const delivered = await this.deliverQueued(ticket.id)
         if (delivered > 0) continue
@@ -920,6 +1700,15 @@ export class TicketDesk {
       this.busEmit('dispatcher/worker-gone', { id: ticket.id, workerId: ticket.workerId })
     }
   }
+}
+
+/** 排队名单有没有变：没变就不重复写日志（每次收工都会重扫一遍）。 */
+function sameWait(a: readonly ConflictWait[], b: readonly ConflictWait[]): boolean {
+  if (a.length !== b.length) return false
+  return a.every((wait, i) => {
+    const other = b[i]
+    return wait.ticketId === other.ticketId && wait.resources.join('\n') === other.resources.join('\n')
+  })
 }
 
 export function createDesk(deps: DeskDeps): TicketDesk {

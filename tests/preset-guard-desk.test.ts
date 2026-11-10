@@ -41,7 +41,7 @@ describe('开票：选档驳回', () => {
     expect(h.warnings.join('\n')).toContain('brief=拆票台')
   })
 
-  it('驳回不占名额：maxOpen 计数不变，下一张正常票照开', async () => {
+  it('驳回不占名额：执行名额计数不变，下一张正常票照开', async () => {
     const h = makeDesk({
       presets: fakePresets(PRESETS, 't1', TOOLS),
       classify: {
@@ -50,7 +50,7 @@ describe('开票：选档驳回', () => {
           return { preset: 't2', needsCommand: input.goal.includes('命令') }
         },
       },
-      config: { defaultPreset: 't1', maxOpen: 2, allowedPresets: ['t0', 't1', 't2'] },
+      config: { defaultPreset: 't1', maxExec: 2, allowedPresets: ['t0', 't1', 't2'] },
     })
 
     const first = await h.desk.open({ ...INTENT, goal: '读一遍这个文件' }, h.main)
@@ -59,7 +59,7 @@ describe('开票：选档驳回', () => {
     await expect(h.desk.open({ ...INTENT, requestId: 'req-2', goal: COMMAND_GOAL }, h.main)).rejects.toThrow(
       /没有 bash/,
     )
-    // maxOpen=2 时还能开出第二张真票，说明驳回那次没算进去。
+    // maxExec=2 时还能开出第二张真票，说明驳回那次没算进去。
     const second = await h.desk.open({ ...INTENT, requestId: 'req-3', goal: '再读一遍那个文件' }, h.main)
     expect(second.openCount).toBe(2)
     expect(h.backend.kinds().filter((kind) => kind === 'published')).toHaveLength(2)

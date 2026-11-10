@@ -33,6 +33,8 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     rejectOnMismatch: true,
     provider: 'spawn',
     maxDepth: 2,
+    maxExec: 8,
+    maxQueued: 4,
     maxOpen: 4,
     briefMaxColumns: 20,
     sweepMs: 0,

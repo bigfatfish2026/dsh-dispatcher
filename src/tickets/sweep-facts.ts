@@ -16,7 +16,7 @@
 import type { Clock } from './clock'
 import { realClock } from './clock'
 
-export type SweepFactKind = 'report' | 'no-report' | 'waiting' | 'running'
+export type SweepFactKind = 'report' | 'blocked' | 'no-report' | 'waiting' | 'running'
 
 /** 一条判断：哪张票、什么状态、从什么时候开始。 */
 export interface SweepFact {
@@ -27,6 +27,10 @@ export interface SweepFact {
   since: string
   /** 未读报告条数：`report` 类才有。 */
   unread?: number
+  /** 冲突挂起撞的对手与资源：`blocked` 类才有。 */
+  waitOn?: readonly { ticketId: string; resources: readonly string[] }[]
+  /** 人工挂起的理由：`blocked` 类才有，和 `waitOn` 二选一。 */
+  reason?: string
 }
 
 export interface SweepFacts {
@@ -41,7 +45,7 @@ export interface SweepFacts {
 }
 
 /** 每个 `kind` 的先后：同一张票上「有报告」比「还没收工」更该先看。 */
-const ORDER: readonly SweepFactKind[] = ['report', 'no-report', 'waiting', 'running']
+const ORDER: readonly SweepFactKind[] = ['report', 'blocked', 'no-report', 'waiting', 'running']
 
 /** 这段话的开头：说明来源，不冒充维护者。 */
 export const SWEEP_HEADER = 'dsh-dispatcher 巡检：以下是票台近况，不是维护者在说话。'
@@ -59,6 +63,21 @@ function lineOf(fact: SweepFact, now: Date): string {
   switch (fact.kind) {
     case 'report':
       return `${who}交了 ${fact.unread ?? 1} 条报告，还没读`
+    case 'blocked': {
+      // 排队挂起：说清撞谁、撞什么。主会话下一轮就能看到，不用等 60 分钟巡检。
+      const waits = fact.waitOn ?? []
+      if (waits.length > 0) {
+        const resources = [...new Set(waits.flatMap((wait) => wait.resources))].join('、')
+        const by = waits.map((wait) => wait.ticketId).join('、')
+        return resources
+          ? `票 ${fact.ticketId} 因 ${resources} 与 ${by} 冲突挂起，等它关闭后放行。`
+          : `票 ${fact.ticketId} 与 ${by} 冲突挂起，等它关闭后放行。`
+      }
+      const why = fact.reason?.trim()
+      return why
+        ? `票 ${fact.ticketId} 因「${why}」挂起，等人处理。`
+        : `票 ${fact.ticketId} 挂起，等人处理。`
+    }
     case 'no-report':
       return `${who}这一轮干完了，一份报告也没交`
     case 'waiting':

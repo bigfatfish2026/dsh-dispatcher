@@ -7,7 +7,7 @@
  */
 import { JsonlTicketStore } from './jsonl'
 import { applyEvent } from './reducer'
-import { kindOf } from './events'
+import { isKindedEvent, kindOf, legacyKindOf } from './events'
 import type { TicketBackend } from './backend'
 import type { TicketEventPublisher } from './bus'
 import type { EntryKind, TicketBroadcast, TicketEntry, TicketEvent, TicketSnapshot, TicketStatus } from './events'
@@ -26,13 +26,24 @@ export function newEntryId(now: Date = new Date()): string {
 }
 
 /**
- * 票的稳定顺序：createdAt 升序，同一时刻按 id 兜底。
+ * 票的稳定顺序：排队序号 `seq` 升序，没有 seq 的老票退回 createdAt 升序、再按
+ * id 兜底。
+ *
+ * seq 是开票时发的单调序号（见 `TicketLog.nextSeq`），同一毫秒开的三张票也分得
+ * 出先后——老实现只比 createdAt，同一毫秒就退化成按 id 字典序，FIFO 跟着抖。
+ *
+ * 两边都有 seq 才按 seq 比；只要有一边没有（2026-11-13 之前的老票，或手写的
+ * fixture）就按 createdAt / id 比，老票之间的相对位置一个字节都不变。实机上
+ * 老票全都早于 seq 上线，两种比法给出的先后一致。
  *
  * createdAt 是 `toISOString()` 出来的定长 ISO 串，裸 `<` 比字节和比时间同义；
  * 换掉 `localeCompare` 是因为它走 ICU，457 张票一次排序实测 49µs，
  * 巡检每 10 秒跑一轮不值当。
  */
-function byCreatedAt(a: TicketSnapshot, b: TicketSnapshot): number {
+function byQueueOrder(a: TicketSnapshot, b: TicketSnapshot): number {
+  if (typeof a.seq === 'number' && typeof b.seq === 'number' && a.seq !== b.seq) {
+    return a.seq - b.seq
+  }
   if (a.createdAt < b.createdAt) return -1
   if (a.createdAt > b.createdAt) return 1
   if (a.id < b.id) return -1
@@ -120,7 +131,37 @@ export class TicketLog {
 
   list(): TicketSnapshot[] {
     this.refresh()
-    return [...this.state.values()].sort(byCreatedAt)
+    return [...this.state.values()].sort(byQueueOrder)
+  }
+
+  /**
+   * 下一张票的排队序号：日志里现有最大 seq + 1。
+   *
+   * 在投影上现算，不另存游标：重启后第一次读日志就把老票的 seq 折回来了，接着
+   * 最大值往下数，绝不会从 1 重来。老票没有 seq，不参与取最大值。
+   */
+  private nextSeq(): number {
+    let max = 0
+    for (const ticket of this.state.values()) {
+      if (typeof ticket.seq === 'number' && ticket.seq > max) max = ticket.seq
+    }
+    return max + 1
+  }
+
+  /**
+   * 开票那一行补一个排队序号。
+   *
+   * 只认「建票行」：带 kind 的是 `published`，不带 kind 的是 `TicketLog.open()`
+   * 写的 2026-11-04 之前那种老形状（`goal` + `status: open`，线上形状一个字节
+   * 不改，seq 只是多一栏）。调用方已经给了 seq（重放、fixture）的原样保留；
+   * 别的事件一个字节都不动。
+   */
+  private withSeq(event: TicketEvent): TicketEvent {
+    if (typeof (event as { seq?: unknown }).seq === 'number') return event
+    if (isKindedEvent(event)) {
+      return event.kind === 'published' ? { ...event, seq: this.nextSeq() } : event
+    }
+    return legacyKindOf(event) === 'open' ? { ...event, seq: this.nextSeq() } : event
   }
 
   get(id: string): TicketSnapshot | undefined {
@@ -162,9 +203,12 @@ export class TicketLog {
    * 排队，这一层保持同步——`open()` / `update()` 这些方法今天就是同步返回新
    * 快照的，搬进来变成异步会把调用点全改一遍，P1 不许。
    */
-  commit(event: TicketEvent): void {
+  commit(raw: TicketEvent): void {
     // 先对齐一次投影：日志要是被外部改过，这一条必须折在最新状态上。
     this.refresh()
+    // 开票那一行在这里补排队序号：所有开票路径（`open()`、`publishTicket`）都
+    // 只经过这一个写入口，序号进事件、也就进了日志，重放拿得回来。
+    const event = this.withSeq(raw)
     // 原子追加归后端管（jsonl 是一次 O_APPEND 的 writeSync），这里只折刚写的
     // 这一行，不重读整份日志。
     //

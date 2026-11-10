@@ -72,7 +72,7 @@ describe('Config 缺省值', () => {
     expect(routerAllowList(given)).toEqual([...DEFAULT_ROUTER_TOOLS, ...EXTRAS])
   })
 
-  it('票面就是六个名字，旧名不在白名单里', () => {
+  it('票面就是七个名字（含动作账本），旧名不在白名单里', () => {
     const tickets = DEFAULT_ROUTER_TOOLS.filter((name) => name.startsWith('dispatch_'))
     expect(tickets).toEqual([
       'dispatch_open',
@@ -81,6 +81,7 @@ describe('Config 缺省值', () => {
       'dispatch_close',
       'dispatch_block',
       'dispatch_list',
+      'dispatch_log_action',
     ])
     expect(DEFAULT_ROUTER_TOOLS).not.toContain('subagent')
     expect(DEFAULT_ROUTER_TOOLS).not.toContain('progress_note')

@@ -189,7 +189,7 @@ describe('开票：发布与补偿', () => {
   })
 
   it('未收工的票到上限：拒绝开新的', async () => {
-    const h = makeDesk({ config: { defaultPreset: 't1', maxOpen: 1 } })
+    const h = makeDesk({ config: { defaultPreset: 't1', maxExec: 1 } })
     await h.desk.open(INTENT, h.main)
     await expect(
       h.desk.open({ ...INTENT, goal: '另一件事', requestId: 'req-2' }, h.main),

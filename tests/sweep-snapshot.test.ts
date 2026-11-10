@@ -128,6 +128,26 @@ describe('巡检事实走快照，不走消息', () => {
     expect(await sweepText(host)).toBeUndefined()
   })
 
+  it('挂起当场就进快照：主会话零消息，文案是中文一行', async () => {
+    const host = mountPlugin()
+    const id = await openTicket(host)
+
+    await host.call('dispatch_block', { id, reason: '等维护者定 go/no-go' })
+    await host.settled()
+
+    expect(host.agents[0]!.messages).toHaveLength(0)
+    const text = await sweepText(host)
+    expect(text).toContain(id)
+    expect(text).toContain('等维护者定 go/no-go')
+    expect(text).toContain('挂起')
+    // 主会话看到的是人话，不是内部枚举名。
+    expect(text).not.toContain('blocked')
+
+    await host.call('dispatch_close', { id, outcome: 'done' })
+    await host.settled()
+    expect(await sweepText(host)).toBeUndefined()
+  })
+
   it('两次装配逐字相同，解开又合上也不抖', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)

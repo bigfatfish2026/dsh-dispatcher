@@ -14,6 +14,9 @@ const TICKET_TOOLS = [
   'dispatch_block',
   'dispatch_list',
   'dispatch_report',
+  'dispatch_log_action',
+  'dispatch_declare',
+  'dispatch_touch',
 ]
 
 function lines(host: { config: { stateFile: string } }): Array<Record<string, unknown>> {
@@ -33,30 +36,49 @@ async function opened(host: ReturnType<typeof mountPlugin>, extra: Record<string
 }
 
 describe('工具面', () => {
-  it('票工具只剩七个，progress_note 还注册着但不在白名单里', () => {
+  it('票工具只剩十个（含动作账本、声明与收尾自报），progress_note 还注册着但不在白名单里', () => {
     const host = mountPlugin()
     const registered = host.names().filter((name) => name.startsWith('dispatch_'))
     expect(registered.sort()).toEqual([...TICKET_TOOLS].sort())
     expect(host.names()).toContain('progress_note')
-    for (const dead of ['dispatch_touch', 'dispatch_sweep', 'dispatch_reports']) {
+    for (const dead of ['dispatch_sweep', 'dispatch_reports']) {
       expect(host.names()).not.toContain(dead)
     }
   })
 
-  it('dispatch_open 只要 goal/brief/dir 三个参数，不暴露 workerId', () => {
+  it('dispatch_open 只要 goal/brief 两个必填参数，另加可选的 dir/origin/intent/probe，不暴露 workerId', () => {
     const schema = (mountPlugin().definition('dispatch_open').parameters ?? {}) as {
       properties?: Record<string, unknown>
       required?: string[]
     }
-    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['brief', 'dir', 'goal'])
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['brief', 'dir', 'goal', 'intent', 'origin', 'probe'])
     expect([...(schema.required ?? [])].sort()).toEqual(['brief', 'goal'])
   })
 
-  it('worker 禁表：六个 router 票工具加 progress_note，只留 report', () => {
+  it('worker 会话冒出来时三个票工具按 agent 层装：不走档位 allow 名单那一层', () => {
+    const host = mountPlugin()
+    const worker = host.makeAgent('subagent', 'session-worker-t2')
+    // 真宿主里档位插件会把 allow 名单压在全局工具面上；这里不跑它，只验接线：
+    // 三件装在哪一层，以及这一层不受 deny 名单牵制。
+    host.emit('agent/created', { agent: worker })
+
+    expect(worker.scoped.sort()).toEqual(['dispatch_declare', 'dispatch_report', 'dispatch_touch'])
+    for (const denied of host.denied) {
+      for (const name of worker.scoped) expect(denied).not.toContain(name)
+    }
+    // 主会话不装：它的工具面由 router 白名单管，多这三件就越界了。
+    const main = host.agents[0]!
+    host.emit('agent/created', { agent: main })
+    expect(main.scoped).toEqual([])
+  })
+
+  it('worker 禁表：六个 router 票工具加 progress_note，只留 report / declare / touch', () => {
     expect([...WORKER_FORBIDDEN_TOOLS].sort()).toEqual(
       ['dispatch_open', 'dispatch_send', 'dispatch_read', 'dispatch_close', 'dispatch_block', 'dispatch_list', 'progress_note'].sort(),
     )
     expect(WORKER_FORBIDDEN_TOOLS).not.toContain('dispatch_report')
+    expect(WORKER_FORBIDDEN_TOOLS).not.toContain('dispatch_declare')
+    expect(WORKER_FORBIDDEN_TOOLS).not.toContain('dispatch_touch')
   })
 })
 

@@ -65,7 +65,7 @@ describe('apply', () => {
     )
   })
 
-  // 子会话手上只留 dispatch_report：开票、发话、读票、关票、挂起、列表、打点都拿走，
+  // 子会话手上只留 dispatch_report / dispatch_declare：开票、发话、读票、关票、挂起、列表、打点都拿走，
   // 而且不因为 operator 改了 workerDenyTools 就放回去。
   it('keeps the ticket tools away from a worker whatever the config says', () => {
     const host = mount(
@@ -82,6 +82,7 @@ describe('apply', () => {
     for (const name of WORKER_FORBIDDEN_TOOLS) expect(host.denied[0]).toContain(name)
     expect(host.denied[0]).toContain('memory_save')
     expect(host.denied[0]).not.toContain('dispatch_report')
+    expect(host.denied[0]).not.toContain('dispatch_declare')
   })
 
   // 两个开关两条规矩：收窄主会话和拿走子会话的记忆写权限不是同一件事。
@@ -148,18 +149,21 @@ describe('apply', () => {
     expect(host.restricted[1]).not.toContain('ghost_tool')
   })
 
-  // 七个票工具的名字就是最终面：没有 touch / sweep / reports，也没有旧名。
-  it('registers exactly the seven ticket tools plus progress_note', () => {
+  // 十个票工具的名字就是最终面（七个 router 票 + 动作账本 + 声明 + 收尾自报）：没有 sweep / reports。
+  it('registers exactly the ten ticket tools plus progress_note', () => {
     const host = mount({ registered: [...FOREIGN_TOOLS] })
     const dispatch = host.names().filter((name) => name.startsWith('dispatch_')).sort()
     expect(dispatch).toEqual([
       'dispatch_block',
       'dispatch_close',
+      'dispatch_declare',
       'dispatch_list',
+      'dispatch_log_action',
       'dispatch_open',
       'dispatch_read',
       'dispatch_report',
       'dispatch_send',
+      'dispatch_touch',
     ])
   })
 })

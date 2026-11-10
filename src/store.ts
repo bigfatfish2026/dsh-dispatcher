@@ -8,6 +8,7 @@ import type {
   TicketEntry,
   TicketSnapshot,
   TicketStatus,
+  TouchReported,
 } from './store/events'
 
 // 后端在这一层之后：门面只认 TicketBackend 那四个原语（load / changed / append /
@@ -23,19 +24,32 @@ export { JsonlTicketStore } from './store/jsonl'
 export { SqliteTicketStore } from './store/sqlite'
 export type { TicketBackend, TicketBackendConfig, TicketBackendName } from './store/backend'
 export type {
+  ActionLogEntry,
+  ActionLogged,
   Actor,
   Blocked,
   Closed,
+  ConflictChecked,
+  ConflictWait,
+  Declared,
   Delivered,
   Ended,
+  Gated,
   Idled,
+  IntentDryRun,
+  IntentImpact,
+  IntentSpec,
+  IntentUndo,
   LegacyStatus,
   LegacyTicketEvent,
   LegacyTicketSnapshot,
+  PlanFile,
+  Planning,
   Published,
   PresetSource,
   Queued,
   Reported,
+  Reversibility,
   Resumed,
   Spawned,
   SpawnFailed,
@@ -43,8 +57,11 @@ export type {
   TicketEntry,
   TicketEvent,
   TicketEventKind,
+  TicketOrigin,
+  TicketPlan,
   TicketSnapshot,
   TicketStatus,
+  TouchReported,
 } from './store/events'
 export type { EntryKind } from './store/events'
 export { fold, foldEvents } from './store/reducer'

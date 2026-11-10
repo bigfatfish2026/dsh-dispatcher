@@ -64,6 +64,23 @@ const NEW_FIELDS = [
   'epoch',
   'epochReports',
   'epochStartedAt',
+  // 路线 3：origin / intent / actions。老日志上 origin 按 main 兜底、intent 缺席、
+  // actions 空数组。
+  'origin',
+  'intent',
+  // P0：探路方案与越界对账。老日志上一个都没有。
+  'plan',
+  // P2 后半：探路阶段位与超时降级。老日志上都没有。
+  'phase',
+  // P2 第三半：冲突排队与弱冲突提示。老日志上都没有。
+  'waitOn',
+  'weakWith',
+  'degraded',
+  'touched',
+  'outOfScope',
+  'actions',
+  // 2026-11-13：排队序号。老日志上的建票行没有它，折出来就是 undefined。
+  'seq',
 ] as const
 
 /** 读 fixture 的每一行，跳过空行——和 JsonlTicketStore.load() 一样的口径。 */
@@ -211,6 +228,19 @@ describe('等价性护栏 · 第二层：新字段在老日志上的默认值', 
       expect(ticket.requestId, `${where}.requestId`).toBeUndefined()
       expect(ticket.publisher, `${where}.publisher`).toBeUndefined()
       expect(ticket.epochStartedAt, `${where}.epochStartedAt`).toBeUndefined()
+      // 路线 3 的三栏：老票一律「人提的、没意图、没记账」。
+      expect(ticket.origin, `${where}.origin`).toBe('main')
+      expect(ticket.intent, `${where}.intent`).toBeUndefined()
+      expect(ticket.plan, `${where}.plan`).toBeUndefined()
+      expect(ticket.phase, `${where}.phase`).toBeUndefined()
+      expect(ticket.waitOn, `${where}.waitOn`).toBeUndefined()
+      expect(ticket.weakWith, `${where}.weakWith`).toBeUndefined()
+      expect(ticket.degraded, `${where}.degraded`).toBeUndefined()
+      expect(ticket.touched, `${where}.touched`).toBeUndefined()
+      expect(ticket.outOfScope, `${where}.outOfScope`).toBeUndefined()
+      expect(ticket.actions, `${where}.actions`).toEqual([])
+      // 排队序号是 2026-11-13 才写进建票行的；老票没有，排序退回 createdAt。
+      expect(ticket.seq, `${where}.seq`).toBeUndefined()
     }
   })
 

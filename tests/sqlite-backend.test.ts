@@ -42,6 +42,10 @@ function script(): TicketEvent[] {
       presetSource: 'fallback',
       requestId: 'req-1',
       dir: '/tmp/one',
+      // 排队序号本来是门面 `TicketLog.commit` 给建票行补的（见 withSeq）；这里
+      // 直接给好，让这条测试只钉「两个后端写进去的事件逐字节一致」，不跟序号
+      // 分配绑在一起。
+      seq: 1,
     },
     { kind: 'spawned', id, at: T(1), workerId: 'worker-1', provider: 'deepseek', preset: 't2' },
     { kind: 'queued', id, at: T(2), input: { id: 'e-1', text: '顺手把测试跑了' } },
@@ -51,8 +55,9 @@ function script(): TicketEvent[] {
     { kind: 'resumed', id, at: T(6), workerId: 'worker-1', epoch: 1 },
     { kind: 'ended', id, at: T(7), workerId: 'worker-1', stopReason: 'done', epochReports: 1 },
     { kind: 'closed', id, at: T(8), outcome: 'done', note: '交付', voidedInputs: 0 },
-    // 老格式的一行：没有 kind，回放路径必须一字不差。
-    { id: 't-sqlite-2', at: T(9), goal: '老票也要能迁', status: 'open' },
+    // 老格式的一行：没有 kind，回放路径必须一字不差。形状不变，只是多了 seq
+    // 这一栏（新代码开票也走这条老形状，seq 补在这儿）。
+    { id: 't-sqlite-2', at: T(9), goal: '老票也要能迁', status: 'open', seq: 2 },
     { id: 't-sqlite-2', at: T(10), owner: 'worker-old', status: 'running' },
     { id: 't-sqlite-2', at: T(11), status: 'done', note: '老票收工' },
   ]

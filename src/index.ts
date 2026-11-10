@@ -14,11 +14,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { Config, DEFAULT_HANDOFF_POLICY, legacySweepWarning, resolveSweepMs, routerAllowList } from './config'
 import type { Config as ConfigShape } from './config'
-import { createTicketBackend, resolveStateFile } from './store'
-import type { Actor, TicketStatus } from './store'
+import { createTicketBackend, resolveStateFile, truncateColumns } from './store'
+import type { Actor, ConflictWait, IntentSpec, TicketOrigin, TicketPlan, TicketStatus } from './store'
 import { createTicketEventPublisher } from './store/bus'
 import type { TicketEventsService, TicketEventPublisher } from './store/bus'
 import { TicketLog } from './store/log'
+import { ProbeWindows } from './tickets/probe'
+import { WorkerTicketTools } from './tickets/worker-tools'
 import { createDesk } from './tickets/desk'
 import type { Serialize, TicketView } from './tickets/desk'
 import { createLlmClassifier } from './tickets/classify'
@@ -146,6 +148,88 @@ function actorOf(exec: unknown): Actor {
   return { kind: 'main', sessionId }
 }
 
+function objectOf(value: unknown): Record<string, unknown> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+function stringsOf(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const items = value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+  return items.length > 0 ? items.map((item) => item.trim()) : undefined
+}
+
+/**
+ * 把工具参数里的 `intent` 收敛成协议形状：只留认识的栏，空值丢掉。
+ *
+ * 模型多塞的键不进日志；`reversibility` 给了非法值直接报错，不静默降级——
+ * 悄悄当成 `auto` 就等于把闸拆了。
+ */
+function intentSpecOf(raw: unknown): IntentSpec | undefined {
+  const value = objectOf(raw)
+  if (!value) return undefined
+  const spec: IntentSpec = {}
+  const impact = objectOf(value.impact)
+  if (impact) {
+    const paths = stringsOf(impact.paths)
+    const services = stringsOf(impact.services)
+    const remotes = stringsOf(impact.remotes)
+    if (paths || services || remotes) {
+      spec.impact = {
+        ...(paths ? { paths } : {}),
+        ...(services ? { services } : {}),
+        ...(remotes ? { remotes } : {}),
+      }
+    }
+  }
+  const writes = stringsOf(value.writes)
+  const reads = stringsOf(value.reads)
+  if (writes) spec.writes = writes
+  if (reads) spec.reads = reads
+  if (value.reversibility !== undefined) {
+    const reversibility = value.reversibility
+    if (reversibility !== 'auto' && reversibility !== 'manual' && reversibility !== 'none') {
+      throw new Error(`intent.reversibility 只能是 auto / manual / none，收到「${String(reversibility)}」`)
+    }
+    spec.reversibility = reversibility
+  }
+  const dryRun = objectOf(value.dryRun)
+  if (dryRun && typeof dryRun.ok === 'boolean') {
+    const detail = typeof dryRun.detail === 'string' && dryRun.detail.trim() ? dryRun.detail.trim() : undefined
+    spec.dryRun = { ok: dryRun.ok, ...(detail ? { detail } : {}) }
+  }
+  const undo = objectOf(value.undo)
+  if (undo && typeof undo.kind === 'string' && typeof undo.howto === 'string') {
+    const ref = typeof undo.ref === 'string' && undo.ref.trim() ? undo.ref.trim() : undefined
+    spec.undo = { kind: undo.kind.trim(), ...(ref ? { ref } : {}), howto: undo.howto.trim() }
+  }
+  return Object.keys(spec).length > 0 ? spec : undefined
+}
+
+/**
+ * 把工具参数里的 `plan` 收敛成协议形状：只留 summary / files，空值丢掉。
+ *
+ * 文件只到「路径 + 大概做什么」，行号和 diff 不进声明——那是执行轮的账本事。
+ */
+function planSpecOf(raw: unknown): TicketPlan | undefined {
+  const value = objectOf(raw)
+  if (!value) return undefined
+  const summary = typeof value.summary === 'string' ? value.summary.trim() : ''
+  const files = Array.isArray(value.files)
+    ? value.files
+        .map((item) => objectOf(item))
+        .filter((item): item is Record<string, unknown> => item !== undefined)
+        .map((item) => {
+          const path = typeof item.path === 'string' ? item.path.trim() : ''
+          const what = typeof item.what === 'string' ? item.what.trim() : ''
+          return { path, ...(what ? { what } : {}) }
+        })
+        .filter((item) => item.path)
+    : []
+  if (!summary && files.length === 0) return undefined
+  return { ...(summary ? { summary } : {}), ...(files.length ? { files } : {}) }
+}
+
 /** 调用编号当幂等键：同一次调用重放不许开第二张票。 */
 function requestIdOf(exec: unknown): string | undefined {
   const callId = (exec as { callId?: unknown } | undefined)?.callId
@@ -163,6 +247,74 @@ function ticketLine(view: TicketView): string {
     view.pendingReports ? '«' + view.pendingReports : '',
   ].join('')
   return `${marks ? marks + ' ' : ''}${view.id} ${view.status}：${view.brief}`
+}
+
+/**
+ * intent / plan 的文本行：模型看到的是 render 出来的文本，光有 JSON 字段不够，
+ * 所以两个工具都在票行下面各补一两行。太长就截，别把列表撑成报告。
+ */
+/** 越界项回显用：路径类资源脱掉前缀，和任务书里的路径写法对齐。 */
+function displayPath(uri: string): string {
+  return uri.replace(/^(?:file|dir|git|dev):/, '')
+}
+
+export function intentPlanLines(view: {
+  intent?: IntentSpec
+  plan?: TicketPlan
+  waitOn?: ConflictWait[]
+  weakWith?: string[]
+  outOfScope?: string[]
+}): string[] {
+  const lines: string[] = []
+  const plan = view.plan
+  if (plan) {
+    const files = (plan.files ?? []).map((file) => file.path).filter(Boolean)
+    const summary = plan.summary?.trim()
+    const tail = files.length ? `（${files.join('、')}）` : ''
+    lines.push(`    ${truncateColumns(`plan：${summary ?? ''}${tail}`, 200)}`)
+  }
+  const intent = view.intent
+  if (intent) {
+    const parts: string[] = []
+    const impact = intent.impact
+    for (const [label, list] of [
+      ['paths', impact?.paths],
+      ['services', impact?.services],
+      ['remotes', impact?.remotes],
+    ] as const) {
+      if (list && list.length) parts.push(`${label} ${list.join(' ')}`)
+    }
+    if (intent.writes?.length) parts.push(`writes ${intent.writes.length}`)
+    if (intent.reads?.length) parts.push(`reads ${intent.reads.length}`)
+    if (intent.reversibility) parts.push(`reversibility ${intent.reversibility}`)
+    if (intent.undo) parts.push(`undo ${intent.undo.kind}`)
+    if (parts.length) lines.push(`    ${truncateColumns(`intent：${parts.join(' · ')}`, 200)}`)
+  }
+  // 排队与弱冲突各占一行：模型看的是 render 出来的文本，光有 JSON 字段看不见
+  // 「为什么这张票没动」。
+  for (const wait of view.waitOn ?? []) {
+    const resources = wait.resources.length ? ` (${wait.resources.join(' ')})` : ''
+    lines.push(`    ${truncateColumns(`waiting on ${wait.ticketId}${resources}`, 200)}`)
+  }
+  if (view.weakWith?.length) {
+    lines.push(`    ${truncateColumns(`weak conflict：${view.weakWith.join('、')}（放行）`, 200)}`)
+  }
+  // 越界对账：最多列 5 个，多的只报还剩几处；没有越界就一个字都不加。
+  if (view.outOfScope?.length) {
+    const total = view.outOfScope.length
+    const paths = view.outOfScope.slice(0, 5).map(displayPath)
+    // 路径太长时宁可少列两个，也要把「等 N 处」留在行尾：截断砍掉的恰好是它。
+    let line = ''
+    for (let count = paths.length; count >= 1; count -= 1) {
+      const rest = total - count
+      const candidate = `越界：${paths.slice(0, count).join('、')}${rest > 0 ? ` 等 ${rest} 处` : ''}`
+      line = candidate
+      if (truncateColumns(candidate, 200) === candidate) break
+      line = truncateColumns(candidate, 200)
+    }
+    lines.push(`    ${line}`)
+  }
+  return lines
 }
 
 export function apply(ctx: Context, config: ConfigShape): void {
@@ -425,6 +577,27 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const legacySweep = legacySweepWarning(config)
   if (legacySweep) warn(`[dispatcher] ${legacySweep}`)
 
+  // ── 探路窗口：只给正在探路的那只子会话减工具 ──────────────────────
+  // 票在 planning 阶段 = 探路轮：它只出方案，写盘是执行轮的事。窗口认票靠快照
+  // 的 phase（事件折出来的），不靠 status。装窗口这一刀只能在 `agent/created`
+  // 里——宿主不给我们「派活前先改这只 agent」的别的口。
+  const probeWindows = new ProbeWindows({ warn })
+  // 三个票工具的兜底注册：定义在下面注册完之后才建（`workerTicketTools` 先留空），
+  // 但 `agent/created` 只在新会话冒出来时才触发，那时候它已经在了。
+  let workerTicketTools: WorkerTicketTools | undefined
+  ctx.on('agent/created', ({ agent }) => {
+    probeWindows.adopt(agent as never, (id) => log.get(id))
+    // worker 的工具面由档位定，但 declare / report / touch 三件按 agent 层再装
+    // 一道：档位的 allow 名单只滤镜全局工具面，`restrict` 动不了按 agent 注册
+    // 的这几件（见 `worker-tools.ts`）。认人跟 router 一个口径。
+    const origin = (agent as { session?: { header?: { origin?: string } } }).session?.header?.origin
+    if (isWorkerSession(origin)) workerTicketTools?.attach(agent as never)
+    return undefined
+  })
+  ctx.effect(() => () => {
+    probeWindows.releaseAll()
+  }, 'dsh-dispatcher.probe-windows')
+
   const desk = createDesk({
     log,
     serialize,
@@ -448,6 +621,14 @@ export function apply(ctx: Context, config: ConfigShape): void {
     classify: config.presetStrategy === 'static' ? undefined : classifier,
     routerPreset,
     notifier: createNotifier({ wake, facts: sweepFacts, quiet: false, warn }),
+    probe: probeWindows,
+    workerTools: {
+      attach: (workerId) =>
+        workerTicketTools?.attachById(workerId, () => {
+          const agents = agentsOf()
+          return agents ? { get: (id: string) => agents.get?.(id) } : undefined
+        }) ?? false,
+    },
     config: {
       defaultPreset: config.defaultPreset,
       presetStrategy: config.presetStrategy,
@@ -457,7 +638,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
       rejectOnMismatch: config.rejectOnMismatch,
       provider: config.provider,
       maxDepth: config.maxDepth,
-      maxOpen: config.maxOpen,
+      maxExec: config.maxExec,
+      maxQueued: config.maxQueued,
       briefMaxColumns: config.briefMaxColumns,
       waitingMinutes: config.waitingMinutes,
       blockedMinutes: config.blockedMinutes,
@@ -604,6 +786,72 @@ export function apply(ctx: Context, config: ConfigShape): void {
             'Required: the one line the little screen shows under the ticket title — a short phrase, not a sentence. At most briefMaxColumns character columns (34 by default), a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected.',
         },
         dir: { type: 'string', description: 'Working directory the 子会话 should use, if any.' },
+        probe: {
+          type: 'boolean',
+          description:
+            'Probe first: the 子会话 starts in a read-only window (no write / edit / bash) and hands back a plan before anything is touched. Default false — the old one-shot path.',
+        },
+        origin: {
+          type: 'string',
+          enum: ['main', 'ego'],
+          description:
+            'Who is opening this ticket. Omit for main (the person / main session). ego must pass "ego": a ticket it opens with intent.reversibility=none is refused.',
+        },
+        intent: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            'Optional reversal intent. Omitting the whole field keeps the old behaviour. writes / reads: resource URIs (file:/dir:/git:/svc:/port:/dev:) this ticket touches; impact: what the work touches; reversibility: auto / manual / none; dryRun: what the rehearsal showed; undo: how to take it back.',
+          properties: {
+            writes: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Resources this ticket will write, as URIs: file:/dir:/git:/svc:/port:/dev: (see the six prefixes). Optional.',
+            },
+            reads: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Same URI form: resources this ticket only reads. Optional.',
+            },
+            impact: {
+              type: 'object',
+              additionalProperties: false,
+              description: 'What the work touches. Paths, services and remotes, as concrete strings.',
+              properties: {
+                paths: { type: 'array', items: { type: 'string' }, description: 'File or directory paths.' },
+                services: { type: 'array', items: { type: 'string' }, description: 'systemd units or other services.' },
+                remotes: { type: 'array', items: { type: 'string' }, description: 'git remotes / hosts / accounts.' },
+              },
+            },
+            reversibility: {
+              type: 'string',
+              enum: ['auto', 'manual', 'none'],
+              description:
+                'auto = the side effect is confined and can be undone in one step; manual = a person has to follow undo.howto; none = cannot be taken back (restart, push, sent message).',
+            },
+            dryRun: {
+              type: 'object',
+              additionalProperties: false,
+              description: 'Result of a rehearsal (--dry-run, config dump, diff). ok=false downgrades the ticket to waiting.',
+              properties: {
+                ok: { type: 'boolean', required: true, description: 'Whether the rehearsal passed.' },
+                detail: { type: 'string', description: 'One line a person can read when ok=false.' },
+              },
+            },
+            undo: {
+              type: 'object',
+              additionalProperties: false,
+              description:
+                'How to undo it. howto must be a concrete command or a concrete path; generic lines like "revert it" are rejected.',
+              properties: {
+                kind: { type: 'string', required: true, description: 'file / git / service / message / config …' },
+                ref: { type: 'string', description: 'Backup path, commit sha, message id, unit name.' },
+                howto: { type: 'string', required: true, description: 'The exact command or path a person would run.' },
+              },
+            },
+          },
+        },
       },
       output: {
         schema: {
@@ -614,6 +862,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
             status: { type: 'string' },
             openCount: { type: 'number' },
             duplicate: { type: 'string' },
+            reason: { type: 'string' },
           },
         },
         render: (_args, value) => [
@@ -621,17 +870,25 @@ export function apply(ctx: Context, config: ConfigShape): void {
             type: 'text',
             text: value.duplicate
               ? `ticket ${value.id} already open (same request, ${value.openCount} open)`
-              : `ticket ${value.id} opened, 子会话 started (${value.openCount} open)`,
+              : value.reason
+                ? `ticket ${value.id} held in waiting, 子会话 not started: ${value.reason}`
+                : `ticket ${value.id} opened, 子会话 started (${value.openCount} open)`,
           },
         ],
       },
       async execute(args, exec) {
+        const raw = args as unknown as { origin?: unknown; intent?: unknown; probe?: unknown }
+        const intent = intentSpecOf(raw.intent)
         const receipt = await desk.open(
           {
             goal: args.goal,
             brief: args.brief,
             ...(args.dir ? { dir: args.dir } : {}),
+            // 不传 = 老路（fast path）：`probe` 只多一条 planning，别的行为一个字不变。
+            ...(raw.probe === true ? { probe: true } : {}),
             ...(requestIdOf(exec) ? { requestId: requestIdOf(exec) as string } : {}),
+            ...(raw.origin ? { origin: raw.origin as TicketOrigin } : {}),
+            ...(intent ? { intent } : {}),
           },
           actorOf(exec),
         )
@@ -640,6 +897,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           status: receipt.status,
           openCount: receipt.openCount,
           ...(receipt.duplicate ? { duplicate: receipt.duplicate } : {}),
+          ...(receipt.reason ? { reason: receipt.reason } : {}),
         }
       },
     }),
@@ -711,6 +969,54 @@ export function apply(ctx: Context, config: ConfigShape): void {
                   status: { type: 'string' },
                   goal: { type: 'string' },
                   pendingReports: { type: 'number' },
+                  intent: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      writes: { type: 'array', items: { type: 'string' } },
+                      reads: { type: 'array', items: { type: 'string' } },
+                      impact: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          paths: { type: 'array', items: { type: 'string' } },
+                          services: { type: 'array', items: { type: 'string' } },
+                          remotes: { type: 'array', items: { type: 'string' } },
+                        },
+                      },
+                      reversibility: { type: 'string', enum: ['auto', 'manual', 'none'] },
+                      dryRun: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: { ok: { type: 'boolean' }, detail: { type: 'string' } },
+                      },
+                      undo: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          kind: { type: 'string' },
+                          ref: { type: 'string' },
+                          howto: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                  plan: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      summary: { type: 'string' },
+                      files: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: { path: { type: 'string' }, what: { type: 'string' } },
+                        },
+                      },
+                    },
+                  },
+                  outOfScope: { type: 'array', items: { type: 'string' } },
                   reports: {
                     type: 'array',
                     items: {
@@ -738,7 +1044,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
             const body = (ticket.reports ?? []).map(
               (report) => `  #${report.n}${report.read ? ' (read)' : ''} ${report.text}`,
             )
-            return [head, ...body].join('\n')
+            // 同 dispatch_list：render 的值按 TicketView 读。
+            return [head, ...intentPlanLines(ticket as TicketView), ...body].join('\n')
           })
           return [{ type: 'text', text: blocks.join('\n') }]
         },
@@ -771,6 +1078,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
             status: ticket.status,
             goal: ticket.goal,
             pendingReports: ticket.pendingReports,
+            ...(ticket.intent ? { intent: ticket.intent } : {}),
+            ...(ticket.plan ? { plan: ticket.plan } : {}),
+            ...(ticket.outOfScope?.length ? { outOfScope: ticket.outOfScope } : {}),
             reports,
           }
         })
@@ -881,6 +1191,66 @@ export function apply(ctx: Context, config: ConfigShape): void {
                   preset: { type: 'string' },
                   pendingInputs: { type: 'number' },
                   pendingReports: { type: 'number' },
+                  waitOn: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        ticketId: { type: 'string' },
+                        resources: { type: 'array', items: { type: 'string' } },
+                      },
+                    },
+                  },
+                  weakWith: { type: 'array', items: { type: 'string' } },
+                  outOfScope: { type: 'array', items: { type: 'string' } },
+                  intent: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      writes: { type: 'array', items: { type: 'string' } },
+                      reads: { type: 'array', items: { type: 'string' } },
+                      impact: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          paths: { type: 'array', items: { type: 'string' } },
+                          services: { type: 'array', items: { type: 'string' } },
+                          remotes: { type: 'array', items: { type: 'string' } },
+                        },
+                      },
+                      reversibility: { type: 'string', enum: ['auto', 'manual', 'none'] },
+                      dryRun: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: { ok: { type: 'boolean' }, detail: { type: 'string' } },
+                      },
+                      undo: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          kind: { type: 'string' },
+                          ref: { type: 'string' },
+                          howto: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                  plan: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      summary: { type: 'string' },
+                      files: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: { path: { type: 'string' }, what: { type: 'string' } },
+                        },
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -893,7 +1263,15 @@ export function apply(ctx: Context, config: ConfigShape): void {
           return [
             {
               type: 'text',
-              text: [head, ...tickets.map((ticket) => `  ${ticketLine(ticket as TicketView)}`)].join('\n'),
+              text: [
+                head,
+                ...tickets.flatMap((ticket) => [
+                  `  ${ticketLine(ticket as TicketView)}`,
+                  // 值的真实形状是 TicketView（schema 推导出来的形状每栏都可选，
+                  // 跟 IntentSpec 的必填项对不上），和上面 ticketLine 同一个读法。
+                  ...intentPlanLines(ticket as TicketView),
+                ]),
+              ].join('\n'),
             },
           ]
         },
@@ -918,21 +1296,258 @@ export function apply(ctx: Context, config: ConfigShape): void {
             ...(view.preset ? { preset: view.preset } : {}),
             pendingInputs: view.pendingInputs,
             pendingReports: view.pendingReports,
+            ...(view.intent ? { intent: view.intent } : {}),
+            ...(view.plan ? { plan: view.plan } : {}),
+            ...(view.waitOn?.length ? { waitOn: view.waitOn } : {}),
+            ...(view.weakWith?.length ? { weakWith: view.weakWith } : {}),
+            ...(view.outOfScope?.length ? { outOfScope: view.outOfScope } : {}),
           })),
         }
       },
     }),
   )
 
-  // worker 侧唯一的票工具：追加一行，改不了任何状态。
+  // worker 侧的票工具之一：追加一行，改不了任何状态。
+  const reportTool = defineTool({
+    name: 'dispatch_report',
+    description:
+      'Hand a report back on the ticket you are working. Append-only: the ticket state stays where it is, the router decides. Call it once when this round is done, or to state a blocker and stop.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'Ticket id you were given.' },
+      text: { type: 'string', required: true, description: 'What you did, found, or are blocked on.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          epoch: { type: 'number' },
+          pendingReports: { type: 'number' },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: `report recorded on ticket ${value.id} (round ${value.epoch})` },
+      ],
+    },
+    async execute(args) {
+      const receipt = await desk.report(args.id, args.text, 'worker')
+      return { id: receipt.id, epoch: receipt.epoch, pendingReports: receipt.pendingReports }
+    },
+  })
+
+  ctx.tools.register(reportTool)
+
+  // 探路交活：票号不给，按调用者反查自己名下那张票，别人的票写不进来。
+  // 也不碰状态：declared 只是信息，转 planned 由主会话的动作写。
+  const declareTool = defineTool({
+    name: 'dispatch_declare',
+    description:
+      'Declare your plan and reversal intent on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot write on someone else\'s. Append-only, status untouched. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
+    parameters: {
+      plan: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'What you intend to do: a summary and the files you will touch (file level, no line numbers).',
+        properties: {
+          summary: { type: 'string', description: 'One paragraph on how this ticket gets done.' },
+          files: {
+            type: 'array',
+            description: 'Files you plan to change, each with roughly what happens to it.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                path: { type: 'string', required: true, description: 'Concrete file path.' },
+                what: { type: 'string', description: 'One line: what changes in this file.' },
+              },
+            },
+          },
+        },
+      },
+      intent: {
+        type: 'object',
+        additionalProperties: false,
+        description:
+          'Reversal intent, same shape as dispatch_open: writes, reads, impact, reversibility, dryRun, undo.',
+        properties: {
+          writes: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Resources this ticket will write, as URIs: file:/dir:/git:/svc:/port:/dev: (see the six prefixes). Optional.',
+          },
+          reads: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Same URI form: resources this ticket only reads. Optional.',
+          },
+          impact: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'What the work touches. Paths, services and remotes, as concrete strings.',
+            properties: {
+              paths: { type: 'array', items: { type: 'string' }, description: 'File or directory paths.' },
+              services: { type: 'array', items: { type: 'string' }, description: 'systemd units or other services.' },
+              remotes: { type: 'array', items: { type: 'string' }, description: 'git remotes / hosts / accounts.' },
+            },
+          },
+          reversibility: {
+            type: 'string',
+            enum: ['auto', 'manual', 'none'],
+            description:
+              'auto = the side effect is confined and can be undone in one step; manual = a person has to follow undo.howto; none = cannot be taken back (restart, push, sent message).',
+          },
+          dryRun: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Result of a rehearsal (--dry-run, config dump, diff).',
+            properties: {
+              ok: { type: 'boolean', required: true, description: 'Whether the rehearsal passed.' },
+              detail: { type: 'string', description: 'One line a person can read when ok=false.' },
+            },
+          },
+          undo: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'How to undo it. howto must be a concrete command or a concrete path.',
+            properties: {
+              kind: { type: 'string', required: true, description: 'file / git / service / message / config …' },
+              ref: { type: 'string', description: 'Backup path, commit sha, message id, unit name.' },
+              howto: { type: 'string', required: true, description: 'The exact command or path a person would run.' },
+            },
+          },
+        },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          status: { type: 'string' },
+          epoch: { type: 'number' },
+          files: { type: 'number' },
+          resources: { type: 'number' },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `declared on ticket ${value.id}: ${value.files} file(s), ${value.resources} resource(s)`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      // 票号不收：按调用者的会话 id 反查归属，desk 只许写到这张票上。
+      const raw = args as unknown as { plan?: unknown; intent?: unknown }
+      const receipt = await desk.declare(
+        actorOf(exec).sessionId,
+        planSpecOf(raw.plan) ?? {},
+        intentSpecOf(raw.intent) ?? {},
+      )
+      return {
+        id: receipt.id,
+        status: receipt.status,
+        epoch: receipt.epoch,
+        files: receipt.files,
+        resources: receipt.resources,
+      }
+    },
+  })
+
+  ctx.tools.register(declareTool)
+
+  // 收尾自报：执行子会话干完把实际动过的文件报上来，给关票那一刀对账。
+  // 归属跟 dispatch_declare 同一套反查，票号不由调用方给；不碰状态。
+  // t2（只读探路）和 t3（记忆）的白名单里没有它：探路轮不该报「动过什么」。
+  const touchTool = defineTool({
+    name: 'dispatch_touch',
+    description:
+      'Report the files you actually touched this round on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot report on someone else\'s. Append-only and status untouched; calls merge by path. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
+    parameters: {
+      paths: {
+        type: 'array',
+        required: true,
+        description:
+          'Absolute file paths you actually wrote or edited (a file: prefix is also accepted). Directories and other resource prefixes are passed through.',
+        items: { type: 'string' },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          paths: { type: 'number' },
+          total: { type: 'number' },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: `touched ${value.paths} path(s) on ticket ${value.id} (${value.total} total)`,
+        },
+      ],
+    },
+    async execute(args, exec) {
+      const raw = (args as { paths?: unknown }).paths
+      const listed = Array.isArray(raw)
+        ? raw.filter((path): path is string => typeof path === 'string' && path.trim() !== '')
+        : []
+      // 裸路径补 file: 前缀：normalizeResources 只认六种前缀，这里是最靠近
+      // 「人写路径」的那一层，别让子会话为了报个文件先学资源串语法。
+      const paths = listed.map((path) => {
+        const trimmed = path.trim()
+        return /^(?:file|dir|git|svc|port|dev):/i.test(trimmed) ? trimmed : `file:${trimmed}`
+      })
+      const receipt = await desk.touch(actorOf(exec).sessionId, paths)
+      return { id: receipt.id, paths: receipt.paths, total: receipt.total }
+    },
+  })
+
+  ctx.tools.register(touchTool)
+
+  // 三件装给 worker 用：`publish.ts` 派活回来按 workerId 伸一次手，`agent/created`
+  // 那一刀按 origin 再伸一次，谁先到谁装（`attach` 幂等）。
+  workerTicketTools = new WorkerTicketTools({ definitions: [reportTool, declareTool, touchTool], warn })
+  ctx.effect(() => () => workerTicketTools?.detachAll(), 'dsh-dispatcher.worker-tools')
+
+  // 动作账本：子会话（和主会话）每干完一步就记一条。附录用，不改状态。
+  // 不进 WORKER_FORBIDDEN_TOOLS：子会话必须能写账，否则「可撤回」只剩意图那一栏。
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_report',
+      name: 'dispatch_log_action',
       description:
-        'Hand a report back on the ticket you are working. Append-only: the ticket state stays where it is, the router decides. Call it once when this round is done, or to state a blocker and stop.',
+        'Append one action to a ticket ledger right after you actually did it. Log every step with a side effect: writing or editing a file, any git operation, changing config or profile, sending a message, restarting/stopping a service, running a command that changes state. Append-only: the ticket status is never touched. undo.howto must be a concrete command or a concrete path (for something that cannot be undone, write the compensating action) — generic lines like "revert it" are rejected.',
       parameters: {
-        id: { type: 'string', required: true, description: 'Ticket id you were given.' },
-        text: { type: 'string', required: true, description: 'What you did, found, or are blocked on.' },
+        id: { type: 'string', required: true, description: 'Ticket id this action belongs to.' },
+        summary: {
+          type: 'string',
+          required: true,
+          description: 'One line: what you actually did (file:line, commit, unit, message target). At most 300 characters.',
+        },
+        undo: {
+          type: 'object',
+          additionalProperties: false,
+          required: true,
+          description: 'How to take this step back.',
+          properties: {
+            kind: { type: 'string', required: true, description: 'file / git / service / message / config …' },
+            ref: { type: 'string', description: 'Backup path, commit sha, message id, unit name.' },
+            howto: {
+              type: 'string',
+              required: true,
+              description: 'The exact command or path a person would run, e.g. "cp /home/user/x.yml.bak /home/user/x.yml".',
+            },
+          },
+        },
+        step: {
+          type: 'integer',
+          description: 'Step number in this ticket. Omit to append after the last step.',
+        },
       },
       output: {
         schema: {
@@ -940,17 +1555,29 @@ export function apply(ctx: Context, config: ConfigShape): void {
           additionalProperties: false,
           properties: {
             id: { type: 'string' },
-            epoch: { type: 'number' },
-            pendingReports: { type: 'number' },
+            step: { type: 'number' },
+            actions: { type: 'number' },
+            at: { type: 'string' },
           },
         },
         render: (_args, value) => [
-          { type: 'text', text: `report recorded on ticket ${value.id} (round ${value.epoch})` },
+          { type: 'text', text: `action #${value.step} logged on ticket ${value.id} (${value.actions} on record)` },
         ],
       },
-      async execute(args) {
-        const receipt = await desk.report(args.id, args.text, 'worker')
-        return { id: receipt.id, epoch: receipt.epoch, pendingReports: receipt.pendingReports }
+      async execute(args, exec) {
+        // 谁在记：worker 的 session header 带 origin='subagent'；主会话没有。
+        const agent = (exec as { agent?: { session?: { header?: { origin?: string } } } }).agent
+        const actor = isWorkerSession(agent?.session?.header?.origin) ? 'worker' : 'main'
+        const receipt = await desk.logAction(
+          args.id,
+          {
+            summary: args.summary,
+            undo: args.undo,
+            ...(args.step !== undefined ? { step: args.step } : {}),
+          },
+          actor,
+        )
+        return { id: receipt.id, step: receipt.step, actions: receipt.actions, at: receipt.at }
       },
     }),
   )

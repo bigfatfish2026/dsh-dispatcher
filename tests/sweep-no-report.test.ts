@@ -21,6 +21,12 @@ function recorder() {
         noReport.push({ ticketId: input.ticketId, stopReason: input.stopReason })
         return true
       },
+      async blocked() {
+        return true
+      },
+      async resumed() {
+        return true
+      },
     },
   }
 }

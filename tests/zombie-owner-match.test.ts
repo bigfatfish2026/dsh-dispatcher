@@ -144,6 +144,12 @@ describe('worker 没了以后', () => {
         async reportArrived() {
           return true
         },
+        async blocked() {
+          return true
+        },
+        async resumed() {
+          return true
+        },
       },
     })
     const { id } = await h.desk.open(INTENT, h.main)

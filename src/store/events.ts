@@ -11,6 +11,85 @@
 
 export type TicketStatus = 'open' | 'running' | 'waiting' | 'blocked' | 'done' | 'dropped'
 
+/**
+ * 这张票是谁提的：人（主会话）还是 ego。老票没有这一栏，读起来一律当 `main`。
+ *
+ * 只用来喂分级闸：`ego` 不许自己提不可撤的动作。`worker` 不在这一栏里——
+ * 子会话不提票，它只干活、记账。
+ */
+export type TicketOrigin = 'main' | 'ego'
+
+/** 一步动作能不能撤：能自动对消 / 只能人工按指南撤 / 撤不回。 */
+export type Reversibility = 'auto' | 'manual' | 'none'
+
+/** 动作会碰什么。三栏都可空，但写清才有审计价值。 */
+export interface IntentImpact {
+  paths?: string[]
+  services?: string[]
+  remotes?: string[]
+}
+
+/** 预演结果：`ok:false` 是闸降级的依据，`detail` 是人看的理由。 */
+export interface IntentDryRun {
+  ok: boolean
+  detail?: string
+}
+
+/**
+ * 一条动作怎么撤。`howto` 必须是具体命令或具体路径——「回滚即可」这种空话
+ * 在 `tickets/revert.ts` 里被挡下；撤不回的动作写清「撤不回，替代动作是 …」。
+ */
+export interface IntentUndo {
+  kind: string
+  ref?: string
+  howto: string
+}
+
+/**
+ * 建票时带的意图栏（设计文档路线 3 的「意图」）。整栏可选：老调用、老票都没有
+ * 它，行为一个字节不变。
+ */
+export interface IntentSpec {
+  /**
+   * 影响面资源串（设计稿 §5 的六前缀：file / dir / git / svc / port / dev），
+   * 这张票会写的资源。老票、老调用没有这一栏，缺席就是空数组。
+   */
+  writes?: string[]
+  /** 同上，只读的资源。冲突判定拿两边 writes 求交，只读只降级成弱冲突。 */
+  reads?: string[]
+  impact?: IntentImpact
+  reversibility?: Reversibility
+  dryRun?: IntentDryRun
+  undo?: IntentUndo
+}
+
+/** 方案里的一条：动哪个文件、大概做什么。只到文件级，不含行号也不含 diff。 */
+export interface PlanFile {
+  path: string
+  what?: string
+}
+
+/**
+ * 探路子会话交的方案要点（设计稿 §4「plan 只到文件级」）。
+ *
+ * 整栏可选：老票、快路径开的票都没有它。`summary` 是一段话说清整张票怎么干；
+ * `files` 是「改哪几个文件、每个文件大概做什么」，给执行子会话和审计看。
+ */
+export interface TicketPlan {
+  summary?: string
+  files?: PlanFile[]
+}
+
+/** 账本里的一条动作：子会话（或主会话）自述「我做了什么、怎么撤」。 */
+export interface ActionLogEntry {
+  /** 票内序号，1 起；同一张票里递增，给人按顺序读。 */
+  step: number
+  actor: 'main' | 'worker'
+  summary: string
+  undo: IntentUndo
+  at: string
+}
+
 /** 谁下的命令。`sessionId` 是持久会话 id，desk 用它查活表拿到 Agent 本体。 */
 export interface Actor {
   kind: 'main' | 'worker'
@@ -24,6 +103,23 @@ export interface Actor {
 export type PresetSource = 'router' | 'llm' | 'fallback'
 
 export type EntryKind = 'input' | 'report'
+
+/**
+ * 探路阶段位：`planning` 探路子会话在跑，`planned` 方案与意图已落票，`blocked`
+ * 判定撞上了更强的票、排队等放行，`running` 执行轮。和 `status` 是两个维度
+ * ——status 只说「这活到哪一步了」，phase 只说「探路窗口开着没有 / 排队等谁」。
+ * 快路径（不探路）的票没有这一栏，老票也没有。
+ */
+export type TicketPhase = 'planning' | 'planned' | 'blocked' | 'running'
+
+/**
+ * 冲突排队：撞哪张票、撞的是哪几个归一化资源串（`dir:/a/b` 这种）。
+ * 只在 phase 是 `blocked` 时有内容，放行时整栏清空。
+ */
+export interface ConflictWait {
+  ticketId: string
+  resources: string[]
+}
 
 /**
  * One message waiting for a worker, or one report a worker handed back. Both
@@ -67,6 +163,19 @@ export interface TicketSnapshot {
    * with a `session-` prefix). 老票的归属依据；新票一律用 `workerId`。
    */
   ownerId?: string
+  /**
+   * 排队序号：开票时按「当前日志里最大的 seq + 1」发一个，单调递增，落在
+   * `published` 事件里，重放能原样折回来。排队放行的先后只认它——同一毫秒开
+   * 的两张票 createdAt 一模一样，靠它将 FIFO 定死（老代码在这儿退化成按 id
+   * 字典序）。
+   *
+   * 2026-11-13 之前的老票没有这一栏，读起来是 undefined；排序退回 createdAt
+   * 升序、再按 id 兜底，448 张线上票照常能读能排。
+   *
+   * 跟 `store/sqlite.ts` 里 `events.seq`（事件在日志里的行号）是两码事：那个
+   * 是日志序号，这个是票的排队序号。
+   */
+  seq?: number
   createdAt: string
   updatedAt: string
   /**
@@ -94,6 +203,47 @@ export interface TicketSnapshot {
   presetSource?: PresetSource
   /** 分类器给的一句理由，只给人看。 */
   presetWhy?: string
+  /** 提票人：`main`（人/主会话）或 `ego`。老票没有这一栏，读起来是 `main`。 */
+  origin?: TicketOrigin
+  /** 建票意图：影响面、可撤性、预演、撤回指南；老票没有就是 undefined。 */
+  intent?: IntentSpec
+  /** 探路子会话交的方案（`declared` 折进来）；没探路或老票就是 undefined。 */
+  plan?: TicketPlan
+  /**
+   * 探路阶段位（`planning` / `declared` / `conflict-checked` / `closed` 折出来）：
+   * 只说「探路窗口开着没有、在不在队里」，跟 status / statusSince / closedAt
+   * 各走各的。快路径和老票没有。
+   */
+  phase?: TicketPhase
+  /**
+   * 冲突排队：这张票在 `blocked` 时撞的是谁、撞了什么（`conflict-checked` 折
+   * 进来）。放行或重新声明时清空。老票、快路径的票没有这一栏。
+   */
+  waitOn?: ConflictWait[]
+  /**
+   * 弱冲突的票号：判定是「提示放行」，不排队，但票面上要看得见撞过谁。
+   * 同样由 `conflict-checked` 折进来。
+   */
+  weakWith?: string[]
+  /** 探路超时降级：声明没等到，按 dir 兜底算影响面（`declared.degraded` 折进来）。 */
+  degraded?: boolean
+  /**
+   * 执行子会话收尾自报的实际动过的路径（`touch-reported` 折进来，多条按首次出现
+   * 顺序合并去重：一轮里分几次报不该只剩最后一批）。不参与 status 判定，只给
+   * 越界对账看。
+   */
+  touched?: string[]
+  /**
+   * 收工时对上声明 writes 的越界项（`closed.outOfScope` 折进来）：hooks 在关票
+   * 那一刻算一次，之后一直留在票面上，dispatch_list / dispatch_read 各铺一行。
+   * 没有越界或没有声明就整个键不出现。
+   */
+  outOfScope?: string[]
+  /**
+   * 动作账本：`action-logged` 一条条折进来，append-only。和 `reports` 平行，
+   * 不参与 status / isTerminal 的判定——收工的票也还能补记最后几步。
+   */
+  actions: ActionLogEntry[]
   /** 建票那次调用的 requestId（= exec.callId），重复调用靠它认出自己。 */
   requestId?: string
   /**
@@ -130,6 +280,17 @@ export type LegacyTicketSnapshot = Omit<
   | 'epoch'
   | 'epochReports'
   | 'epochStartedAt'
+  | 'origin'
+  | 'intent'
+  | 'plan'
+  | 'phase'
+  | 'waitOn'
+  | 'weakWith'
+  | 'degraded'
+  | 'touched'
+  | 'outOfScope'
+  | 'actions'
+  | 'seq'
 >
 
 /** 每条落盘事件的公共栏。 */
@@ -146,6 +307,14 @@ export interface Published extends EventBase {
   kind: 'published'
   goal: string
   brief: string
+  /**
+   * 排队序号：`TicketLog.commit` 给每一行没带 seq 的 `published` 补一个「日志里
+   * 现有最大 seq + 1」，写进事件也就是写进日志——重启后重放能拿回同一个值，
+   * 新开的票接着最大值往下数，不会从 1 重来。
+   *
+   * 2026-11-13 之前的建票行没有这一栏；折叠出来的老票 seq 就是 undefined。
+   */
+  seq?: number
   dir?: string
   publisher: string
   preset: string
@@ -153,6 +322,13 @@ export interface Published extends EventBase {
   presetWhy?: string
   requestId: string
   device?: string
+  /**
+   * 谁提的：`main` / `ego`。老调用不写，折叠时按 `main` 兜底；写进事件是为了
+   * 审计能区分「人点的不可撤动作」和「ego 想点的」。
+   */
+  origin?: TicketOrigin
+  /** 建票意图；老调用不写，快照里就是 undefined。 */
+  intent?: IntentSpec
 }
 
 /** spawn 履约：workerId 是 spawn 返回的 childId，唯一归属依据。 */
@@ -224,6 +400,93 @@ export interface Blocked extends EventBase {
   reason: string
 }
 
+/**
+ * 分级闸把票降级到 waiting：`dryRun.ok === false` 的票不派活，先停在 waiting
+ * 等人看。和 `blocked` 分开：blocked 是「等外部条件」，gated 是「预演没过」。
+ */
+export interface Gated extends EventBase {
+  kind: 'gated'
+  reason: string
+}
+
+/**
+ * 动作账本一行：子会话（或主会话）每干完一步就 append 一条。只追加，不碰
+ * status / isTerminal——收工的票也还能补记。自述不可信，所以审计会抽查。
+ */
+export interface ActionLogged extends EventBase {
+  kind: 'action-logged'
+  /** 票号（和公共栏的 id 同一个值，写出来是为了读原始行时不靠上下文）。 */
+  ticketId: string
+  actor: 'main' | 'worker'
+  /** 票内序号，1 起；工具层不传时由票台按最后一条 +1。 */
+  step: number
+  summary: string
+  undo: IntentUndo
+}
+
+/**
+ * 探路开始：留一条痕，说明「这张票已经有人在看档了」。
+ *
+ * 刻意不动 status：状态仍只由主会话的 open / touch / close / sweep 四个动作写
+ * （设计稿 §7 的红线）。这条与 `declared` 一起只交代探路轮的起止。
+ */
+export interface Planning extends EventBase {
+  kind: 'planning'
+  /** 探路子会话的档名（只读档），审计用。 */
+  preset?: string
+  /** 探路那只子会话的 sessionId；回收探路轮时认它。 */
+  workerId?: string
+}
+
+/**
+ * 探路交活：方案与意图一次落齐。
+ *
+ * 设计稿 §6 的判定要读 intent.writes，而 published 是开票凭证、append-only 改
+ * 不了，所以「重写意图」只能是一条新事件。`plan` 与 `intent` 两份都在这里，
+ * reducer 折进快照时**不碰 status**——转 planned 由主会话的 action 写。
+ */
+export interface Declared extends EventBase {
+  kind: 'declared'
+  plan: TicketPlan
+  intent: IntentSpec
+  /** 交声明的那只探路子会话的 sessionId，审计用。 */
+  workerId?: string
+  /**
+   * 这条声明是不是超时降级补的：探路窗口到点没等到交活，按 `dir` 整片当写进
+   * 兜底。只给对账和巡检看，不额外开事件种类——一条消息一次写完。
+   */
+  degraded?: boolean
+}
+
+/**
+ * 执行子会话收尾自报：这一轮实际动过的路径，给越界对账看（设计稿 §12）。
+ *
+ * 和 `action-logged` 一样只追加信息、不碰 status；后报的覆盖前一次（对账只对
+ * 最近这一轮，攒着会混轮次）。
+ */
+export interface TouchReported extends EventBase {
+  kind: 'touch-reported'
+  actor: 'main' | 'worker'
+  paths: string[]
+}
+
+/**
+ * 冲突判定落票：探路票收工那一刻（以及排队票被放行时）判一次，结果写这里。
+ *
+ * strong → phase 折成 `blocked`，`waitOn` 记撞谁、撞什么；none / weak → phase
+ * 折成 `running`，`weak` 记一行提示票号。这个事件**不碰 status / statusSince /
+ * closedAt**：排队状态只记在 phase 上，status 仍由主会话的动作和既有生命周期
+ * 事件写（设计稿 §7 的红线）。
+ */
+export interface ConflictChecked extends EventBase {
+  kind: 'conflict-checked'
+  level: 'none' | 'weak' | 'strong'
+  /** strong 时撞上的票与资源；其余写空数组，读的时候不用再判有没有。 */
+  waitOn: ConflictWait[]
+  /** weak 时撞到的票号：只提示、不阻塞，放行照旧。 */
+  weak?: string[]
+}
+
 /** 终态唯一入口：done / dropped。落终态时排队未投递的 input 一并作废。 */
 export interface Closed extends EventBase {
   kind: 'closed'
@@ -231,6 +494,11 @@ export interface Closed extends EventBase {
   note?: string
   /** 被作废的排队 input 条数，只给人看。 */
   voidedInputs?: number
+  /**
+   * 关票那一刻对账出来的越界项：touched 里没有被声明 writes 覆盖的路径。只在这
+   * 一次关票时算，写进事件里跟着票一直留着；没有越界就不写这一栏。
+   */
+  outOfScope?: string[]
 }
 
 /** 老日志里的状态行；新代码不再写它，只是回放时认得出。 */
@@ -250,6 +518,12 @@ export interface LegacyTicketEvent {
   goal?: string
   brief?: string
   status?: TicketStatus
+  /**
+   * 排队序号。老行没有它，读起来是 undefined；新代码走 `TicketLog.open()` 时
+   * 仍写这种老形状的建票行（不改线上形状），seq 就补在这一栏里，见
+   * `TicketLog.withSeq`。折叠规则在 `reducer.ts` 的 `applyLegacy`。
+   */
+  seq?: number
   dir?: string
   note?: string
   owner?: string
@@ -270,6 +544,12 @@ export type TicketEvent =
   | Delivered
   | Reported
   | Blocked
+  | Gated
+  | ActionLogged
+  | Planning
+  | Declared
+  | TouchReported
+  | ConflictChecked
   | Closed
   | LegacyStatus
   | LegacyTicketEvent
@@ -342,6 +622,13 @@ export function legacyKindOf(event: LegacyTicketEvent): TicketEventKind {
  * 2026-11-04 的新事件刻意折回老的五个类别（published→open，其余状态类→status，
  * queued→input，reported→report，delivered→delivered）：广播形状不变，现有
  * 监听器一条分支都不用改。
+ *
+ * `action-logged` 归 `report`：它和报告一样只追加数组、不动状态，监听器按
+ * 「有新内容了」处理就够；`gated` 归 `status`，因为它确实换了状态。
+ *
+ * 2026-11-12 的三个探路 / 对账事件：`declared` 与 `touch-reported` 都只追加
+ * 内容、不动状态，归 `report`；`planning` 同理不动状态，但它标的是「探路轮
+ * 开始」这一件事，落到类别上只能是 `status`（广播类别只有五种，不为它扩）。
  */
 export function kindOf(event: TicketEvent): TicketEventKind {
   if (!isKindedEvent(event)) return legacyKindOf(event)
@@ -351,9 +638,17 @@ export function kindOf(event: TicketEvent): TicketEventKind {
     case 'queued':
       return 'input'
     case 'reported':
+    case 'action-logged':
+    case 'declared':
+    case 'touch-reported':
       return 'report'
+    // 判定改了 phase，广播类别按「票动了」归 status；它不碰 status 本身。
+    case 'conflict-checked':
+      return 'status'
     case 'delivered':
       return 'delivered'
+    case 'planning':
+      return 'status'
     default:
       return 'status'
   }

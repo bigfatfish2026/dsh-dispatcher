@@ -7,7 +7,7 @@
  * 只需要这一个纯函数，不用把整个票台拖起来。
  */
 import { briefOf, isOpen, minutesSince, pending } from '../store'
-import type { PresetSource, TicketSnapshot, TicketStatus } from '../store'
+import type { ConflictWait, IntentSpec, PresetSource, TicketPlan, TicketSnapshot, TicketStatus } from '../store'
 
 /** 工具面看到的票：只有该看的，没有内部字段。 */
 export interface TicketView {
@@ -28,6 +28,26 @@ export interface TicketView {
   epochReports: number
   pendingInputs: number
   pendingReports: number
+  /**
+   * 建票意图：影响面、可撤性、预演、撤回指南。老票没有这一栏，整个键不出现。
+   * 只给主会话的 dispatch_list / dispatch_read 读回，不进跨进程 JSON（那一层的
+   * 形状由 `readout.ts` 的 schema 版本管，加字段要单独升版）。
+   */
+  intent?: IntentSpec
+  /** 探路子会话交的方案；快路径或老票没有这一栏。 */
+  plan?: TicketPlan
+  /**
+   * 冲突排队：phase 是 `blocked` 时撞的是谁、撞了什么。dispatch_list 的 render
+   * 把它铺成 `waiting on t-xxxx (dir:/a/b)` 一行，主会话看得见为什么没派活。
+   */
+  waitOn?: ConflictWait[]
+  /** 弱冲突的票号：判定是提示放行，不阻塞，但票面上要看得到撞过谁。 */
+  weakWith?: string[]
+  /**
+   * 关票时对出来的越界项（归一化资源串）。dispatch_list / dispatch_read 各铺一行
+   * 「越界：…」；没有越界时整个键不出现，render 一个字都不多写。
+   */
+  outOfScope?: string[]
 }
 
 /** 换算需要的配置：全是 desk 与 CLI 共用的几个数，没有别的东西。 */
@@ -69,6 +89,11 @@ export function ticketView(ticket: TicketSnapshot, options: ViewOptions): Ticket
     epochReports: ticket.epochReports,
     pendingInputs: pending(ticket.inputs).length,
     pendingReports: pending(ticket.reports).length,
+    ...(ticket.intent ? { intent: ticket.intent } : {}),
+    ...(ticket.plan ? { plan: ticket.plan } : {}),
+    ...(ticket.waitOn?.length ? { waitOn: ticket.waitOn } : {}),
+    ...(ticket.weakWith?.length ? { weakWith: ticket.weakWith } : {}),
+    ...(ticket.outOfScope?.length ? { outOfScope: ticket.outOfScope } : {}),
   }
 }
 

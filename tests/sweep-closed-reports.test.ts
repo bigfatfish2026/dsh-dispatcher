@@ -28,6 +28,12 @@ function recorder() {
         calls.reportArrived.push(input.ticketId)
         return true
       },
+      async blocked() {
+        return true
+      },
+      async resumed() {
+        return true
+      },
     },
   }
 }

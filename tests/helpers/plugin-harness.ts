@@ -40,6 +40,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     rejectOnMismatch: true,
     provider: 'spawn',
     maxDepth: 2,
+    maxExec: 8,
+    maxQueued: 4,
+    // 已废弃：只为老 profile 还能加载，计数不看它。
     maxOpen: 8,
     briefMaxColumns: 34,
     // 定时器关掉：插件层测的是接线，不是拍子。schema 的最小值 500 只校验 yml，
@@ -78,12 +81,16 @@ export interface FakeAgent {
   session: { id: string; header: { origin?: string } }
   status?: string
   messages: string[]
+  /** 按 agent 层注册的工具名：`restrict` 的 allow/deny 名单碰不到这一摞。 */
+  scoped: string[]
   followup(message: { content?: Array<{ text?: string }> }): Promise<unknown>
   ctx: {
     effect(callback: () => () => void, label?: string): unknown
     on(event: string, listener: PromptAssemblyHook): () => void
     tools: {
       restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
+      /** 按 agent 层注册的工具（`WorkerTicketTools` 走这一口）。 */
+      register(definition: { name: string }): () => void
       get(name: string): unknown
       guard(guard: (execution: { name: string; arguments: unknown }) => string | undefined): () => void
     }
@@ -107,7 +114,7 @@ export interface FakePluginHost {
   hooks: PromptAssemblyHook[]
   /** 服务：`ctx.get(name)` 从这里拿。 */
   services: Record<string, unknown>
-  makeAgent(origin?: string): FakeAgent
+  makeAgent(origin?: string, id?: string): FakeAgent
   emit(name: string, payload: unknown): void
   /** 跑一遍 `ctx.effect` 收回来的 disposer（倒序），停掉插件起的定时器与订阅。 */
   dispose(): void
@@ -158,10 +165,12 @@ export function fakePluginHost(
 
   const makeAgent = (origin?: string, id?: string): FakeAgent => {
     const name = id ?? `session-${origin ?? 'main'}-${Math.random().toString(16).slice(2, 8)}`
+    const scoped: string[] = []
     const agent: FakeAgent = {
       id: name,
       session: { id: name, header: origin ? { origin } : {} },
       messages: [],
+      scoped,
       async followup(message) {
         const first = message.content?.[0]?.text
         if (first) agent.messages.push(first)
@@ -174,6 +183,17 @@ export function fakePluginHost(
           return () => {}
         },
         tools: {
+          register(definition: { name: string }) {
+            if (scoped.includes(definition.name)) {
+              throw new Error(`${definition.name} is already registered in this scope`)
+            }
+            scoped.push(definition.name)
+            changes.push(`scoped:${definition.name}`)
+            fireChange()
+            return () => {
+              agent.scoped = agent.scoped.filter((entry) => entry !== definition.name)
+            }
+          },
           restrict(filter) {
             const index = restricted.length
             changes.push('restrict')

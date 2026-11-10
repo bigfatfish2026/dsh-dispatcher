@@ -17,8 +17,9 @@ import type { TicketBackendName } from './store/backend'
  * it installs the filter and drops (with a warning) anything it cannot find.
  *
  * 2026-11-04 起主会话不再自己 spawn 子会话：`dispatch_open` 一步就把档、子会话、
- * 票都办了，所以 `subagent` / `subagent_fork` 从这里摘掉。票面就六个名字，
- * 报告正文走 dispatch_read，打点归子会话（progress_note 不在任何名单里）。
+ * 票都办了，所以 `subagent` / `subagent_fork` 从这里摘掉。票面七个名字（六个
+ * 票工具 + 动作账本），报告正文走 dispatch_read，打点归子会话（progress_note
+ * 不在任何名单里）。
  */
 export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   'dispatch_open',
@@ -27,6 +28,8 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   'dispatch_close',
   'dispatch_block',
   'dispatch_list',
+  // 动作账本：主会话自己动手时也要记，所以不在子会话专属里。
+  'dispatch_log_action',
   // 会话之间传话、收队列、看谁还活着：这三样和票无关，留在主会话。
   'send_message',
   'interrupt_agent',
@@ -154,7 +157,17 @@ export interface Config {
   provider: string
   /** 往任务的活里带一层子会话：1 = 子会话不能再派子会话。 */
   maxDepth: number
-  /** How many tickets may be open (not done, not dropped) at once. */
+  /**
+   * 同时干活的票上限：只数 `status === 'running'` 且 `phase !== 'blocked'` 的票。
+   * 名额拆成两个独立计数（另一个是 `maxQueued`），只数正在干的不算排队的。
+   */
+  maxExec: number
+  /** 同时排队的票上限：只数 `phase === 'blocked'` 的票（撞资源等放行）。 */
+  maxQueued: number
+  /**
+   * 已废弃：名额拆成 `maxExec` / `maxQueued`。老配置只给这一个键仍能加载，
+   * 计数按 `maxExec` 的默认值 8 处理，不再按这个值卡票。
+   */
   maxOpen: number
   /**
    * Longest ticket brief, in character columns (a 汉字 is 2). What the little
@@ -293,9 +306,21 @@ export const Config: Schema<Config> = Schema.object({
   maxDepth: Schema.natural()
     .default(2)
     .description('How deep a worker may itself delegate: 2 means a 子会话 cannot hand work to another 子会话.'),
+  maxExec: Schema.natural()
+    .default(8)
+    .description(
+      'Maximum tickets actually executing at once: status running and phase not blocked. Queued (phase blocked) tickets are counted separately by maxQueued.',
+    ),
+  maxQueued: Schema.natural()
+    .default(4)
+    .description(
+      'Maximum tickets waiting in the conflict queue (phase blocked). Counted separately from maxExec: only a full queue rejects a new ticket, never the sum of both.',
+    ),
   maxOpen: Schema.natural()
     .default(8)
-    .description('Maximum number of tickets that are not done or dropped.'),
+    .description(
+      'Deprecated: the quota is split into maxExec and maxQueued. Kept so older profiles still load; it no longer limits anything, execution falls back to the maxExec default of 8.',
+    ),
   // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（2026-11-02 小屏实测）。
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)

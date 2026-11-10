@@ -51,7 +51,10 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `dispatch_block` | 主会话 | 等人拍板时把票挂起，写清在等什么 |
 | `dispatch_close` | 主会话 | 收工：`done` 交活、`dropped` 不干了；排队消息作废、子会话停掉 |
 | `dispatch_report` | 子会话 | 交一份报告，只追加一行，改不了票的状态 |
+| `dispatch_log_action` | 主会话、子会话 | 记一步动作账：干了什么、怎么撤；只追加，不碰状态 |
 | `progress_note` | 手工 | 一行进度直接推到手机，不叫醒会话、不写盘 |
+
+开票时可以顺手带 `origin` 和 `intent`（会碰哪些路径/服务/远端、能不能撤、预演过没过），闸和审计的细节在 [docs/revert-ledger.md](docs/revert-ledger.md)。
 
 ### 怎么填 `goal` 和 `brief`
 

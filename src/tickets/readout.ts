@@ -187,7 +187,7 @@ export class TicketReadout {
     return ticket ? this.view(ticket, this.now()) : undefined
   }
 
-  /** 按 `selection` 选票，保持 store 的顺序（createdAt 升序，老的在前）。 */
+  /** 按 `selection` 选票，保持 store 的顺序（排队序号 seq 升序；老票按 createdAt，老的在前）。 */
   select(selection: ReadSelection = {}): TicketView[] {
     return this.pairs(selection, this.now()).map((pair) => pair.view)
   }

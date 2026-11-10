@@ -55,6 +55,8 @@ function blank(event: { id: string; at: string }): TicketSnapshot {
     note: undefined,
     owner: undefined,
     ownerId: undefined,
+    // 排队序号由 published 那一步填；老行和别的事件都没有它就一直是 undefined。
+    seq: undefined,
     createdAt: event.at,
     updatedAt: event.at,
     closedAt: undefined,
@@ -72,6 +74,20 @@ function blank(event: { id: string; at: string }): TicketSnapshot {
     epoch: 0,
     epochReports: 0,
     epochStartedAt: undefined,
+    // 老票没有 origin 这一栏：读起来一律当人提的。intent 缺席就是 undefined，
+    // 闸和审计都按「没有意图」处理。
+    origin: 'main',
+    intent: undefined,
+    plan: undefined,
+    // 阶段位默认没有：不探路的票（快路径）和老票都不该长出一个 phase。
+    phase: undefined,
+    // 排队与弱冲突同样默认没有：它们只在判定过之后才存在。
+    waitOn: undefined,
+    weakWith: undefined,
+    degraded: undefined,
+    touched: undefined,
+    outOfScope: undefined,
+    actions: [],
   }
 }
 
@@ -86,6 +102,8 @@ function applyLegacy(state: Map<string, TicketSnapshot>, event: LegacyTicketEven
       ...blank(event),
       goal: event.goal ?? '',
       brief: event.brief,
+      // 建票行自带的排队序号；2026-11-13 之前的老行没有，就是 undefined。
+      seq: event.seq,
       status: event.status ?? 'open',
       dir: event.dir,
       note: event.note,
@@ -158,6 +176,8 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
         goal: event.goal,
         brief: event.brief,
         dir: event.dir,
+        // 建票行自带的排队序号（`TicketLog.commit` 补的）；老行没有就是 undefined。
+        seq: event.seq,
         status: 'open',
         publisher: event.publisher,
         device: event.device,
@@ -165,6 +185,8 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
         presetSource: event.presetSource,
         presetWhy: event.presetWhy,
         requestId: event.requestId,
+        origin: event.origin ?? 'main',
+        intent: event.intent,
       })
       return
     }
@@ -293,6 +315,108 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
       )
       return
     }
+    case 'gated': {
+      // 预演没过：票停在 waiting 等人看，不派活。终态票不受影响。
+      if (!previous || isTerminal(previous.status)) return
+      state.set(
+        event.id,
+        advance(previous, event.at, {
+          status: 'waiting',
+          workerAlive: false,
+          note: event.reason,
+        }),
+      )
+      return
+    }
+    case 'action-logged': {
+      // append-only：只追加账本和 updatedAt，绝不碰 status / closedAt /
+      // statusSince。终态之后也允许补记（收尾最后一步常在这里）。
+      if (!previous) return
+      const entry = {
+        step: event.step,
+        actor: event.actor,
+        summary: event.summary,
+        undo: event.undo,
+        at: event.at,
+      }
+      state.set(event.id, {
+        ...previous,
+        updatedAt: event.at,
+        actions: [...previous.actions, entry],
+      })
+      return
+    }
+    case 'planning': {
+      // 探路开始：只留痕，不碰 status / statusSince——状态仍只由主会话的
+      // open / touch / close / sweep 四个动作写（设计稿 §7）。终态票不再探路。
+      // 只读窗口按 phase 认票，所以这里只改这一个键（外加 degraded 归零：
+      // 重新探路就不是降级态了）。
+      if (!previous || isTerminal(previous.status)) return
+      state.set(event.id, {
+        ...previous,
+        updatedAt: event.at,
+        phase: 'planning',
+        degraded: false,
+        // 新一轮探路一开始，上一轮的判定和排队就作废了。
+        waitOn: undefined,
+        weakWith: undefined,
+      })
+      return
+    }
+    case 'declared': {
+      // 探路交活：plan 与 intent 一起覆盖。published 是开票凭证、append-only
+      // 改不了，所以重写意图只能落在这条事件上。同样不碰 status。
+      if (!previous || isTerminal(previous.status)) return
+      state.set(event.id, {
+        ...previous,
+        updatedAt: event.at,
+        plan: event.plan,
+        intent: event.intent,
+        phase: 'planned',
+        degraded: event.degraded === true,
+        // 重新声明 = 影响面变了：旧的排队关系和弱冲突提示都不作数，等下一次判。
+        waitOn: undefined,
+        weakWith: undefined,
+      })
+      return
+    }
+    case 'conflict-checked': {
+      // 判定落票：只改 phase / waitOn / weakWith，绝不碰 status / statusSince /
+      // closedAt——排队状态记在 phase 上（设计稿 §7 的红线）。终态票不受影响。
+      if (!previous || isTerminal(previous.status)) return
+      const blocked = event.level === 'strong'
+      state.set(event.id, {
+        ...previous,
+        updatedAt: event.at,
+        phase: blocked ? 'blocked' : 'running',
+        // 拷一份：事件对象可能被调用方复用，快照不该跟着它变。
+        waitOn: blocked
+          ? event.waitOn.map((wait) => ({ ticketId: wait.ticketId, resources: [...wait.resources] }))
+          : undefined,
+        weakWith: event.weak?.length ? [...event.weak] : undefined,
+      })
+      return
+    }
+    case 'touch-reported': {
+      // 收尾对账：只记实际动过的路径，不碰 status / closedAt / statusSince。
+      // 终态之后也允许补记（收尾最后一步常在这里），和 action-logged 一致。
+      if (!previous) return
+      // 一轮里可能分几次报：按首次出现顺序合并去重，后报的不会把前一批冲掉。
+      const touched = [...(previous.touched ?? [])]
+      const seen = new Set(touched)
+      for (const path of event.paths) {
+        if (seen.has(path)) continue
+        seen.add(path)
+        touched.push(path)
+      }
+      state.set(event.id, {
+        ...previous,
+        updatedAt: event.at,
+        // 拷一份：事件对象可能被调用方复用，快照不该跟着它变。
+        touched,
+      })
+      return
+    }
     case 'closed': {
       if (!previous || isTerminal(previous.status)) return
       state.set(
@@ -302,7 +426,13 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
           // 票都收了就没有「人还在」这回事：终态上 workerAlive 一律 false。
           workerAlive: false,
           closedAt: event.at,
+          // 票收工了就没有「探路窗口该开着」这回事：阶段位清掉，degraded 留着
+          // 记账（那是这张票的履历，不是活着的状态）。排队关系跟着 phase 一起清。
+          phase: undefined,
+          waitOn: undefined,
           note: event.note ?? previous.note,
+          // 关票那一刻的越界对账结果：只在这条 closed 事件上有，跟着票一直留着。
+          outOfScope: event.outOfScope?.length ? [...event.outOfScope] : undefined,
           // 作废：未投递的排队 input 不再投、也不留复活借口。已投递的留着当历史。
           inputs: previous.inputs.filter((entry) => entry.delivered),
         }),

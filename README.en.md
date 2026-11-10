@@ -51,7 +51,10 @@ The full key list, defaults, and the event model live in [docs/internals.en.md](
 | `dispatch_block` | main session | Park a ticket while a person decides something |
 | `dispatch_close` | main session | Finish it: `done` when the work landed, `dropped` when abandoned; queued messages are voided and the fish is stopped |
 | `dispatch_report` | fish | Hand back a report; append-only, it cannot change status |
+| `dispatch_log_action` | main session, fish | Log one side-effecting step and how to undo it; append-only, never touches status |
 | `progress_note` | manual | Push one line of progress to the phone without waking a session or touching disk |
+
+`dispatch_open` also takes optional `origin` and `intent` (paths/services/remotes touched, reversibility, dry-run result). Gate and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
 
 ### Filling in `goal` and `brief`
 

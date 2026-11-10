@@ -56,10 +56,23 @@ export interface NoReportInput {
   stopReason: string
 }
 
+export interface BlockedInput {
+  ticketId: string
+  brief: string
+  /** 冲突挂起时撞的对手与资源；人工挂起时没有这一栏。 */
+  waitOn?: readonly { ticketId: string; resources: readonly string[] }[]
+  /** 人工挂起的理由（`dispatch_block`）。 */
+  reason?: string
+}
+
 export interface OwnerNotifier {
   reportArrived(input: ReportArrivedInput): Promise<boolean>
   idle(input: IdleInput): Promise<boolean>
   noReport(input: NoReportInput): Promise<boolean>
+  /** 票挂起那刻记一条巡检事实。只走 facts，不叫醒人。 */
+  blocked(input: BlockedInput): Promise<boolean>
+  /** 票放行或收工：把挂起那条摘掉，别一直挂着。 */
+  resumed(ticketId: string): Promise<boolean>
 }
 
 function messageOf(error: unknown): string {
@@ -148,6 +161,27 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
         },
         noReportText(input),
       )
+    },
+    blocked(input) {
+      // 这一条只进 facts：主会话每个回合自己会读到 runtime context。
+      // 没有事实表就什么都不做，绝不退回 followup——挂起不是「叫醒」的理由。
+      if (!deps.facts) return Promise.resolve(false)
+      const waitOn = input.waitOn?.length
+        ? input.waitOn.map((wait) => ({ ticketId: wait.ticketId, resources: [...wait.resources] }))
+        : undefined
+      deps.facts.remember({
+        ticketId: input.ticketId,
+        brief: input.brief,
+        kind: 'blocked',
+        since: clock.now().toISOString(),
+        ...(waitOn ? { waitOn } : {}),
+        ...(input.reason ? { reason: input.reason } : {}),
+      })
+      return Promise.resolve(true)
+    },
+    resumed(ticketId) {
+      deps.facts?.forget(ticketId, ['blocked'])
+      return Promise.resolve(true)
     },
   }
 }
