@@ -1,12 +1,17 @@
 # 可撤回账本
 
-路线 3 的落地说明：开票时说清「这一票会碰什么、能不能撤、撤不回来怎么退」，干活时每一步都记一笔，结票后 按天巡检缺口。目标是让 ego 和主会话派活前有得看、出事时有得查，而不是事后凭记忆。
+路线 3 的落地说明：说清「这一票会碰什么、能不能撤、撤不回来怎么退」，干活时每一步都记一笔，结票后按天巡检缺口。目标是让主会话派活前有得看、出事时有得查，而不是事后凭记忆。
+
+2026-11-14 起，intent 不再由主会话在 `dispatch_open` 里填，也没有 `probe` 开关：每张票一律先探路，子会话用 `dispatch_declare` 交 plan 和 intent，没交声明就不进执行轮。这个文件描述的字段形状不变，变的只是入口。
 
 设计原文在 `/home/user/fatfish/docs/dispatcher-revert-design.md`，这里是它在 dsh-dispatcher 里的样子。
 
-## published 上的两个新字段
+## 票上的 origin 与 intent
 
-两张票的日志格式只加可以缺省的字段：老票不写这两个键，读出来和以前一模一样。
+`origin` 由开票写进 `published`；`intent` 由探路子会话写进 `declared`。两个都是可以缺省的字段：老票不写这两个键，读出来和以前一模一样。
+
+- `origin`：`dispatch_open` 的 `origin` 参数，缺省按 `main`。
+- `intent`：`dispatch_declare` 的 `intent` 参数；2026-11-14 之前也从 `dispatch_open` 收，老日志里那些 `published.intent` 仍然照常折叠、照常可读，只是不再新写。
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -21,7 +26,7 @@
 | `intent.undo.ref` | `string` | 空 | 具体对象：备份文件、commit sha、群号 |
 | `intent.undo.howto` | `string` | 空 | 照着能敲的撤回命令或路径。`manual` 时必填 |
 
-`origin` 和 `intent` 只在显式传了的时候才写进事件行；reducer 在读的时候补默认值（`origin: 'main'`、`intent: undefined`、`actions: []`）。所以老日志、老调用方、老测试的行为都不变。
+两栏都只在显式给了的时候才写进事件行；reducer 在读的时候补默认值（`origin: 'main'`、`intent: undefined`、`actions: []`）。所以老日志、老调用方、老测试的行为都不变。
 
 ## action-logged：每一步一记
 
@@ -59,36 +64,23 @@ systemctl --user restart dsh-example
 
 不合格的样子：`回滚即可`、`把刚才那个东西恢复原样就行了`、`见文档`。
 
-## 分级闸：开票时就拦
+## 开票不再有闸
 
-`desk.open` 在写任何字节之前跑 `checkRevertIntent`，判定顺序固定：
+`dispatch_open` 以前在写任何字节之前跑 `checkRevertIntent`：ego 提 `none` 拒、`manual` 没合格指南拒、`dryRun.ok === false` 降级成 `waiting`。2026-11-14 起 open 不收 intent，这道闸随参数一起删了——没有 intent 可判，也没有「开票时降级」这条路。
 
-| 顺序 | 条件 | 结果 |
-|---|---|---|
-| 1 | 没有 `intent` | 放行（老调用方原样走） |
-| 2 | `origin` 不是 `main`/`ego` | 拒 `bad-origin` |
-| 3 | `reversibility` 不是三档之一 | 拒 `bad-reversibility` |
-| 4 | `reversibility === 'none'` 且 `origin === 'ego'` | 拒 `ego-irreversible` |
-| 5 | `reversibility === 'manual'` 且 undo 缺省/空白/空话 | 拒 `manual-without-undo` / `undo-vague` |
-| 6 | 传了 `undo` 但指南不合格 | 拒（同样走上面的校验） |
-| 7 | `dryRun.ok === false` | 降级：票建出来停在 `waiting`，不派子会话 |
-| 8 | 其余 | 放行 |
-
-拒是抛 `RevertRejectedError`，带人话理由；工具层把理由原样交给调用方，不是裸 `false`。降级不抛错：`published` 之后紧跟一条 `gated`，票的 `note` 记原因，回执里带 `reason`，等人拍板以后再 `dispatch_send` 或者关掉。
-
-`main` 提 `none` 是允许的——人知道自己要干什么，审计会把这些票单独列出来，不在这里拦。
+现在不可撤的动作是「记账 + 事后审计」：子会话在 `dispatch_declare` 里写 `reversibility: none`，主会话在 `dispatch_list` 的 `intent` 行里看见；结票后审计把 `none`、缺指南、指南是空话的票列出来。拦在开票前变成看在那里，不是不管。
 
 ## 谁怎么用
 
-**ego**：只能提 `auto` 或 `manual` 的活，`manual` 必须自带具体撤回指南。碰不可撤的东西（删库、强推、发不可撤回的消息）直接会被拒，别试。
+**ego**：开票只给 goal / brief，不填 intent。碰不可撤的东西（删库、强推、发不可撤回的消息）不再被开票闸当场拒，但会在票上留 `reversibility: none`、结票后被审计列出来——别指望它悄悄过去。
 
-**子会话**：动手前看票上的 `intent`，照着 `impact.paths` 别越界；每干完一步就 `dispatch_log_action` 记一笔，`undo.howto` 写下一步真能执行的退路。子会话不能改票的状态，记账不在此列。
+**子会话**：探路轮用 `dispatch_declare` 交 `plan` 和 `intent`，这是票上意图的唯一来源；动手前照着 `impact.paths` 别越界；每干完一步就 `dispatch_log_action` 记一笔，`undo.howto` 写下一步真能执行的退路。子会话不能改票的状态，记账不在此列。
 
-**主会话**：开票时把 `intent` 填全，尤其 `impact` 和 `reversibility`；预演不过就让它停在 `waiting`，先看原因再决定。收工前补上没收的账。
+**主会话**：不填 intent，也没有 `probe` 开关——所有票一律先探路。等子会话 declare；看 `dispatch_list` 里的 `intent` 行决定放不放行。收工前补上没收的账。
 
 ## 天生不可撤的动作
 
-这些 `reversibility` 只能写 `none`，ego 提了会被拒；主会话提了要心里有数：
+这些 `reversibility` 只能写 `none`，审计会把它们单独列出来：
 
 - 删库/删表、`git push --force` 覆盖远端历史；
 - 给外部发出去的消息（群里的话、邮件）——撤回窗口之外就是没有退路；

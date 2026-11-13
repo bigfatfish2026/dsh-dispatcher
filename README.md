@@ -34,7 +34,8 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
   name: dsh-dispatcher
   config:
     defaultPreset: t1            # 必填：档位注册表里有的名字
-    maxOpen: 4
+    maxExec: 4                   # 同时在干的票上限，默认 8
+    maxQueued: 2                 # 排队等放行的票上限，默认 4
     allowedPresets: [t0, t1, t2] # 选档校验用的镜像，空数组 = 不校验
 ```
 
@@ -54,7 +55,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `dispatch_log_action` | 主会话、子会话 | 记一步动作账：干了什么、怎么撤；只追加，不碰状态 |
 | `progress_note` | 手工 | 一行进度直接推到手机，不叫醒会话、不写盘 |
 
-开票时可以顺手带 `origin` 和 `intent`（会碰哪些路径/服务/远端、能不能撤、预演过没过），闸和审计的细节在 [docs/revert-ledger.md](docs/revert-ledger.md)。
+开票只带 `origin`（谁提的）。`intent`（会碰哪些路径/服务/远端、能不能撤、预演过没过）和 `probe` 都不收：每张票一律先探路，没有不探路的快路径。第一轮子会话只有只读工具（没有 `write` / `edit` / `bash`），读完代码自己用 `dispatch_declare` 交 `plan` 和 `intent`，票台才放行执行。形状和审计细节在 [docs/revert-ledger.md](docs/revert-ledger.md)。
 
 ### 怎么填 `goal` 和 `brief`
 
@@ -66,7 +67,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 ![一张票的完整生命周期（中文版）](docs/dispatcher-seq-lifecycle.zh.png)
 
-六个状态：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算还开着、占 `maxOpen`；`waiting` 只是子会话那个会话停了，不代表交活——交没交活看票里有没有报告。
+六个状态：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算还开着；`waiting` 只是子会话那个会话停了，不代表交活——交没交活看票里有没有报告。
 
 ## 注意事项
 
@@ -74,7 +75,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 
 **子会话不能写记忆。** 写记忆的七个工具从它的 schema 里摘掉了（`memory_save`、`memory_archive`、`memory_merge` 等），只许查。它也没有 `dispatch_block`——卡住就在报告里说清卡点，等人回话。
 
-**巡检只提醒，不改票。** 默认 10 秒一轮（`sweepMs`）；dsh-timer 在时这一拍由 `dispatcher.sweep.tick` 驱动，拿不到 schedule 服务就回落到自己的 10 秒定时器（注册被拒、tick 断流也一样回落，日志里会写明当前谁在驱动）：未读报告、干完没收工、干完没交报告都只是主会话眼前的一条近况，看过那张票就撤；只有 `blocked` 挂满 60 分钟会真叫你。不替谁收报告，也不把票改成 `done`。`maxOpen` 默认 8，`done` / `dropped` 不占名额，一直挂着的票会一直占着名额。
+**巡检只提醒，不改票。** 默认 10 秒一轮（`sweepMs`）；dsh-timer 在时这一拍由 `dispatcher.sweep.tick` 驱动，拿不到 schedule 服务就回落到自己的 10 秒定时器（注册被拒、tick 断流也一样回落，日志里会写明当前谁在驱动）：未读报告、干完没收工、干完没交报告都只是主会话眼前的一条近况，看过那张票就撤；只有 `blocked` 挂满 60 分钟会真叫你。不替谁收报告，也不把票改成 `done`。名额分两本：`maxExec` 默认 8（正在干），`maxQueued` 默认 4（排队等放行），谁满说谁，不合并成一个总数；`done` / `dropped` 不占名额，一直挂着的票会一直占着名额。
 
 **MCP 工具要逐条点名。** 主会话默认只保留白名单里的名字，MCP 工具既不在里面也不支持通配：想让它看见，就把每个注册名写进 `extraRouterTools`。写错一个名字只换一行告警，不会带崩白名单。
 

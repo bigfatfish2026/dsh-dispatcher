@@ -54,7 +54,7 @@ The full key list, defaults, and the event model live in [docs/internals.en.md](
 | `dispatch_log_action` | main session, fish | Log one side-effecting step and how to undo it; append-only, never touches status |
 | `progress_note` | manual | Push one line of progress to the phone without waking a session or touching disk |
 
-`dispatch_open` also takes optional `origin` and `intent` (paths/services/remotes touched, reversibility, dry-run result). Gate and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
+`dispatch_open` takes optional `origin` (who opened it). It takes neither `intent` (paths/services/remotes touched, reversibility, dry-run result) nor `probe`: every ticket starts with a probe round, and there is no path that skips it. The first 子会话 has no `write` / `edit` / `bash`, reads the code and hands `plan` plus `intent` back with `dispatch_declare` before the desk lets it run. Shape and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
 
 ### Filling in `goal` and `brief`
 

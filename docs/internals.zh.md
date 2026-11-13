@@ -9,7 +9,8 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
   name: dsh-dispatcher
   config:
     defaultPreset: t1
-    maxOpen: 3
+    maxExec: 8
+    maxQueued: 4
     allowedPresets: [t0, t1, t2, t3, t4, t5]
 ```
 
@@ -64,6 +65,8 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 ## 票的存储与事件
 
 一张票是一串 JSONL 事件，只追加、不改写。`status` 不是某条记录里的可变字段，而是某次 append 的 payload，读的时候由 `foldEvents` 折出最后那个值。事件种类：`published`、`spawned`、`spawn-failed`、`ended`、`idled`、`resumed`、`queued`、`delivered`、`reported`、`blocked`、`closed`，老日志的纯状态行按 `legacy/status` 读。读到半截行会跳过。
+
+建票那一行还带一个排队序号 `seq`（日志里现有最大值 + 1），排队与放行的先后只认它：同一毫秒开的两张票 createdAt 一模一样，按 id 兜底会让 FIFO 抖。2026-11-13 之前的票没有 `seq`，排序退回 `createdAt` 再按 id，老日志照常读。
 
 写入者只有 desk 一个（`serialize` 串行队列），所以同一张票不会两路同时改。`desk` 之上分三层：`store/`（后端、日志、折叠）、`tickets/`（票的语义：开、关、报告、投递、巡检）、`index.ts`（插件接线与工具）。
 

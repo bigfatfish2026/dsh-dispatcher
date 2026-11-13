@@ -9,7 +9,8 @@ The footnotes to the README: the full config table, the event model, sweeps, and
   name: dsh-dispatcher
   config:
     defaultPreset: t1
-    maxOpen: 3
+    maxExec: 8
+    maxQueued: 4
     allowedPresets: [t0, t1, t2, t3, t4, t5]
 ```
 
@@ -64,6 +65,8 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 ## Storage and events
 
 A ticket is a stream of JSONL events, append-only. `status` is not a mutable field on a record: it is the payload of whichever append carried it, and `foldEvents` folds the latest value on read. Event kinds: `published`, `spawned`, `spawn-failed`, `ended`, `idled`, `resumed`, `queued`, `delivered`, `reported`, `blocked`, `closed`; bare status lines from old logs are read as `legacy/status`. A half-written trailing line is skipped.
+
+The creation line also carries a queue sequence `seq` (current maximum in the log + 1). Queueing and release order read that number only: two tickets opened in the same millisecond share the same `createdAt`, and falling back to the id made FIFO wobble. Tickets from before 2026-11-13 have no `seq`; they still sort by `createdAt` and then id, so old logs read exactly as before.
 
 `desk` is the only writer, through one `serialize` queue, so no two callers mutate a ticket at once. Above it sit three layers: `store/` (backend, log, fold), `tickets/` (ticket semantics: open, close, reports, delivery, sweeps), and `index.ts` (plugin wiring and tools).
 
