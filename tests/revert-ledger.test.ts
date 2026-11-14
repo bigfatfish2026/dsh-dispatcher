@@ -12,7 +12,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { fold } from '../src/store/reducer'
 import type { ActionLogged, Published, TicketEvent } from '../src/store'
-import { auditClosedTickets, checkUndoHowto } from '../src/tickets/revert'
+import { auditClosedTickets, checkUndoHowto, normalizeUndo } from '../src/tickets/revert'
 import { INTENT, makeDesk } from './helpers/desk-harness'
 import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
 
@@ -209,6 +209,40 @@ describe('撤回指南校验：空话挡得住，具体命令放得过', () => {
       expect(check.ok, `howto=${howto}`).toBe(ok)
       if (!check.ok) expect(check.code, `howto=${howto}`).toBe(code)
     }
+  })
+})
+
+describe('撤回指南与审计的边界', () => {
+  it('非字符串 howto 当空；normalizeUndo 缺 kind / howto 不对都抛', () => {
+    expect(checkUndoHowto(42)).toMatchObject({ ok: false, code: 'empty' })
+    expect(() => normalizeUndo({ howto: GOOD_UNDO.howto })).toThrow(/kind 不能为空/)
+    expect(() => normalizeUndo({ kind: 'file', howto: 42 })).toThrow(/undo\.howto 是空的/)
+  })
+
+  it('审计窗口显式给 0 或负数直接拒', () => {
+    expect(() => auditClosedTickets([], { now: NOW, days: 0 })).toThrow(/正整数/)
+    expect(() => auditClosedTickets([], { now: NOW, days: -1 })).toThrow(/正整数/)
+  })
+
+  it('主会话的动作缺口用「主会话」称呼；没有 brief 就用 goal 摘要', () => {
+    const events: TicketEvent[] = [
+      published('t-h', iso(-DAY), { brief: undefined }),
+      { kind: 'closed', id: 't-h', at: iso(-DAY + 60_000), outcome: 'done' },
+      {
+        kind: 'action-logged',
+        id: 't-h',
+        at: iso(-DAY + 120_000),
+        ticketId: 't-h',
+        actor: 'main',
+        step: 1,
+        summary: '改了配置',
+        undo: { kind: 'file', howto: '回滚即可' },
+      },
+    ]
+    const report = auditClosedTickets([...fold(events).values()], { now: NOW, days: 1 })
+    expect(report.findings[0]).toMatchObject({ ticketId: 't-h', kind: 'vague-undo', actor: 'main' })
+    expect(report.text).toContain('主会话')
+    expect(report.text).toContain('目标 t-h')
   })
 })
 

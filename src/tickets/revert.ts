@@ -11,6 +11,7 @@
  * - 审计只读：按 `closedAt` 限最近 N 天扫 done 票，产出文本，一个字节都不写。
  */
 import type { ActionLogEntry, IntentUndo, TicketSnapshot } from '../store'
+import { REVERT_AUDIT_DAYS } from '../defaults'
 
 /** `undo.howto` 的最短字数（按字符数，不按列宽）：再短就说不清做什么。 */
 export const UNDO_HOWTO_MIN_CHARS = 12
@@ -132,7 +133,7 @@ export function normalizeUndo(input: unknown): IntentUndo {
 }
 
 /** 审计窗口默认几天：只扫最近这阵子结的票，800+ 张 done 不能全扫。 */
-export const REVERT_AUDIT_DAYS = 3
+// 审计窗口的默认值在 defaults.ts（可配置默认值唯一来源）。
 
 export type RevertAuditKind = 'missing-undo' | 'vague-undo' | 'irreversible'
 

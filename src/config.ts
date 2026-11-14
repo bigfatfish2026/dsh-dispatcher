@@ -1,9 +1,23 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
-import { BRIEF_MAX_COLUMNS } from './store'
-import { DEFAULT_STATE_FILE, DEFAULT_STORE_BACKEND, DEFAULT_STORE_FILE } from './defaults'
+import {
+  BLOCKED_MINUTES,
+  BRIEF_MAX_COLUMNS,
+  CLASSIFY_TIMEOUT_MS,
+  DEFAULT_STATE_FILE,
+  DEFAULT_STORE_BACKEND,
+  DEFAULT_STORE_FILE,
+  FRESH_MINUTES,
+  MAX_EXEC,
+  MAX_QUEUED,
+  REPEAT_WINDOW_MINUTES,
+  RUNNING_REMINDER_MINUTES,
+  SWEEP_MS,
+  WAITING_MINUTES,
+} from './defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from './tickets/preset-guard'
+import { TOOL_NAMES } from './protocol'
 import type { TicketBackendName } from './store/backend'
 
 // Tunable configuration must be a Schemastery Schema, never a plain object:
@@ -22,14 +36,14 @@ import type { TicketBackendName } from './store/backend'
  * 不在任何名单里）。
  */
 export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
-  'dispatch_open',
-  'dispatch_send',
-  'dispatch_read',
-  'dispatch_close',
-  'dispatch_block',
-  'dispatch_list',
+  TOOL_NAMES.open,
+  TOOL_NAMES.send,
+  TOOL_NAMES.read,
+  TOOL_NAMES.close,
+  TOOL_NAMES.block,
+  TOOL_NAMES.list,
   // 动作账本：主会话自己动手时也要记，所以不在子会话专属里。
-  'dispatch_log_action',
+  TOOL_NAMES.logAction,
   // 会话之间传话、收队列、看谁还活着：这三样和票无关，留在主会话。
   'send_message',
   'interrupt_agent',
@@ -281,7 +295,7 @@ export const Config: Schema<Config> = Schema.object({
       'Reasoning effort for the classification call. Empty means the model default. off/none is the right choice: the task is one short classification, thinking costs seconds per ticket.',
     ),
   classifyTimeoutMs: Schema.natural()
-    .default(8000)
+    .default(CLASSIFY_TIMEOUT_MS)
     .description(
       'How long one classification may take, in milliseconds. On timeout the classifier is abandoned and the ticket opens on defaultPreset: a slow model must never block dispatch_open.',
     ),
@@ -307,17 +321,17 @@ export const Config: Schema<Config> = Schema.object({
     .default(2)
     .description('How deep a worker may itself delegate: 2 means a 子会话 cannot hand work to another 子会话.'),
   maxExec: Schema.natural()
-    .default(8)
+    .default(MAX_EXEC)
     .description(
       'Maximum tickets actually executing at once: status running and phase not blocked. Queued (phase blocked) tickets are counted separately by maxQueued.',
     ),
   maxQueued: Schema.natural()
-    .default(4)
+    .default(MAX_QUEUED)
     .description(
       'Maximum tickets waiting in the conflict queue (phase blocked). Counted separately from maxExec: only a full queue rejects a new ticket, never the sum of both.',
     ),
   maxOpen: Schema.natural()
-    .default(8)
+    .default(MAX_EXEC)
     .description(
       'Deprecated: the quota is split into maxExec and maxQueued. Kept so older profiles still load; it no longer limits anything, execution falls back to the maxExec default of 8.',
     ),
@@ -329,7 +343,7 @@ export const Config: Schema<Config> = Schema.object({
     ),
   sweepMs: Schema.number()
     .min(500)
-    .default(10_000)
+    .default(SWEEP_MS)
     .description(
       'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. When dsh-timer is present the pass is driven by the dispatcher.sweep.tick event; otherwise this becomes the plugin\'s own interval. A beat is skipped when the previous pass is still queued, so a slow pass never stacks up. 0 disables maintenance entirely.',
     ),
@@ -339,16 +353,16 @@ export const Config: Schema<Config> = Schema.object({
       'Deprecated: use sweepMs. When set explicitly it wins (sweepMs = sweepMinutes × 60000) and the plugin logs a warning at load. 0 turns maintenance off. Leave it out to use sweepMs.',
     ),
   waitingMinutes: Schema.natural()
-    .default(20)
+    .default(WAITING_MINUTES)
     .description('A waiting ticket this old is reported once: the 子会话 stopped and nobody picked the work up.'),
   blockedMinutes: Schema.natural()
-    .default(60)
+    .default(BLOCKED_MINUTES)
     .description('A blocked ticket this old is reported once: someone forgot to decide.'),
   runningReminderMinutes: Schema.natural()
-    .default(0)
+    .default(RUNNING_REMINDER_MINUTES)
     .description('A running ticket is nudged this often; 0 (default) means never: a long job should not nag.'),
   freshMinutes: Schema.natural()
-    .default(2)
+    .default(FRESH_MINUTES)
     .description(
       'A worker that disappears (agent/disposed) is only counted as gone after this many minutes without a ticket write: a normal restart must not end tickets.',
     ),
@@ -361,7 +375,7 @@ export const Config: Schema<Config> = Schema.object({
     .default(true)
     .description('When a round ends with no report at all and no last message, report that once.'),
   repeatWindowMinutes: Schema.natural()
-    .default(10)
+    .default(REPEAT_WINDOW_MINUTES)
     .description(
       'Same session + same goal + same dir within this window (minutes) is treated as a duplicate open and returns the existing ticket instead of creating a second one.',
     ),

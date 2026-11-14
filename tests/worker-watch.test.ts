@@ -4,6 +4,7 @@
  * 纯单元：活表是假的，只记账「谁被 cancel 了、收到了哪句话」。真的票台接线在
  * `tests/watch-wiring.test.ts`，这里只管这一层自己的四条规矩。
  */
+import { WRITE_TOOLS } from '../src/protocol'
 import { describe, expect, it } from 'vitest'
 import { fakeClock } from '../src/tickets/clock'
 import {
@@ -11,7 +12,6 @@ import {
   closedText,
   createWorkerWatch,
   releasedText,
-  BLOCKED_WRITE_TOOLS,
 } from '../src/tickets/watch'
 import type { WatchAgent } from '../src/tickets/watch'
 
@@ -123,7 +123,7 @@ describe('blocked：真停手', () => {
     expect(text).not.toContain('{')
 
     // 硬拦：写类工具在票被挡住期间直接拒，看票/报活不受影响。
-    for (const tool of BLOCKED_WRITE_TOOLS) {
+    for (const tool of WRITE_TOOLS) {
       expect(watch.writeBlockReason('worker-1', tool)).toContain('t-1')
     }
     expect(watch.writeBlockReason('worker-1', 'dispatch_report')).toBeUndefined()

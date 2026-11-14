@@ -41,6 +41,7 @@ import { bindRouter } from './router'
 import type { RouterAgent, RouterBinding } from './router'
 import { isWorkerSession, noWaitReason } from './no-wait'
 import { sendProgress } from './progress'
+import { TICKET_STATUSES, TOOL_NAMES } from './protocol'
 
 export const name = 'dsh-dispatcher'
 export const inject = ['tools', 'agents']
@@ -61,16 +62,16 @@ export { DEFAULT_HANDOFF_POLICY as HANDOFF_POLICY }
  * `workerDenyTools` 不该顺手把这几样放回 worker 手里。
  */
 export const WORKER_FORBIDDEN_TOOLS = [
-  'dispatch_open',
-  'dispatch_send',
-  'dispatch_read',
-  'dispatch_close',
-  'dispatch_block',
-  'dispatch_list',
-  'progress_note',
+  TOOL_NAMES.open,
+  TOOL_NAMES.send,
+  TOOL_NAMES.read,
+  TOOL_NAMES.close,
+  TOOL_NAMES.block,
+  TOOL_NAMES.list,
+  TOOL_NAMES.progressNote,
 ]
 
-const STATUSES = ['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as const
+const STATUSES = TICKET_STATUSES
 
 /** 票事件队列的把手：测试等它排空，生产里没人用。 */
 export const ticketEventQueue = new WeakMap<object, () => Promise<void>>()
@@ -882,7 +883,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // ── 七个工具：router 六个 + worker 一个 ──────────────────────────
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_open',
+      name: TOOL_NAMES.open,
       description:
         'Open a ticket and hand the work to a 子会话 in one step: the desk picks the preset, starts the 子会话, writes the ticket and returns its id. Call it before answering the person — never spawn a subagent yourself. Every ticket starts with a read-only probe round: that first 子会话 has no write / edit / bash, reads the code and hands its plan and intent back with dispatch_declare before anything is touched. dispatch_open takes neither intent nor probe — there is no path that skips the probe round.',
       parameters: {
@@ -961,7 +962,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_send',
+      name: TOOL_NAMES.send,
       description:
         'Put one more message into an open ticket. The 子会话 receives it now if it is idle, otherwise on its next turn. A finished ticket refuses it: open a new one.',
       parameters: {
@@ -1000,7 +1001,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_read',
+      name: TOOL_NAMES.read,
       description:
         'Read reports the 子会话 left on tickets and mark them delivered. Omit id to read every open ticket with unread reports.',
       parameters: {
@@ -1149,7 +1150,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_close',
+      name: TOOL_NAMES.close,
       description:
         'Close a ticket for good: done when the work landed, dropped when it was abandoned. Messages still queued on it are voided and the 子会话 is stopped.',
       parameters: {
@@ -1197,7 +1198,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_block',
+      name: TOOL_NAMES.block,
       description:
         'Park an open ticket as blocked while a person decides something. Router only: a 子会话 reports the blocker instead and waits.',
       parameters: {
@@ -1221,7 +1222,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_list',
+      name: TOOL_NAMES.list,
       description:
         'List tickets, oldest first. A leading ! marks one that has gone quiet, »n counts messages the 子会话 has not received, «n counts reports you have not read.',
       parameters: {
@@ -1369,7 +1370,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   // worker 侧的票工具之一：追加一行，改不了任何状态。
   const reportTool = defineTool({
-    name: 'dispatch_report',
+    name: TOOL_NAMES.report,
     description:
       'Hand a report back on the ticket you are working. Append-only: the ticket state stays where it is, the router decides. Call it once when this round is done, or to state a blocker and stop.',
     parameters: {
@@ -1401,7 +1402,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 探路交活：票号不给，按调用者反查自己名下那张票，别人的票写不进来。
   // 也不碰状态：declared 只是信息，转 planned 由主会话的动作写。
   const declareTool = defineTool({
-    name: 'dispatch_declare',
+    name: TOOL_NAMES.declare,
     description:
       'Declare your plan and reversal intent on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot write on someone else\'s. Append-only, status untouched. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
     parameters: {
@@ -1525,7 +1526,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 归属跟 dispatch_declare 同一套反查，票号不由调用方给；不碰状态。
   // t2（只读探路）和 t3（记忆）的白名单里没有它：探路轮不该报「动过什么」。
   const touchTool = defineTool({
-    name: 'dispatch_touch',
+    name: TOOL_NAMES.touch,
     description:
       'Report the files you actually touched this round on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot report on someone else\'s. Append-only and status untouched; calls merge by path. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
     parameters: {
@@ -1581,7 +1582,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 不进 WORKER_FORBIDDEN_TOOLS：子会话必须能写账，否则「可撤回」只剩意图那一栏。
   ctx.tools.register(
     defineTool({
-      name: 'dispatch_log_action',
+      name: TOOL_NAMES.logAction,
       description:
         'Append one action to a ticket ledger right after you actually did it. Log every step with a side effect: writing or editing a file, any git operation, changing config or profile, sending a message, restarting/stopping a service, running a command that changes state. Append-only: the ticket status is never touched. undo.howto must be a concrete command or a concrete path (for something that cannot be undone, write the compensating action) — generic lines like "revert it" are rejected.',
       parameters: {
@@ -1650,7 +1651,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // dispatch_report），工具留着给手工调用和老的测试会话。
   ctx.tools.register(
     defineTool({
-      name: 'progress_note',
+      name: TOOL_NAMES.progressNote,
       description:
         'Push one line of progress straight to the person on QQ. No session is woken and nothing is written to disk.',
       parameters: {

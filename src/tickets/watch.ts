@@ -24,19 +24,15 @@
  * 这一层不读票、不写票：订阅从 `desk.commit` 喂进来，文案只用喂进来的那几栏。
  */
 import { randomUUID } from 'node:crypto'
+import { WRITE_TOOLS } from '../protocol'
 import type { Clock } from './clock'
 import { realClock } from './clock'
 
 /** 票台会推给子会话的四种事件。 */
 export type WatchKind = 'blocked' | 'released' | 'closed' | 'dropped'
 
-/**
- * 票被挡期间不许动的工具。
- *
- * `bash` 也算写：一条 `sed -i` 就改盘了，跟 `write` 没有区别。只读的看票工具
- * （`dispatch_report` / `dispatch_read` / `dispatch_declare`）不在名单里。
- */
-export const BLOCKED_WRITE_TOOLS: readonly string[] = ['bash', 'edit', 'write']
+// 票被挡期间不许动的工具在 protocol.ts：`bash` 也算写（一条 `sed -i` 就改盘），
+// 与探路窗口共用同一份名单；只读的看票工具不在里面。
 
 /** 冲突里的一行：谁挡的、撞在哪些资源上。 */
 export interface WatchWait {
@@ -323,7 +319,7 @@ export function createWorkerWatch(deps: WorkerWatchDeps): WorkerWatch {
 
     writeBlockReason(workerId, toolName) {
       if (!workerId) return undefined
-      if (!BLOCKED_WRITE_TOOLS.includes(toolName)) return undefined
+      if (!WRITE_TOOLS.includes(toolName as (typeof WRITE_TOOLS)[number])) return undefined
       const held = parked.get(workerId)
       if (!held) return undefined
       return `票 ${held.ticketId} 现在 blocked（${held.why}）：停手，别动 write，等放行。要说话就 dispatch_report 报一句。`

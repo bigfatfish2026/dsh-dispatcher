@@ -9,7 +9,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { fold } from '../src/store/reducer'
 import type { TicketEvent, TicketSnapshot } from '../src/store'
-import { PROBE_DENY, ProbeWindows } from '../src/tickets/probe'
+import { WRITE_TOOLS } from '../src/protocol'
+import { ProbeWindows } from '../src/tickets/probe'
 import type { ProbeAgent, ProbePort, ProbeRegistry } from '../src/tickets/probe'
 import { cleanTempDirs, mountPlugin, tempDir } from './helpers/plugin-harness'
 import type { FakeAgent, FakePluginHost } from './helpers/plugin-harness'
@@ -61,7 +62,7 @@ function spyAgent(agent: FakeAgent): SpyAgent {
 
 /** 这一次 restrict 是不是探路那一刀：write / edit / bash 三件全在 deny 里。 */
 function isProbeDeny(deny: string[]): boolean {
-  return PROBE_DENY.every((name) => deny.includes(name))
+  return WRITE_TOOLS.every((name) => deny.includes(name))
 }
 
 /**
@@ -161,7 +162,7 @@ describe('ProbeWindows：只读钳子本身', () => {
     windows.expect('t-1')
     windows.bind('t-1', 'worker-1')
     expect(windows.adopt(agent, () => ({ phase: 'planning' }))).toBe('worker-1')
-    expect(seen).toEqual([[...PROBE_DENY]])
+    expect(seen).toEqual([[...WRITE_TOOLS]])
     expect(windows.size).toBe(1)
     expect(windows.has('worker-1')).toBe(true)
     expect(windows.workerOf('t-1')).toBe('worker-1')
@@ -333,7 +334,7 @@ describe('接线：一律探路与 agent/created', () => {
     expect(ticket.status).toBe('running')
     expect(spies).toHaveLength(1)
     // 工具面被 restrict：写文件、改文件、跑命令三件都摘掉。
-    expect(spies[0]!.denies).toContainEqual([...PROBE_DENY])
+    expect(spies[0]!.denies).toContainEqual([...WRITE_TOOLS])
     expect(spies[0]!.released).toBe(0)
 
     // 第一轮发出去的就是探路任务书，不是执行任务书。
@@ -365,7 +366,7 @@ describe('接线：一律探路与 agent/created', () => {
 
     // 真正的探路子会话到了：装 deny 单，而且只装一次。
     host.emit('agent/created', { agent: spies[0]!.agent })
-    expect(spies[0]!.denies.filter(isProbeDeny)).toEqual([[...PROBE_DENY]])
+    expect(spies[0]!.denies.filter(isProbeDeny)).toEqual([[...WRITE_TOOLS]])
     host.emit('agent/created', { agent: spies[0]!.agent })
     expect(spies[0]!.denies.filter(isProbeDeny)).toHaveLength(1)
   })

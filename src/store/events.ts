@@ -9,7 +9,10 @@
  * 那条原封不动的老折叠路径读。两种行共存是常态，不是过渡期的脏数据。
  */
 
-export type TicketStatus = 'open' | 'running' | 'waiting' | 'blocked' | 'done' | 'dropped'
+import { TICKET_PHASES, TICKET_STATUSES } from '../protocol'
+
+/** 六种状态的字面值唯一定义在 `protocol.ts`，这里只取联合类型。 */
+export type TicketStatus = (typeof TICKET_STATUSES)[number]
 
 /**
  * 这张票是谁提的：人（主会话）还是 ego。老票没有这一栏，读起来一律当 `main`。
@@ -110,7 +113,8 @@ export type EntryKind = 'input' | 'report'
  * ——status 只说「这活到哪一步了」，phase 只说「探路窗口开着没有 / 排队等谁」。
  * 快路径（不探路）的票没有这一栏，老票也没有。
  */
-export type TicketPhase = 'planning' | 'planned' | 'blocked' | 'running'
+/** 探路/排队相位的字面值唯一定义在 `protocol.ts`，这里只取联合类型。 */
+export type TicketPhase = (typeof TICKET_PHASES)[number]
 
 /**
  * 冲突排队：撞哪张票、撞的是哪几个归一化资源串（`dir:/a/b` 这种）。

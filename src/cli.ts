@@ -21,7 +21,8 @@
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { DEFAULT_STATE_FILE, DEFAULT_STORE_BACKEND } from './defaults'
-import { BRIEF_MAX_COLUMNS, createTicketBackend } from './store'
+import { createTicketBackend } from './store'
+import { BLOCKED_MINUTES, BRIEF_MAX_COLUMNS, WAITING_MINUTES } from './defaults'
 import { TicketLog } from './store/log'
 import { TicketReadout, TICKETS_SCHEMA_VERSION } from './tickets/readout'
 import type { CliConfig } from './cli-config'
@@ -249,8 +250,8 @@ export function runTicketsCli(
   }
   const readout = new TicketReadout(log, {
     briefMaxColumns: BRIEF_MAX_COLUMNS,
-    waitingMinutes: 20,
-    blockedMinutes: 60,
+    waitingMinutes: WAITING_MINUTES,
+    blockedMinutes: BLOCKED_MINUTES,
     now: runOptions.now,
   })
   const selection = selectionOf(options)

@@ -1,5 +1,6 @@
 import { isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
+import { BRIEF_MAX_COLUMNS } from './defaults'
 import { TicketLog } from './store/log'
 import type { TicketBackend } from './store/backend'
 import type {
@@ -67,19 +68,9 @@ export type {
 export type { EntryKind } from './store/events'
 export { fold, foldEvents } from './store/reducer'
 
-/**
- * Longest brief, measured in character columns: a CJK character is 2 columns, a
- * half-width one is 1. 34 columns = 17 汉字, which is what fits on the little
- * screen's second line.
- *
- * 依据 2026-11-02 小屏实测：第二行 10px 字号、可用宽 172px，能放 17 个汉字
- * 或 28 个 ASCII 字符。汉字更宽，所以上限按汉字钉死在 17×2=34 列；纯 ASCII 的
- * brief 会在 28 列左右就自然结束，不会顶到 34。
- *
- * Adjust it here only — or set `briefMaxColumns` in cordis.yml, whose schema
- * default points at this constant, so the two can never drift apart.
- */
-export const BRIEF_MAX_COLUMNS = 34
+// brief 宽度的默认值在 `defaults.ts`（可配置默认值的唯一来源）：34 列 = 17 个
+// 汉字，依据 2026-11-02 小屏实测（第二行 10px 字号、可用宽 172px）。这里只 import
+// 给 truncateColumns / deriveBrief 的默认参数用，不再另开一份导出。
 
 /** The ellipsis is wide (U+2026), so it costs 2 columns of the budget. */
 const ELLIPSIS = '…'

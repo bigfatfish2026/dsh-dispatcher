@@ -31,6 +31,21 @@ import { byQueueOrder, newEntryId, newTicketId } from '../store/log'
 import type { TicketLog } from '../store/log'
 import type { Clock } from './clock'
 import { realClock } from './clock'
+import {
+  BLOCKED_MINUTES,
+  BRIEF_MAX_COLUMNS,
+  CLASSIFY_TIMEOUT_MS,
+  FRESH_MINUTES,
+  MAX_EXEC,
+  MAX_QUEUED,
+  PROBE_TIMEOUT_MINUTES,
+  REPEAT_WINDOW_MINUTES,
+  REVERT_AUDIT_DAYS,
+  REVERT_AUDIT_MS,
+  RUNNING_REMINDER_MINUTES,
+  SWEEP_MS,
+  WAITING_MINUTES,
+} from '../defaults'
 import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
@@ -43,7 +58,7 @@ import type { WorkerToolPort } from './worker-tools'
 import type { Classifier, PresetCatalog, PresetDecision, TicketIntent, TicketReceipt } from './publish'
 import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from './preset-guard'
 import type { PresetRejection } from './preset-guard'
-import { auditClosedTickets, normalizeUndo, REVERT_AUDIT_DAYS } from './revert'
+import { auditClosedTickets, normalizeUndo } from './revert'
 import type { RevertAuditReport } from './revert'
 import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
 import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
@@ -120,26 +135,26 @@ export interface DeskConfig {
 
 export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   presetStrategy: 'llm',
-  classifyTimeoutMs: 8000,
+  classifyTimeoutMs: CLASSIFY_TIMEOUT_MS,
   allowedPresets: [],
   commandKeywords: DEFAULT_COMMAND_KEYWORDS,
   rejectOnMismatch: true,
   provider: 'spawn',
   maxDepth: 2,
-  maxExec: 8,
-  maxQueued: 4,
-  briefMaxColumns: 34,
-  waitingMinutes: 20,
-  blockedMinutes: 60,
-  runningReminderMinutes: 0,
-  sweepMs: 10_000,
-  freshMinutes: 2,
+  maxExec: MAX_EXEC,
+  maxQueued: MAX_QUEUED,
+  briefMaxColumns: BRIEF_MAX_COLUMNS,
+  waitingMinutes: WAITING_MINUTES,
+  blockedMinutes: BLOCKED_MINUTES,
+  runningReminderMinutes: RUNNING_REMINDER_MINUTES,
+  sweepMs: SWEEP_MS,
+  freshMinutes: FRESH_MINUTES,
   autoReport: true,
   noReportSignal: true,
-  repeatWindowMinutes: 10,
+  repeatWindowMinutes: REPEAT_WINDOW_MINUTES,
   revertAuditDays: REVERT_AUDIT_DAYS,
-  revertAuditMs: 60 * 60 * 1000,
-  probeTimeoutMinutes: 2,
+  revertAuditMs: REVERT_AUDIT_MS,
+  probeTimeoutMinutes: PROBE_TIMEOUT_MINUTES,
 }
 
 export function deskConfig(partial: Partial<DeskConfig> & { defaultPreset: string }): DeskConfig {

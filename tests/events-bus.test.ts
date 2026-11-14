@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { TICKET_EVENT_DEFS, TICKET_EVENT_NAMES, ticketEventName } from '../src/store/bus'
+import { TICKET_EVENT_DEFS, createTicketEventPublisher, ticketEventName } from '../src/store/bus'
+import { TICKET_EVENT_NAMES } from '../src/protocol'
 import { SqliteTicketStore } from '../src/store'
 import type { TicketEvent } from '../src/store'
 import { TicketLog } from '../src/store/log'
@@ -146,6 +147,46 @@ describe('事件名映射', () => {
     expect(ticketEventName({ id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent)).toBe(
       'dispatcher.ticket.legacy',
     )
+    // 有 kind 但不在表里（新版本写的、老插件回放）：同样归 legacy。
+    expect(ticketEventName({ kind: 'future-thing', id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent)).toBe(
+      'dispatcher.ticket.legacy',
+    )
+  })
+})
+
+describe('发布器退路', () => {
+  it('注册抛错但注册表里已有：继续用；publish 没给 seq 就抛，不假装落库', () => {
+    const events = {
+      defineEvent(): unknown {
+        throw new Error('registry frozen')
+      },
+      registry: { get: () => ({ name: 'already-there' }) },
+      publish: () => ({}),
+    }
+    const warns: string[] = []
+    const publisher = createTicketEventPublisher(events, (message) => warns.push(message))!
+    expect(publisher).toBeDefined()
+    expect(warns).toEqual([])
+    expect(() =>
+      publisher.publish({ kind: 'queued', id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent),
+    ).toThrow(/没给 dispatcher\.ticket\.queued 返回 seq/)
+  })
+
+  it('注册抛错且注册表里也没有：退回直写并 warn 一次', () => {
+    const errors: string[] = []
+    const publisher = createTicketEventPublisher(
+      {
+        defineEvent(): unknown {
+          throw new Error('registry frozen')
+        },
+        registry: { get: () => undefined },
+        publish: () => ({ seq: 1 }),
+      },
+      (message) => errors.push(message),
+    )
+    expect(publisher).toBeUndefined()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('退回直写')
   })
 })
 

@@ -8,7 +8,10 @@
  * 事件名按现有 `kind` 一一对应，前缀统一 `dispatcher.ticket.`。老日志里没有
  * `kind` 的行回放时不会重新 publish；真有人再写一条，归到 `.legacy`。
  */
+import { TICKET_EVENT_NAMES } from '../protocol'
 import type { TicketEvent } from './events'
+
+/** 事件名的唯一定义在 `protocol.ts`；这里 import 给注册与广播用。 */
 
 /** 单个事件类型的注册项；字段跟 dsh-events 的 `defineEvent` 入参对齐。 */
 export interface TicketEventDefinition {
@@ -17,31 +20,6 @@ export interface TicketEventDefinition {
   durability: 'durable' | 'volatile'
   maxBytes: number
 }
-
-/** 带命名空间的事件名。dsh-events 拒绝裸名，所以每个都得有点。 */
-export const TICKET_EVENT_NAMES = {
-  published: 'dispatcher.ticket.published',
-  spawned: 'dispatcher.ticket.spawned',
-  'spawn-failed': 'dispatcher.ticket.spawn-failed',
-  ended: 'dispatcher.ticket.ended',
-  idled: 'dispatcher.ticket.idled',
-  resumed: 'dispatcher.ticket.resumed',
-  queued: 'dispatcher.ticket.queued',
-  delivered: 'dispatcher.ticket.delivered',
-  reported: 'dispatcher.ticket.reported',
-  'action-logged': 'dispatcher.ticket.action-logged',
-  planning: 'dispatcher.ticket.planning',
-  declared: 'dispatcher.ticket.declared',
-  'touch-reported': 'dispatcher.ticket.touch-reported',
-  // 漏过一版：2026-11-14 之前这张表里没有它，冲突判定在 events 总线上落成
-  // `dispatcher.ticket.legacy`，按 `.status` 名字订阅的监听器一条都收不到。
-  'conflict-checked': 'dispatcher.ticket.conflict-checked',
-  blocked: 'dispatcher.ticket.blocked',
-  gated: 'dispatcher.ticket.gated',
-  closed: 'dispatcher.ticket.closed',
-  'legacy/status': 'dispatcher.ticket.status',
-  legacy: 'dispatcher.ticket.legacy',
-} as const
 
 /**
  * 启动时注册的全部票事件类型。票事件都是 durable：丢了等于业务数据丢，

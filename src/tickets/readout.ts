@@ -14,6 +14,7 @@
  * 混用。`generatedAt` 是这份读数的参考时刻，`ageMinutes` 按它算。
  */
 import { isOpen } from '../store'
+import { BLOCKED_MINUTES, BRIEF_MAX_COLUMNS, WAITING_MINUTES } from '../defaults'
 import { ticketView } from './view'
 import type { TicketSnapshot, TicketStatus } from '../store'
 import type { TicketView, ViewOptions } from './view'
@@ -237,9 +238,9 @@ export class TicketReadout {
 
   private view(ticket: TicketSnapshot, now: Date): TicketView {
     return ticketView(ticket, {
-      briefMaxColumns: this.options.briefMaxColumns ?? 34,
-      waitingMinutes: this.options.waitingMinutes ?? 20,
-      blockedMinutes: this.options.blockedMinutes ?? 60,
+      briefMaxColumns: this.options.briefMaxColumns ?? BRIEF_MAX_COLUMNS,
+      waitingMinutes: this.options.waitingMinutes ?? WAITING_MINUTES,
+      blockedMinutes: this.options.blockedMinutes ?? BLOCKED_MINUTES,
       now,
     })
   }

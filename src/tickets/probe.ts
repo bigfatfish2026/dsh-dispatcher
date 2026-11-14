@@ -24,10 +24,11 @@
  * 这扇窗拆掉只说明「这票不再只读」，跟「谁来接着干」没关系。超时那处若是登记
  * 从头到尾没被预期会话领走，`expire()` 会打一行固定文案，别静默放行。
  */
+import { WRITE_TOOLS } from '../protocol'
 import { agentIdOf, isSameWorker } from './workers'
 
-/** 探路子会话看不到的三件：写文件、改文件、跑命令。 */
-export const PROBE_DENY: readonly string[] = ['write', 'edit', 'bash']
+// 探路子会话看不到的三件（写文件、改文件、跑命令）与「被挡停手」共用同一份
+// 协议名单，顺序也统一在 protocol.ts 里。
 
 /** `restrict` 回来的是拆窗口的手；宿主老一点可能根本没有这一口。 */
 type Disposer = () => void
@@ -198,7 +199,7 @@ export class ProbeWindows implements ProbePort, ProbeRegistry {
     }
     let dispose: unknown
     try {
-      dispose = restrict.call(agent.ctx?.tools, { deny: [...PROBE_DENY] })
+      dispose = restrict.call(agent.ctx?.tools, { deny: [...WRITE_TOOLS] })
     } catch (error) {
       this.warn(
         `[dispatcher] 探路窗口装不上（票 ${ticketId}）：${error instanceof Error ? error.message : String(error)}`,
