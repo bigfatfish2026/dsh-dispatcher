@@ -16,9 +16,7 @@ import { Config, DEFAULT_HANDOFF_POLICY, legacySweepWarning, resolveSweepMs, rou
 import type { Config as ConfigShape } from './config'
 import { truncateColumns } from './store'
 import type { Actor, ConflictWait, IntentSpec, TicketOrigin, TicketPlan, TicketStatus } from './store'
-import { ProbeWindows } from './tickets/probe'
 import { WorkerTicketTools } from './tickets/worker-tools'
-import { createWorkerWatch } from './tickets/watch'
 import { createDesk } from './tickets/desk'
 import type { Serialize, TicketView } from './tickets/desk'
 import { createLlmClassifier } from './tickets/classify'
@@ -38,6 +36,8 @@ import { isWorkerSession } from './no-wait'
 import { sendProgress } from './progress'
 import { TICKET_STATUSES, TOOL_NAMES } from './protocol'
 import { installStore } from './installers/store'
+import { createWorkerPlane } from './installers/workplane'
+import { installRestrict } from './installers/restrict'
 import { installPromptGuard } from './installers/prompt'
 
 export const name = 'dsh-dispatcher'
@@ -58,15 +58,7 @@ export { DEFAULT_HANDOFF_POLICY as HANDOFF_POLICY }
  * 拼在 `workerDenyTools` 之后、不进 config 默认值：operator 改写
  * `workerDenyTools` 不该顺手把这几样放回 worker 手里。
  */
-export const WORKER_FORBIDDEN_TOOLS = [
-  TOOL_NAMES.open,
-  TOOL_NAMES.send,
-  TOOL_NAMES.read,
-  TOOL_NAMES.close,
-  TOOL_NAMES.block,
-  TOOL_NAMES.list,
-  TOOL_NAMES.progressNote,
-]
+export { WORKER_FORBIDDEN_TOOLS } from './installers/restrict'
 
 const STATUSES = TICKET_STATUSES
 
@@ -512,72 +504,12 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const legacySweep = legacySweepWarning(config)
   if (legacySweep) warn(`[dispatcher] ${legacySweep}`)
 
-  // ── 探路窗口：只给正在探路的那只子会话减工具 ──────────────────────
-  // 票在 planning 阶段 = 探路轮：它只出方案，写盘是执行轮的事。窗口认票靠快照
-  // 的 phase（事件折出来的），不靠 status。装窗口这一刀只能在 `agent/created`
-  // 里——宿主不给我们「派活前先改这只 agent」的别的口。
-  const probeWindows = new ProbeWindows({ warn })
-
-  // ── 子会话的状态订阅：被挡就真停手 ────────────────────────────────
-  // `spawned` 那一刻按票订上（desk 把事件喂进来，见 `desk.feedWatch`），被挡时
-  // 先同步标记、再 cancel 打断当前这一轮、然后推一句短话。另外给 worker 会话
-  // 装一道写类工具守卫：票被挡期间 `write` / `edit` / `bash` 直接拒，打断之后
-  // 那一轮也别想再落下手。订阅失败一律只 warn，不影响票台。
-  const workerWatch = createWorkerWatch({
-    agents: () => {
-      const agents = agentsOf()
-      return agents ? { get: (id: string) => agents.get?.(id) } : undefined
-    },
+  // ── worker 平面：探路窗口、被挡停手、写类工具守卫 ────────────────
+  const { probeWindows, workerWatch, installGuard } = createWorkerPlane(ctx, {
+    agents: agentsOf,
     warn,
     info,
   })
-  ctx.effect(() => () => workerWatch.dispose(), 'dsh-dispatcher.worker-watch')
-
-  /** 已经装过守卫的 worker 会话（同一只装一次）。 */
-  const guardedWorkers = new WeakSet<object>()
-  const workerGuardStops = new Set<() => void>()
-  /**
-   * 给一只 worker 会话装「被挡期间不许写」的工具守卫。判不判是每次调用现查的
-   * （`workerWatch.writeBlockReason`），所以装上去之后就跟着票的状态走。
-   */
-  const installWorkerGuard = (agent: unknown): void => {
-    const scope = agent as {
-      session?: { id?: string; header?: { origin?: string } }
-      ctx?: {
-        effect?: (callback: () => () => void, label?: string) => unknown
-        tools?: {
-          guard?: (guard: (execution: { name: string; arguments: unknown }) => string | undefined) => unknown
-        }
-      }
-    }
-    if (!isWorkerSession(scope?.session?.header?.origin)) return
-    if (guardedWorkers.has(agent as object)) return
-    const workerId = scope.session?.id
-    const guard = scope.ctx?.tools?.guard
-    if (!workerId || typeof guard !== 'function') return
-    guardedWorkers.add(agent as object)
-    try {
-      const stop = guard.call(scope.ctx?.tools, (execution) =>
-        workerWatch.writeBlockReason(workerId, execution.name),
-      )
-      if (typeof stop !== 'function') return
-      const release = stop as () => void
-      workerGuardStops.add(release)
-      scope.ctx?.effect?.(
-        () => () => {
-          workerGuardStops.delete(release)
-          release()
-        },
-        'dsh-dispatcher.worker-block-guard',
-      )
-    } catch (error) {
-      warn(
-        `[dispatcher] 子会话 ${workerId} 的停手守卫没装上：${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
-  }
-  // 热重载时活表里可能已经有一批 worker：先补一遍，别只等新建那一刀。
-  for (const agent of agentsOf()?.list() ?? []) installWorkerGuard(agent)
 
   // 三个票工具的兜底注册：定义在下面注册完之后才建（`workerTicketTools` 先留空），
   // 但 `agent/created` 只在新会话冒出来时才触发，那时候它已经在了。
@@ -590,16 +522,12 @@ export function apply(ctx: Context, config: ConfigShape): void {
     const origin = (agent as { session?: { header?: { origin?: string } } }).session?.header?.origin
     if (isWorkerSession(origin)) {
       workerTicketTools?.attach(agent as never)
-      installWorkerGuard(agent)
+      installGuard(agent)
       // 重启/热重载之后这只子会话名下的票还开着：补订阅，别让它变成聋子。
       desk.adoptWorker((agent as { session?: { id?: string } }).session?.id)
     }
     return undefined
   })
-  ctx.effect(() => () => {
-    probeWindows.releaseAll()
-    for (const release of [...workerGuardStops]) release()
-  }, 'dsh-dispatcher.probe-windows')
   const desk = createDesk({
     log,
     serialize,
@@ -1495,87 +1423,6 @@ export function apply(ctx: Context, config: ConfigShape): void {
   )
 
   // ── 主会话白名单 + worker 反向名单 ──────────────────────────────
-  // 顺序有讲究：这一段必须跑在所有 `ctx.tools.register` 之后。装载器拿 allow
-  // 名单去注册表点名，点不到的按「名字写错」剔掉；热重载时先装白名单会把本插件
-  // 自己的 dispatch_* 当错名扔掉。
-  if (config.routerRestrict || config.workerToolDeny || config.workerPromptPrune) {
-    const routerSeen = new WeakSet<object>()
-    const bindings = new Set<RouterBinding>()
-    const bound = new WeakMap<object, RouterBinding>()
-    let announced = false
-    let workerAnnounced = false
-    let tearingDown = false
-    const registry = {
-      get(name: string): unknown {
-        const tools = (ctx as { tools?: { get?: (name: string) => unknown } }).tools
-        return tools?.get?.(name)
-      },
-      names(): readonly string[] {
-        const tools = (ctx as { tools?: { schemas?: () => readonly { name: string }[] } }).tools
-        try {
-          return (tools?.schemas?.() ?? []).map((schema) => schema.name)
-        } catch {
-          return []
-        }
-      },
-    }
-    const options = {
-      allow: routerAllowList(config),
-      // deny 叠加、越减越少，跟 allow 不打架。拼在配置之后、不进默认值。
-      deny: config.workerToolDeny ? [...new Set([...config.workerDenyTools, ...WORKER_FORBIDDEN_TOOLS])] : [],
-      pruneWorkerPrompt: config.workerPromptPrune,
-      escapeFile: config.routerEscapeFile,
-      log: warn,
-      info,
-      registry,
-    }
-    const install = (agent: RouterAgent): void => {
-      const worker = isWorkerSession(agent.session.header.origin)
-      if (worker ? !config.workerToolDeny && !config.workerPromptPrune : !config.routerRestrict) return
-      let binding = bound.get(agent)
-      if (binding === undefined) {
-        if (routerSeen.has(agent)) return
-        routerSeen.add(agent)
-        binding = bindRouter(agent, options)
-        bound.set(agent, binding)
-        bindings.add(binding)
-        const own = binding
-        agent.ctx.effect(() => () => {
-          own.dispose()
-          bindings.delete(own)
-        }, 'dsh-dispatcher.router-release')
-      } else {
-        binding.sync()
-      }
-      const outcome = binding.outcome()
-      if (worker) {
-        if ((outcome === 'denied' || outcome === 'updated') && !workerAnnounced) {
-          workerAnnounced = true
-          info(`[dispatcher] worker subagents hide ${binding.installed().length} tool(s): ${binding.installed().join(', ')}`)
-        }
-        return
-      }
-      if ((outcome === 'installed' || outcome === 'updated') && !announced) {
-        announced = true
-        info(
-          `[dispatcher] router whitelist installed on the main session (${binding.installed().length}/${options.allow.length} tools registered)`,
-        )
-      }
-    }
-    for (const agent of agentsOf()?.list() ?? []) install(agent as never)
-    ctx.on('agent/created', ({ agent }) => {
-      install(agent as never)
-      return undefined
-    })
-    ctx.on('tools/change', () => {
-      if (tearingDown) return undefined
-      for (const binding of [...bindings]) binding.sync()
-      return undefined
-    })
-    ctx.effect(() => () => {
-      tearingDown = true
-      for (const binding of [...bindings]) binding.dispose()
-      bindings.clear()
-    }, 'dsh-dispatcher.router-teardown')
-  }
+  // 顺序有讲究：这一段必须跑在所有 `ctx.tools.register` 之后。
+  installRestrict(ctx, config, { agents: agentsOf, warn, info })
 }
