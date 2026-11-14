@@ -206,7 +206,7 @@ describe('冲突排队', () => {
     await idle(h, 'worker-2')
 
     const queued = h.log.get(b.id)!
-    expect(queued.phase).toBe('blocked')
+    expect(queued.phase).toBe('queued')
     // 被挡的那只：真打断 + 一句话说清被谁挡、撞在哪个资源上。
     expect(second.cancels).toHaveLength(1)
     const blockedNotice = second.messages.at(-1)!
@@ -222,7 +222,7 @@ describe('冲突排队', () => {
     await h.desk.close(a.id)
     await flush()
 
-    expect(h.log.get(b.id)!.phase).not.toBe('blocked')
+    expect(h.log.get(b.id)!.phase).not.toBe('queued')
     const releasedNotice = second.messages.at(-1)!
     expect(releasedNotice).toContain(b.id)
     expect(releasedNotice).toContain('released')

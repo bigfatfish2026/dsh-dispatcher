@@ -1,5 +1,5 @@
 /**
- * 名额拆成两本账：执行（`running` 且没排队）和排队（`phase === 'blocked'`）
+ * 名额拆成两本账：执行（`running` 且没排队）和排队（`phase === 'queued'`）
  * 各数各的，谁满了谁拒——绝不把 8 + 4 加成一个 12。
  *
  * 普通票开出来就 spawn 成 `running`；排队票用探路冲突造（和 conflict-desk 同一套）。
@@ -80,7 +80,7 @@ describe('执行名额 maxExec', () => {
     await probeOpen(h, '占住目录')
     const waiting = await probeOpen(h, '抢目录')
     await idle(h, 'worker-2')
-    expect(h.log.get(waiting)!.phase).toBe('blocked')
+    expect(h.log.get(waiting)!.phase).toBe('queued')
 
     // 执行位只被 blocker 占着（1 张），所以还能再开一张占满 2。
     await h.desk.open({ ...INTENT, goal: '补一件', requestId: 'req-fill' }, h.main)
@@ -118,7 +118,7 @@ describe('排队名额 maxQueued', () => {
     const queued: string[] = []
     for (let i = 0; i < 4; i += 1) queued.push(await probeOpen(h, `抢目录第 ${i + 1} 张`))
     for (let i = 0; i < 4; i += 1) await idle(h, `worker-${i + 2}`)
-    for (const id of queued) expect(h.log.get(id)!.phase).toBe('blocked')
+    for (const id of queued) expect(h.log.get(id)!.phase).toBe('queued')
 
     const message = await rejection(
       h.desk.open({ ...INTENT, goal: '第五张', requestId: 'req-queued' }, h.main),
@@ -158,8 +158,8 @@ describe('排队名额 maxQueued', () => {
     await idle(h, 'worker-2')
     const secondQueued = await probeOpen(h, '抢目录乙')
     await idle(h, 'worker-3')
-    expect(h.log.get(firstQueued)!.phase).toBe('blocked')
-    expect(h.log.get(secondQueued)!.phase).toBe('blocked')
+    expect(h.log.get(firstQueued)!.phase).toBe('queued')
+    expect(h.log.get(secondQueued)!.phase).toBe('queued')
 
     const full = await rejection(probeOpen(h, '抢目录丙'))
     expect(full).toContain('排队名额满了')

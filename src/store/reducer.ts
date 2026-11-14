@@ -400,7 +400,7 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
       state.set(event.id, {
         ...previous,
         updatedAt: event.at,
-        phase: blocked ? 'blocked' : 'running',
+        phase: blocked ? 'queued' : 'running',
         // 拷一份：事件对象可能被调用方复用，快照不该跟着它变。
         waitOn: blocked
           ? event.waitOn.map((wait) => ({ ticketId: wait.ticketId, resources: [...wait.resources] }))

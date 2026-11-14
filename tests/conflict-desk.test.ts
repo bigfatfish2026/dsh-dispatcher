@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import { intentPlanLines } from '../src/index'
 import type { OwnerNotifier } from '../src/tickets/notify'
 import type { ProbePort, ProbeRegistry } from '../src/tickets/probe'
-import { flush, makeDesk } from './helpers/desk-harness'
+import { MemoryBackend, flush, makeDesk } from './helpers/desk-harness'
 import type { Harness } from './helpers/desk-harness'
 
 const DIR = 'dir:/tmp/conflict-ws'
@@ -78,7 +78,7 @@ describe('探路收工那刻判定', () => {
     await idle(h, 'worker-2')
 
     const blocked = h.log.get(second)!
-    expect(blocked.phase).toBe('blocked')
+    expect(blocked.phase).toBe('queued')
     expect(blocked.waitOn).toEqual([{ ticketId: first, resources: [DIR] }])
     // status 一个字节都不许动：还是探路子会话派出去时的 running。
     expect(blocked.status).toBe('running')
@@ -127,7 +127,7 @@ describe('探路收工那刻判定', () => {
     await idle(h, h.log.get(second)!.workerId!)
 
     const queued = h.log.get(second)!
-    expect(queued.phase).toBe('blocked')
+    expect(queued.phase).toBe('queued')
     expect(queued.waitOn).toEqual([{ ticketId: first, resources: [DIR] }])
     // 开票方当场收到：被挡的票、被谁挡的（id + brief）、撞在哪些路径上。
     expect(blockedCalls).toHaveLength(1)
@@ -141,7 +141,7 @@ describe('探路收工那刻判定', () => {
     await h.desk.close(first)
     await flush()
 
-    expect(h.log.get(second)!.phase).not.toBe('blocked')
+    expect(h.log.get(second)!.phase).not.toBe('queued')
     // 放行也吱一声：谁放行的、轮到谁了。
     expect(releasedCalls).toHaveLength(1)
     expect(releasedCalls[0]).toMatchObject({
@@ -217,6 +217,8 @@ describe('探路收工那刻判定', () => {
     // 挡路那张先真的跑起来：探路收工、派执行轮，它已经是 running 的写入方。
     await idle(h, 'worker-1')
     expect(h.log.get(blocker)!.phase).toBe('running')
+    // 执行轮是真派出去的子会话：活表里要有它，否则巡检的 A2 死 worker 兜底会先把它收了。
+    h.agents.markAlive(h.log.get(blocker)!.workerId!)
     const receipt = await h.desk.open(
       { goal: '只交了半截的降级票', brief: '降级票', dir: '/tmp/conflict-ws' },
       h.main,
@@ -229,7 +231,7 @@ describe('探路收工那刻判定', () => {
     expect(degraded.degraded).toBe(true)
 
     const blocked = h.log.get(planner)!
-    expect(blocked.phase).toBe('blocked')
+    expect(blocked.phase).toBe('queued')
     expect(blocked.waitOn).toEqual([{ ticketId: blocker, resources: [DIR] }])
     // 判输了不派：两只探路 + 一张执行轮，planner 没有执行轮。
     expect(h.subagents.spawned).toHaveLength(3)
@@ -242,7 +244,7 @@ describe('收工放行', () => {
     const blocker = await openProbe(h, '先改目录甲', [DIR])
     const waiter = await openProbe(h, '后改目录甲', [DIR])
     await idle(h, 'worker-2')
-    expect(h.log.get(waiter)!.phase).toBe('blocked')
+    expect(h.log.get(waiter)!.phase).toBe('queued')
     expect(h.subagents.spawned).toHaveLength(2)
 
     // 探路子会话交完声明只是 idle，会话还在活表里——放行该复用这只。
@@ -269,7 +271,7 @@ describe('收工放行', () => {
     const blocker = await openProbe(h, '先改目录甲', [DIR])
     const waiter = await openProbe(h, '后改目录甲', [DIR])
     await idle(h, 'worker-2')
-    expect(h.log.get(waiter)!.phase).toBe('blocked')
+    expect(h.log.get(waiter)!.phase).toBe('queued')
 
     // ended / 重启 sweep 之后就查不到了，只能重起。
     h.agents.markGone('worker-2')
@@ -296,14 +298,14 @@ describe('收工放行', () => {
     // 探路子会话是谁由派活顺序定（第一张的执行轮也占了一个号），别写死。
     await idle(h, h.log.get(second)!.workerId!)
     await idle(h, h.log.get(third)!.workerId!)
-    expect(h.log.get(second)!.phase).toBe('blocked')
-    expect(h.log.get(third)!.phase).toBe('blocked')
+    expect(h.log.get(second)!.phase).toBe('queued')
+    expect(h.log.get(third)!.phase).toBe('queued')
     const before = h.subagents.spawned.length
 
     // 关掉第一张：只放行第二张，第三张还得排在后面等。
     await h.desk.close(first, { actor: h.main })
     expect(h.log.get(second)!.phase).toBe('running')
-    expect(h.log.get(third)!.phase).toBe('blocked')
+    expect(h.log.get(third)!.phase).toBe('queued')
     expect(h.log.get(third)!.waitOn).toEqual([{ ticketId: second, resources: [DIR] }])
     expect(h.subagents.spawned).toHaveLength(before + 1)
     expect(lastPrompt(h)).toContain(second)
@@ -337,14 +339,14 @@ describe('排队序号', () => {
 
       await idle(h, h.log.get(second)!.workerId!)
       await idle(h, h.log.get(third)!.workerId!)
-      expect(h.log.get(second)!.phase).toBe('blocked')
-      expect(h.log.get(third)!.phase).toBe('blocked')
+      expect(h.log.get(second)!.phase).toBe('queued')
+      expect(h.log.get(third)!.phase).toBe('queued')
 
       // 放行一次只走一张，顺序就是开票顺序：先关第一张，只有第二张能动。
       await h.desk.close(first, { actor: h.main })
       expect(h.subagents.spawned.at(-1)!.label).toContain(second)
       expect(h.log.get(second)!.phase).toBe('running')
-      expect(h.log.get(third)!.phase).toBe('blocked')
+      expect(h.log.get(third)!.phase).toBe('queued')
       expect(h.log.get(third)!.waitOn).toEqual([{ ticketId: second, resources: [DIR] }])
 
       // 再关第二张，第三张才轮到。
@@ -408,7 +410,7 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
     const spawnedAfterA = h.subagents.spawned.length
     await idle(h, wb)
     const queued = h.log.get(b)!
-    expect(queued.phase).toBe('blocked')
+    expect(queued.phase).toBe('queued')
     expect(queued.waitOn).toEqual([{ ticketId: a, resources: [DIR] }])
     // 已经跑起来的 A 不被后到的 B 改判：phase 还是 running，也没多派一轮。
     expect(h.log.get(a)!.phase).toBe('running')
@@ -445,7 +447,7 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
     expect(h.log.get(b)!.phase).toBe('running')
     await idle(h, wa)
     const queued = h.log.get(a)!
-    expect(queued.phase).toBe('blocked')
+    expect(queued.phase).toBe('queued')
     expect(queued.waitOn).toEqual([{ ticketId: b, resources: [DIR] }])
   })
 
@@ -462,7 +464,7 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
     await idle(h, wa)
     expect(h.log.get(a)!.phase).toBe('running')
     await idle(h, wb)
-    expect(h.log.get(b)!.phase).toBe('blocked')
+    expect(h.log.get(b)!.phase).toBe('queued')
     expect(h.log.get(b)!.waitOn).toEqual([{ ticketId: a, resources: [DIR] }])
   })
 })
@@ -479,5 +481,181 @@ describe('脏资源串在票台上只 warn 不打断', () => {
     expect(h.warnings.join('\n')).toContain('cmd:dsh --dump-config')
     expect(h.log.get(bad)!.phase).toBe('queued')
     expect(h.log.get(bad)!.waitOn?.[0]?.ticketId).toBe(blocker)
+  })
+})
+
+
+/**
+ * A2 漏唤醒兜底：巡检每拍看一遍排队的票，前票不在了/已终态/被重启掐死都当场
+ * 放行，不等 close 事件。三条票都是用真事件预置的冷日志，开一只新 desk 接上，
+ * 等价于「进程重启后第一次巡检」。
+ */
+describe('A2 巡检兜底放行', () => {
+  const NOW = new Date('2026-11-14T12:00:00.000Z')
+  const at = (minutesAgo: number): string => new Date(NOW.getTime() - minutesAgo * 60_000).toISOString()
+
+  function ticket(id: string, minutesAgo: number): Array<Record<string, unknown>> {
+    return [
+      {
+        kind: 'published',
+        id,
+        at: at(minutesAgo),
+        goal: `活 ${id}`,
+        brief: `活 ${id}`,
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: `req-${id}`,
+      },
+      { kind: 'spawned', id, at: at(minutesAgo), cause: 'tool', workerId: `worker-${id}`, preset: 't1' },
+      {
+        kind: 'declared',
+        id,
+        at: at(minutesAgo),
+        cause: 'tool',
+        plan: { summary: `方案 ${id}` },
+        intent: { writes: [DIR] },
+        workerId: `worker-${id}`,
+      },
+    ]
+  }
+
+  function blockedOn(waitId: string | null): MemoryBackend {
+    const backend = new MemoryBackend()
+    const events = [
+      ...ticket('t-blocked', 5),
+      { kind: 'conflict-checked', id: 't-blocked', at: at(4), cause: 'reaction', level: 'strong', waitOn: waitId ? [{ ticketId: waitId, resources: [DIR] }] : [] },
+    ]
+    for (const event of events) backend.append(event as never)
+    return backend
+  }
+
+  function harness(backend: MemoryBackend): Harness {
+    const h = makeDesk({ now: NOW, backend, config: { defaultPreset: 't1', sweepMs: 0 }, probe: fakeProbe() })
+    return h
+  }
+
+  it('waitOn 的票被删了（日志里查不到）：下一拍自己放行', async () => {
+    const h = harness(blockedOn('t-gone'))
+    expect(h.log.get('t-blocked')!.phase).toBe('queued')
+    await h.desk.maintain()
+    const ticket = h.log.get('t-blocked')!
+    expect(ticket.phase).toBe('running')
+    expect(ticket.status).toBe('running')
+    expect(h.subagents.spawned.map((spec) => spec.label)).toHaveLength(1)
+  })
+
+  it('waitOn 的票被手工 close（终态）：下一拍自己放行', async () => {
+    const backend = new MemoryBackend()
+    for (const event of [
+      ...ticket('t-close', 9),
+      { kind: 'closed', id: 't-close', at: at(8), cause: 'tool', outcome: 'done' },
+      ...ticket('t-blocked', 5),
+      { kind: 'conflict-checked', id: 't-blocked', at: at(4), cause: 'reaction', level: 'strong', waitOn: [{ ticketId: 't-close', resources: [DIR] }] },
+    ]) backend.append(event as never)
+    const h = harness(backend)
+    await h.desk.maintain()
+    expect(h.log.get('t-blocked')!.phase).toBe('running')
+    expect(h.subagents.spawned).toHaveLength(1)
+  })
+
+  it('前票 worker 被重启掐死：先落 waiting，再把后票放行', async () => {
+    const backend = new MemoryBackend()
+    for (const event of [
+      ...ticket('t-dead', 10),
+      // 前票已经放行过（phase=running 才算真的在执行轮上跑），worker 随后被重启掐死。
+      { kind: 'conflict-checked', id: 't-dead', at: at(9), cause: 'reaction', level: 'none', waitOn: [] },
+      ...ticket('t-blocked', 5),
+      { kind: 'conflict-checked', id: 't-blocked', at: at(4), cause: 'reaction', level: 'strong', waitOn: [{ ticketId: 't-dead', resources: [DIR] }] },
+    ]) backend.append(event as never)
+    const h = harness(backend)
+    // 活表里只有主会话：worker-t-dead 已经不在，t-dead 又是 running，巡检要先收它。
+    expect(h.agents.get('worker-t-dead')).toBeUndefined()
+    await h.desk.maintain()
+    const dead = h.log.get('t-dead')!
+    expect(dead.status).toBe('waiting')
+    expect(dead.workerAlive).toBe(false)
+    const blocked = h.log.get('t-blocked')!
+    expect(blocked.phase).toBe('running')
+    expect(blocked.status).toBe('running')
+    expect(h.subagents.spawned).toHaveLength(1)
+  })
+})
+
+/**
+ * A1 长短等：排队超过 longWaitMinutes（默认 15）就放掉原 worker，短等保持挂着。
+ * 阈值依据见 defaults.ts：历史票时长 P90 16.7 分钟，5 分钟会把绝大多数等待都判长等。
+ */
+describe('A1 长短等', () => {
+  async function queued(): Promise<{ h: Harness; first: string; second: string }> {
+    const h = desk()
+    const first = await openProbe(h, '先占目录', [DIR])
+    await idle(h, 'worker-1')
+    // 第一张放行后派了执行轮：活表里要有它，否则 A2 的巡检兜底会先把它收成 waiting。
+    h.agents.markAlive(h.log.get(first)!.workerId!)
+    const second = await openProbe(h, '排队等目录', [DIR])
+    await idle(h, h.log.get(second)!.workerId!)
+    expect(h.log.get(second)!.phase).toBe('queued')
+    h.agents.markAlive(h.log.get(second)!.workerId!)
+    return { h, first, second }
+  }
+
+  it('短等：不到阈值不动 worker，票继续排队', async () => {
+    const { h, second } = await queued()
+    const worker = h.log.get(second)!.workerId!
+    h.clock.advance(14 * 60_000)
+    await h.desk.maintain()
+    expect(h.subagents.disposed).not.toContain(worker)
+    const ticket = h.log.get(second)!
+    expect(ticket.phase).toBe('queued')
+    expect(ticket.status).toBe('running')
+    expect(ticket.workerId).toBe(worker)
+  })
+
+  it('长等：到点放掉 worker，前票还在时不派；前票关掉后新起一只', async () => {
+    const { h, first, second } = await queued()
+    const worker = h.log.get(second)!.workerId!
+    h.clock.advance(16 * 60_000)
+    await h.desk.maintain()
+
+    expect(h.subagents.disposed).toContain(worker)
+    const waiting = h.log.get(second)!
+    expect(waiting.phase).toBe('queued')
+    expect(waiting.status).toBe('waiting')
+    expect(h.warnings.join('\n')).toContain('放掉 worker')
+
+    // 前票还占着：下一拍仍然不派，别把排队票提前放出去。
+    const spawnedBefore = h.subagents.spawned.length
+    await h.desk.maintain()
+    expect(h.subagents.spawned).toHaveLength(spawnedBefore)
+    expect(h.log.get(second)!.phase).toBe('queued')
+
+    // 前票收工：放行时原 worker 已经不在（真宿主 abort 后活表里也会摘掉），
+    // 新起一只，workerId 换人。
+    h.agents.markGone(worker)
+    await h.desk.close(first, { outcome: 'done', actor: h.main })
+    await flush()
+    const released = h.log.get(second)!
+    expect(released.phase).toBe('running')
+    expect(released.workerId).not.toBe(worker)
+    expect(h.subagents.spawned).toHaveLength(spawnedBefore + 1)
+  })
+})
+
+describe('A6 一个词只许一个意思', () => {
+  it('等资源写 phase=queued、status 不动；等人写 status=blocked、phase 不动', async () => {
+    const h = desk()
+    const first = await openProbe(h, '占目录', [DIR])
+    const second = await openProbe(h, '等目录', [DIR])
+    await idle(h, h.log.get(second)!.workerId!)
+
+    const queued = h.log.get(second)!
+    expect(queued.phase).toBe('queued')
+    expect(queued.status).toBe('running')
+
+    await h.desk.block(first, '等维护者拍板', h.main)
+    const held = h.log.get(first)!
+    expect(held.status).toBe('blocked')
+    expect(held.phase).toBe('planned')
   })
 })

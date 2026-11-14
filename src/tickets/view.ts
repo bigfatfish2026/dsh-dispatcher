@@ -50,7 +50,7 @@ export interface TicketView {
   /** 探路子会话交的方案；快路径或老票没有这一栏。 */
   plan?: TicketPlan
   /**
-   * 冲突排队：phase 是 `blocked` 时撞的是谁、撞了什么。dispatch_list 的 render
+   * 冲突排队：phase 是 `queued` 时撞的是谁、撞了什么。dispatch_list 的 render
    * 把它铺成 `waiting on t-xxxx (dir:/a/b)` 一行，主会话看得见为什么没派活。
    */
   waitOn?: ConflictWait[]

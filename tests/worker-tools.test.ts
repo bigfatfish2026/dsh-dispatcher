@@ -160,3 +160,54 @@ describe('WorkerTicketTools：按 agent 层装三个票工具', () => {
     expect(second.scoped.size).toBe(0)
   })
 })
+
+describe('WorkerTicketTools：装不上的路径与回收', () => {
+  it('只有 id 拿不到 agent：喊一声、返回 false', () => {
+    const warnings: string[] = []
+    const tools = new WorkerTicketTools({ definitions: DEFINITIONS, warn: (m) => warnings.push(m) })
+    expect(tools.attach('worker-only-id')).toBe(false)
+    expect(tools.attach(undefined)).toBe(false)
+    expect(warnings.join('\n')).toContain('拿不到 agent.ctx')
+  })
+
+  it('注册中途抛错：已经装上的拆回去，喊一声，不把派活带崩', () => {
+    const warnings: string[] = []
+    const disposed: string[] = []
+    let count = 0
+    const agent = {
+      id: 'worker-boom',
+      session: { id: 'worker-boom' },
+      ctx: {
+        tools: {
+          register(definition: never) {
+            count += 1
+            if (count === 2) throw new Error('scope frozen')
+            return () => disposed.push((definition as { name: string }).name)
+          },
+        },
+      },
+    }
+    const tools = new WorkerTicketTools({ definitions: DEFINITIONS, warn: (m) => warnings.push(m) })
+    expect(tools.attach(agent as never)).toBe(false)
+    expect(disposed).toEqual(['dispatch_declare'])
+    expect(tools.has('worker-boom')).toBe(false)
+    expect(warnings.join('\n')).toContain('scope frozen')
+  })
+
+  it('attachById：活表拿不到就跳过，拿到了才装；detachAll 全部收回', () => {
+    const { agent, scoped } = fakeAgent('worker-by-id')
+    const tools = new WorkerTicketTools({ definitions: DEFINITIONS })
+    expect(tools.attachById('worker-by-id', () => undefined)).toBe(false)
+    expect(tools.attachById('worker-by-id', () => ({ get: () => undefined }))).toBe(false)
+    expect(tools.attachById('worker-by-id', () => ({ get: () => agent }))).toBe(true)
+    expect(tools.attachById('worker-by-id', () => ({ get: () => agent }))).toBe(false)
+    expect(tools.size).toBe(1)
+    expect(scoped.size).toBe(3)
+
+    tools.detachAll()
+    expect(tools.size).toBe(0)
+    expect(scoped.size).toBe(0)
+    expect(tools.has(undefined)).toBe(false)
+    expect(tools.detach(undefined)).toBe(false)
+  })
+})

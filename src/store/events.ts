@@ -118,7 +118,7 @@ export type TicketPhase = (typeof TICKET_PHASES)[number]
 
 /**
  * 冲突排队：撞哪张票、撞的是哪几个归一化资源串（`dir:/a/b` 这种）。
- * 只在 phase 是 `blocked` 时有内容，放行时整栏清空。
+ * 只在 phase 是 `queued` 时有内容，放行时整栏清空。
  */
 export interface ConflictWait {
   ticketId: string
@@ -489,7 +489,7 @@ export interface TouchReported extends EventBase {
 /**
  * 冲突判定落票：探路票收工那一刻（以及排队票被放行时）判一次，结果写这里。
  *
- * strong → phase 折成 `blocked`，`waitOn` 记撞谁、撞什么；none / weak → phase
+ * strong → phase 折成 `queued`，`waitOn` 记撞谁、撞什么；none / weak → phase
  * 折成 `running`，`weak` 记一行提示票号。这个事件**不碰 status / statusSince /
  * closedAt**：排队状态只记在 phase 上，status 仍由主会话的动作和既有生命周期
  * 事件写（设计稿 §7 的红线）。

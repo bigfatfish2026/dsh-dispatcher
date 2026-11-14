@@ -29,6 +29,13 @@ export const RUNNING_REMINDER_MINUTES = 0
 
 /** 探路窗口：planning 停留超过这么多分钟就降级。 */
 export const PROBE_TIMEOUT_MINUTES = 2
+/**
+ * 排队长短等的分界：超过这么多分钟就放掉原 worker，放行时新起一只。
+ *
+ * 取值依据 2026-11-14 的历史票实测：票自身耗时 P50 6.4 分钟、P90 16.7 分钟；
+ * 5 分钟会把 59/68 的等待票一进队就判长等，短等保留上下文那条就废了。
+ */
+export const LONG_WAIT_MINUTES = 15
 export const PROBE_TIMEOUT_MS = PROBE_TIMEOUT_MINUTES * 60_000
 
 /** 名额：同时执行 / 冲突排队，两本账分开数。 */

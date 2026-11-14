@@ -11,6 +11,7 @@ import {
   FRESH_MINUTES,
   MAX_EXEC,
   MAX_QUEUED,
+  LONG_WAIT_MINUTES,
   REPEAT_WINDOW_MINUTES,
   RUNNING_REMINDER_MINUTES,
   SWEEP_MS,
@@ -172,11 +173,11 @@ export interface Config {
   /** 往任务的活里带一层子会话：1 = 子会话不能再派子会话。 */
   maxDepth: number
   /**
-   * 同时干活的票上限：只数 `status === 'running'` 且 `phase !== 'blocked'` 的票。
+   * 同时干活的票上限：只数 `status === 'running'` 且 `phase !== 'queued'` 的票。
    * 名额拆成两个独立计数（另一个是 `maxQueued`），只数正在干的不算排队的。
    */
   maxExec: number
-  /** 同时排队的票上限：只数 `phase === 'blocked'` 的票（撞资源等放行）。 */
+  /** 同时排队的票上限：只数 `phase === 'queued'` 的票（撞资源等放行）。 */
   maxQueued: number
   /**
    * 已废弃：名额拆成 `maxExec` / `maxQueued`。老配置只给这一个键仍能加载，
@@ -323,12 +324,12 @@ export const Config: Schema<Config> = Schema.object({
   maxExec: Schema.natural()
     .default(MAX_EXEC)
     .description(
-      'Maximum tickets actually executing at once: status running and phase not blocked. Queued (phase blocked) tickets are counted separately by maxQueued.',
+      'Maximum tickets actually executing at once: status running and phase not blocked. Queued (phase queued) tickets are counted separately by maxQueued.',
     ),
   maxQueued: Schema.natural()
     .default(MAX_QUEUED)
     .description(
-      'Maximum tickets waiting in the conflict queue (phase blocked). Counted separately from maxExec: only a full queue rejects a new ticket, never the sum of both.',
+      'Maximum tickets waiting in the conflict queue (phase queued). Counted separately from maxExec: only a full queue rejects a new ticket, never the sum of both.',
     ),
   maxOpen: Schema.natural()
     .default(MAX_EXEC)

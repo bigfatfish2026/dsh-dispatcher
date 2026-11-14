@@ -197,7 +197,7 @@ describe('intent / plan 从工具里读得回来', () => {
     const probe = output.tickets.find((ticket) => ticket.id === 't-probe')!
     const queued = output.tickets.find((ticket) => ticket.id === 't-queued')!
     expect(probe.phase).toBe('planning')
-    expect(queued.phase).toBe('blocked')
+    expect(queued.phase).toBe('queued')
 
     const text = renderOf(host, 'dispatch_list', output)
     expect(text).toContain('t-probe open（探路中）：先探一下')
@@ -207,7 +207,7 @@ describe('intent / plan 从工具里读得回来', () => {
     // dispatch_read 的票头也带同一行标记。
     const read = (await host.call('dispatch_read', {})) as ReadOutput
     const readRow = read.tickets.find((ticket) => ticket.id === 't-queued')!
-    expect(readRow.phase).toBe('blocked')
+    expect(readRow.phase).toBe('queued')
     const readText = renderOf(host, 'dispatch_read', read)
     expect(readText).toContain('ticket t-queued running（冲突排队）：抢同一片')
   })

@@ -69,13 +69,13 @@ describe('挂起留一条事实', () => {
     const waiting = await probeOpen(h, '抢目录')
 
     await idle(h, 'worker-2')
-    expect(h.log.get(waiting)!.phase).toBe('blocked')
+    expect(h.log.get(waiting)!.phase).toBe('queued')
     expect(facts.text()).toContain(`票 ${waiting} 因 ${DIR} 与 ${blocker}「占住目录」 冲突挂起，等它关闭后放行。`)
     expect(facts.text()).not.toContain('blocked')
 
     await h.desk.close(blocker)
     await flush()
-    expect(h.log.get(waiting)!.phase).not.toBe('blocked')
+    expect(h.log.get(waiting)!.phase).not.toBe('queued')
     expect(facts.text()).not.toContain(waiting)
   })
 

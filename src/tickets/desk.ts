@@ -33,6 +33,7 @@ import type { Clock } from './clock'
 import { realClock } from './clock'
 import {
   BLOCKED_MINUTES,
+  LONG_WAIT_MINUTES,
   BRIEF_MAX_COLUMNS,
   CLASSIFY_TIMEOUT_MS,
   FRESH_MINUTES,
@@ -97,13 +98,13 @@ export interface DeskConfig {
   provider: string
   maxDepth: number
   /**
-   * 同时干活的票上限：只数 `status === 'running' && phase !== 'blocked'` 的票。
+   * 同时干活的票上限：只数 `status === 'running' && phase !== 'queued'` 的票。
    *
    * 名额拆成两个独立计数后这里只管执行；排队另有 `maxQueued`。老配置里的
    * `maxOpen` 仍能加载，但不再参与计数（按默认 8 处理）。
    */
   maxExec: number
-  /** 同时排队的票上限：只数 `phase === 'blocked'` 的票（挂起等放行）。 */
+  /** 同时排队的票上限：只数 `phase === 'queued'` 的票（挂起等放行）。 */
   maxQueued: number
   /** 已废弃：名额拆成 `maxExec` / `maxQueued`，这个键只为老配置还能加载而留着。 */
   maxOpen?: number
@@ -124,6 +125,8 @@ export interface DeskConfig {
   revertAuditMs: number
   /** 探路窗口的耐心（分钟）：到点还没交声明就降级，按 dir 整片当写进。 */
   probeTimeoutMinutes: number
+  /** 排队超过这么多分钟算长等：放掉原 worker，放行时新起一只。 */
+  longWaitMinutes: number
   /**
    * 同一个人同一件事在这个窗口内再开票视为重复。
    *
@@ -155,6 +158,7 @@ export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   revertAuditDays: REVERT_AUDIT_DAYS,
   revertAuditMs: REVERT_AUDIT_MS,
   probeTimeoutMinutes: PROBE_TIMEOUT_MINUTES,
+  longWaitMinutes: LONG_WAIT_MINUTES,
 }
 
 export function deskConfig(partial: Partial<DeskConfig> & { defaultPreset: string }): DeskConfig {
@@ -494,9 +498,9 @@ export class TicketDesk {
       const openCount = tickets.filter((ticket) => isOpen(ticket.status)).length
       // 名额拆成两本账：正在干的和排队挂起的分开数，谁满了说谁，不合并成一个总数。
       const execCount = tickets.filter(
-        (ticket) => ticket.status === 'running' && ticket.phase !== 'blocked',
+        (ticket) => ticket.status === 'running' && ticket.phase !== 'queued',
       ).length
-      const queuedCount = tickets.filter((ticket) => ticket.phase === 'blocked').length
+      const queuedCount = tickets.filter((ticket) => ticket.phase === 'queued').length
       const execFull = execCount >= this.config.maxExec
       const queuedFull = queuedCount >= this.config.maxQueued
       if (execFull || queuedFull) {
@@ -702,7 +706,7 @@ export class TicketDesk {
         intent: nextIntent,
         workerId,
       })
-      // 重新声明会把 phase 从 blocked 折回 planned：排队作废，挂起那条也撤掉。
+      // 重新声明会把 phase 从 queued 折回 planned：排队作废，挂起那条也撤掉。
       this.forgetBlocked(target.id)
       const after = this.log.get(target.id)!
       return {
@@ -846,6 +850,20 @@ export class TicketDesk {
         ...(voided > 0 ? { voidedInputs: voided } : {}),
         ...(outOfScope.length > 0 ? { outOfScope } : {}),
       })
+      // 越界不只进回执和票面：推给开票方一句（审计 A8）。best-effort，推不出去
+      // 只 warn，不影响关票。
+      if (outOfScope.length > 0 && typeof this.deps.notifier?.outOfScope === 'function') {
+        try {
+          await this.deps.notifier.outOfScope({
+            ticketId: id,
+            brief: briefOf(ticket, this.config.briefMaxColumns),
+            paths: outOfScope,
+            ...(ticket.publisher ? { publisher: ticket.publisher } : {}),
+          })
+        } catch (error) {
+          this.warn(`越界提醒没送出去（票 ${id}）：${messageOf(error)}`)
+        }
+      }
       // 先落盘再收 worker：反过来的话，abort 触发的 ended 可能先到，票还没进终态。
       // 结束通知要赶在 abort 前面，会话还在才推得进去。
       await this.closeWatch(ticket, outcome)
@@ -961,6 +979,51 @@ export class TicketDesk {
       let signals = 0
       for (const ticket of this.log.list()) {
         if (!isOpen(ticket.status)) continue
+        // 执行轮 worker 已经不在、事件又没来（重启把 subagent/end 吞了）：巡检
+        // 兜底把它落 waiting，别让票挂着 running 占执行名额（审计 A2）。planned
+        // 票不在这里处理，它归下面的 admit 兜底重派；planning 票归探路超时。
+        if (
+          ticket.status === 'running' &&
+          (ticket.phase === undefined || ticket.phase === 'running') &&
+          ticket.workerId &&
+          this.pool.alive(ticket.workerId) === false &&
+          minutesSince(ticket.updatedAt, now) >= this.config.freshMinutes
+        ) {
+          this.commit({
+            kind: 'ended',
+            id: ticket.id,
+            at: this.at(),
+            cause: 'lifecycle',
+            workerId: ticket.workerId,
+            stopReason: 'worker-gone',
+            epochReports: ticket.epochReports,
+          })
+          continue
+        }
+        // 长等（审计 A1）：排队超过 longWaitMinutes 就把原 worker 放掉，票留在
+        // blocked；放行时 startTask 发现 worker 已死会新起一只，首条任务书带 plan。
+        // 短等不动 worker——上下文还在，前票一关直接投回同一个会话。
+        if (
+          ticket.phase === 'queued' &&
+          ticket.workerId &&
+          minutesSince(ticket.updatedAt, now) >= this.config.longWaitMinutes &&
+          this.pool.alive(ticket.workerId) === true
+        ) {
+          await this.pool.abort(ticket.workerId, `票 ${ticket.id} 排队超过 ${this.config.longWaitMinutes} 分钟，先放掉 worker`)
+          this.commit({
+            kind: 'ended',
+            id: ticket.id,
+            at: this.at(),
+            cause: 'timer',
+            workerId: ticket.workerId,
+            stopReason: 'long-wait',
+            epochReports: ticket.epochReports,
+          })
+          this.warn(
+            `[dispatcher] 票 ${ticket.id} 排队超过 ${this.config.longWaitMinutes} 分钟，放掉 worker ${ticket.workerId}`,
+          )
+          continue
+        }
         // 探路超时：跟下面三档提醒各走各的。降级那一笔写完就当场 admit（见
         // `degradeProbe`），所以降级成功这张票已经不在 planned 了，这一拍到此为止。
         // 只认 status=running：blocked 是排队、waiting 有人在看，都不是「一轮在跑」。
@@ -998,6 +1061,20 @@ export class TicketDesk {
           if (this.signal(ticket, 'running-90m', since)) signals += 1
         }
       }
+      // 漏唤醒兜底（审计 A2）：phase=queued 的票，只要 waitOn 里有一张已经
+      // 不在日志、已终态、或者停在 waiting 且 worker 已死，就当场再扫一遍队列。
+      // 不等 close 事件——前票被重启掐死时根本不会有 close。
+      const staleBlocked = this.log.list().some((ticket) => {
+        if (!isOpen(ticket.status) || ticket.phase !== 'queued') return false
+        const waitOn = ticket.waitOn ?? []
+        if (waitOn.length === 0) return true
+        return waitOn.some((wait) => {
+          const other = this.log.get(wait.ticketId)
+          if (!other || !isOpen(other.status)) return true
+          return other.status === 'waiting' && other.workerAlive === false
+        })
+      })
+      if (staleBlocked) signals += (await this.releaseBlocked()).length
       // 撤回审计是独立的一段：只扫窗口内 done 票、只发报告、不改任何票。
       // 不塞进上面那个只扫 open 的循环，也不跟着它的 continue 走。
       this.auditIfDue(now)
@@ -1521,6 +1598,10 @@ export class TicketDesk {
     let strong = false
     for (const other of all) {
       if (other.id === ticket.id || !isOpen(other.status)) continue
+      // 停在 waiting 且 worker 已经不在的票不占资源：它不会自己接着跑，等有人
+      // 重新派活时 admit 会再判一次。workerAlive=true 的 waiting 不跳过——那是
+      // 正常收工等人回话，随时可能 resumed，跳过会把同仓两票放到一起。
+      if (other.status === 'waiting' && other.workerAlive === false) continue
       // 排在自己后面的票不挡自己：FIFO 只看前面还欠着谁的账。
       if (byClaimOrder(other, ticket) >= 0) continue
       let verdict
@@ -1702,7 +1783,7 @@ export class TicketDesk {
   /**
    * 判一次并决定派不派活。返回 true = 这一轮真派出去了。
    *
-   * 强冲突只落 `conflict-checked`（phase=blocked + waitOn），一个字节的 status
+   * 强冲突只落 `conflict-checked`（phase=queued + waitOn），一个字节的 status
    * 都不写，票停在原地等放行；其余先落判定（phase=running + 弱冲突提示）再派
    * 原任务。派不出去就把 phase 退回 planned——票面不许出现在干活其实没人。
    */
@@ -1780,7 +1861,7 @@ export class TicketDesk {
    * 有票收工了，回头放行排队里的票。
    *
    * FIFO：按 `byClaimOrder`（交声明先后；没声明/同毫秒退回排队序号 `seq`）
-   * 扫 `phase === 'blocked'`，一张一张来——先放行完这张、让它的 phase 落成
+   * 扫 `phase === 'queued'`，一张一张来——先放行完这张、让它的 phase 落成
    * running，再判下一张，否则三张票会同时看到「对手已经不在了」一起冲出去。
    * 顺序必须跟判定用同一把尺：按 seq 扫会先把「后声明、票号在前」的那张放
    * 出去，于是真正先声明的反而看着它跑。派不出去就留在队里，等下次收工再试。
@@ -1789,9 +1870,9 @@ export class TicketDesk {
     const released: string[] = []
     const queue = [...this.log.list()].sort(byClaimOrder)
     for (const queued of queue) {
-      if (!isOpen(queued.status) || queued.phase !== 'blocked') continue
+      if (!isOpen(queued.status) || queued.phase !== 'queued') continue
       const current = this.log.get(queued.id)
-      if (!current || !isOpen(current.status) || current.phase !== 'blocked') continue
+      if (!current || !isOpen(current.status) || current.phase !== 'queued') continue
       const verdict = this.judgeTicket(current)
       if (verdict.level === 'strong') {
         // 排队的对手换了（收工前又开了新的票占同一片）：重写名单；没变就不写，
@@ -1940,7 +2021,7 @@ export class TicketDesk {
       this.closeProbe(ticket, sessionId)
       const current = this.log.get(ticket.id) ?? ticket
       // 探路收工就是判定那一刻：这一轮不是「进 waiting」，而是判冲突然派执行轮。
-      // 判输了就排队（phase=blocked），status 一个字节都不动，人就停在 idle。
+      // 判输了就排队（phase=queued），status 一个字节都不动，人就停在 idle。
       if (current.phase === 'planned') {
         await this.admit(current)
         continue

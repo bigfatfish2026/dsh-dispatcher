@@ -142,6 +142,8 @@ describe('探路超时当拍推进', () => {
     )
     await idle(h, 'worker-1')
     expect(h.log.get(blocker.id)!.phase).toBe('running')
+    // 挡路票的执行轮 worker 在活表里：否则巡检的 A2 死 worker 兜底会先把它收成 waiting。
+    h.agents.markAlive(h.log.get(blocker.id)!.workerId!)
 
     const dealt = await h.desk.open({ goal: '降级票', brief: '降级票', dir: '/tmp/probe-degrade-ws' }, h.main)
     h.clock.advance(TIMEOUT_MS)
@@ -149,7 +151,7 @@ describe('探路超时当拍推进', () => {
 
     const ticket = h.log.get(dealt.id)!
     expect(ticket.degraded).toBe(true)
-    expect(ticket.phase).toBe('blocked')
+    expect(ticket.phase).toBe('queued')
     expect(ticket.waitOn).toEqual([{ ticketId: blocker.id, resources: [DIR] }])
     // 两只探路 + 挡路那张的执行轮；降级票这一轮一只都没派。
     expect(h.subagents.spawned).toHaveLength(3)

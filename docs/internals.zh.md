@@ -33,7 +33,9 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | `rejectOnMismatch` | boolean | `true` | 选档一致性校验总开关 |
 | `provider` | string | `spawn` | 传给 `startActivation` 的 provider 名 |
 | `maxDepth` | number | `2` | 子会话深度；`1` = 子会话不能再派子会话 |
-| `maxOpen` | number | `8` | 同时开着的票上限，`done` / `dropped` 不占名额 |
+| `maxExec` | number | `8` | 同时在干的票上限：只数 `status=running` 且 `phase≠blocked` 的票 |
+| `maxQueued` | number | `4` | 排队等放行的票上限：只数 `phase=queued` 的票；和执行名额各数各的，谁满说谁 |
+| `maxOpen` | number | — | 已废弃：老配置还能加载（不报错），但不再参与计数，执行名额按 `maxExec` 默认 8 算 |
 | `briefMaxColumns` | number | `34` | `brief` 显示列宽上限，汉字算 2 列 |
 | `sweepMs` | number | `10000` | 巡检间隔，毫秒，最小 500；`0` 关定时器 |
 | `sweepMinutes` | number | — | 已过时，改用 `sweepMs`；显式配了按 `×60000` 折算并 warn |
@@ -67,7 +69,7 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 
 ## 状态与写入者
 
-六个状态：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算还开着，占 `maxOpen`。
+六个状态：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算还开着。名额分两本：`maxExec` 数正在干的（`running` 且没排队），`maxQueued` 数排队等放行的（`phase=queued`）。
 
 - `dispatch_open`：建票写 `open`，起完子会话写 `running`
 - `dispatch_block`：挂起，等人拍板（仅主会话有）

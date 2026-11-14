@@ -175,6 +175,19 @@ describe('关票对账', () => {
     expect(snapshot.outOfScope).toEqual([`file:${EVENTS}`])
   })
 
+  it('越界不只进回执：走 notifier 给开票方推一句', async () => {
+    const { host } = await closedTicket([SRC, EVENTS])
+    const text = host.agents[0]!.messages.join('\n')
+    expect(text).toContain('收工时对不上账')
+    expect(text).toContain('动了没声明的资源')
+    expect(text).toContain(`file:${EVENTS}`)
+  })
+
+  it('没越界不推：通知里没有对账那一句', async () => {
+    const { host } = await closedTicket([SRC, `${BASE}/tests/helpers/plugin-harness.ts`])
+    expect(host.agents[0]!.messages.join('\n')).not.toContain('收工时对不上账')
+  })
+
   it('没越界不留痕：全部落在声明 writes 里，closed 不带 outOfScope，票面也没有', async () => {
     const { file } = await closedTicket([SRC, `${BASE}/tests/helpers/plugin-harness.ts`])
 

@@ -101,6 +101,28 @@ export interface OwnerNotifier {
   resumed(ticketId: string): Promise<boolean>
   /** 冲突排队放行：摘掉挂起事实，再推开票方一句「轮到它了」。 */
   released(input: ReleasedInput): Promise<boolean>
+  /**
+   * 收工时发现票动了没声明的资源：给开票方推一句。老宿主/假件可以不实现，
+   * 票台的调用点会判 `typeof === 'function'`。
+   */
+  outOfScope?(input: OutOfScopeInput): Promise<boolean>
+}
+
+/** 收工越界：一句话说清票号、越界几处、前几处是什么；不回滚，只提醒。 */
+export interface OutOfScopeInput {
+  ticketId: string
+  brief: string
+  paths: readonly string[]
+  /** 开票方 sessionId：越界通知指名送给它。 */
+  publisher?: string
+}
+
+const OUT_OF_SCOPE_MAX = 3
+
+export function outOfScopeText(input: OutOfScopeInput): string {
+  const shown = input.paths.slice(0, OUT_OF_SCOPE_MAX).join('、')
+  const more = input.paths.length > OUT_OF_SCOPE_MAX ? ` 等 ${input.paths.length} 处` : ''
+  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」收工时对不上账：动了没声明的资源 ${shown}${more}。不回滚，只提醒；下张票可能被它撞。`
 }
 
 function messageOf(error: unknown): string {
@@ -239,6 +261,9 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
     released(input) {
       deps.facts?.forget(input.ticketId, ['blocked'])
       return send(releasedText(input), false, input.publisher)
+    },
+    outOfScope(input) {
+      return send(outOfScopeText(input), false, input.publisher)
     },
   }
 }

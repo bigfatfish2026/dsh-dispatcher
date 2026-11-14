@@ -258,7 +258,17 @@ function text(value: unknown): string {
 const PHASE_MARKS: Record<string, string> = {
   planning: '探路中',
   planned: '待放行',
-  blocked: '冲突排队',
+  queued: '冲突排队',
+}
+
+/** 票面上给人看的补充：status=blocked 是「等人」，phase=queued 是「等资源」。 */
+const STATUS_MARKS: Record<string, string> = {
+  blocked: '等人',
+}
+
+function statusMark(status: string | undefined): string {
+  const mark = status ? STATUS_MARKS[status] : undefined
+  return mark ? `（${mark}）` : ''
 }
 
 function phaseMark(phase: string | undefined): string {
@@ -272,7 +282,7 @@ function ticketLine(view: TicketView): string {
     view.pendingInputs ? '»' + view.pendingInputs : '',
     view.pendingReports ? '«' + view.pendingReports : '',
   ].join('')
-  return `${marks ? marks + ' ' : ''}${view.id} ${view.status}${phaseMark(view.phase)}：${view.brief}`
+  return `${marks ? marks + ' ' : ''}${view.id} ${view.status}${statusMark(view.status)}${phaseMark(view.phase)}：${view.brief}`
 }
 
 /**
@@ -1098,7 +1108,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const tickets = value.tickets ?? []
           if (tickets.length === 0) return [{ type: 'text', text: 'no reports' }]
           const blocks = tickets.map((ticket) => {
-            const head = `ticket ${ticket.id} ${ticket.status}${phaseMark(ticket.phase)}：${ticket.goal}`
+            const head = `ticket ${ticket.id} ${ticket.status}${statusMark(ticket.status)}${phaseMark(ticket.phase)}：${ticket.goal}`
             const body = (ticket.reports ?? []).map(
               (report) => `  #${report.n}${report.read ? ' (read)' : ''} ${report.text}`,
             )

@@ -33,7 +33,9 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | `rejectOnMismatch` | boolean | `true` | Master switch for the preset consistency guard |
 | `provider` | string | `spawn` | Provider name passed to `startActivation` |
 | `maxDepth` | number | `2` | Subagent depth; `1` means a worker cannot dispatch further |
-| `maxOpen` | number | `8` | Open tickets allowed at once; `done` / `dropped` do not count |
+| `maxExec` | number | `8` | Tickets executing at once: counts `status=running` with `phase≠blocked` only |
+| `maxQueued` | number | `4` | Tickets waiting for release: counts `phase=queued` only; the two quotas are counted separately, a full one names itself |
+| `maxOpen` | number | — | Deprecated: older profiles still load (no error) but it no longer limits anything; execution falls back to the `maxExec` default of 8 |
 | `briefMaxColumns` | number | `34` | Display width cap for `brief`; a 汉字 counts as 2 |
 | `sweepMs` | number | `10000` | Sweep interval in ms, minimum 500; `0` disables the timer |
 | `sweepMinutes` | number | — | Obsolete; use `sweepMs`. If set, it wins at `×60000` and logs a warning |
@@ -67,7 +69,7 @@ A ticket is a stream of JSONL events, append-only. `status` is not a mutable fie
 
 ## Statuses and who writes them
 
-Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open and occupy `maxOpen`.
+Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open. The quota is split: `maxExec` counts executing tickets (`running`, not queued), `maxQueued` counts queued ones (`phase=queued`).
 
 - `dispatch_open`: writes `open`, then `running` once the worker is up
 - `dispatch_block`: parks the ticket while a person decides (main session only)

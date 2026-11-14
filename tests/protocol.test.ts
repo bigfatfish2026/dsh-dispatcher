@@ -39,7 +39,7 @@ describe('协议常量', () => {
 
   it('status / phase / 写类名单唯一、内容固定、冻结', () => {
     expect(TICKET_STATUSES).toEqual(['open', 'running', 'waiting', 'blocked', 'done', 'dropped'])
-    expect(TICKET_PHASES).toEqual(['planning', 'planned', 'blocked', 'running'])
+    expect(TICKET_PHASES).toEqual(['planning', 'planned', 'queued', 'running'])
     expect(WRITE_TOOLS).toEqual(['bash', 'edit', 'write'])
     for (const list of [TICKET_STATUSES, TICKET_PHASES, WRITE_TOOLS]) {
       expect(new Set(list).size).toBe(list.length)
