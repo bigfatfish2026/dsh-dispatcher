@@ -10,7 +10,7 @@
  * 直接拒绝，不许猜一个近似的。
  */
 import { briefIsBlank, truncateColumns } from '../store'
-import type { IntentSpec, PresetSource, TicketEvent, TicketOrigin, TicketStatus } from '../store'
+import type { PresetSource, TicketEvent, TicketOrigin, TicketStatus } from '../store'
 import type { PresetTools } from './preset-guard'
 import type { Clock } from './clock'
 import type { WorkerPool, WorkerRegistration } from './workers'
@@ -199,14 +199,14 @@ export function buildLabel(ticketId: string, brief: string): string {
 /**
  * 这一轮派的是什么活：
  *
- * - `probe`：探路子会话的第一轮。窗口还开着，`write` / `edit` / `bash` 都装不上，
- *   它只交声明不动手。
+ * - `probe`：每张票的第一轮，没有例外。窗口还开着，`write` / `edit` / `bash`
+ *   都装不上，它只交声明不动手。
  * - `task`：判定放行后的执行轮。原 worker 还活着就把这份任务书投回**同一个
  *   会话**（探路那只已经摸过目录和声明，换一只等于白探），真没了才 spawn 新的
  *   一只；两条路都走这一套任务书。
  * - `degraded`：探路超时降级后投的那一轮。声明没等到，直接干，干完补一份。
  *
- * 不传 = `task`：老调用方（以及自定义 prompt）走原来的任务书，一个字不变。
+ * 不传 = `task`：执行轮那套任务书。
  */
 export type PromptRound = 'probe' | 'task' | 'degraded'
 
@@ -349,8 +349,10 @@ export async function startWorker(input: StartWorkerInput): Promise<WorkerRegist
     throw new Error(`${input.failure ?? `票 ${ticketId} 开出来了`}，但派活失败：${messageOf(error)}`)
   }
 
-  // 派活结束：窗口已经挂到具体的子会话身上（或者它压根没来）。
-  input.probeWindows?.drop(ticketId)
+  // 派活回来了，手上才有 worker 的会话身份：补进探路登记，认领 `agent/created`
+  // 那一刀先挂起来的 agent（宿主的 created 事件是在 startActivation 返回前发的，
+  // 见 probe.ts 头注）。认领成功登记就消费掉；没等到就留给后续事件或超时降级。
+  input.probeWindows?.bind?.(ticketId, registration.workerId)
 
   // 三个票工具按 agent 层再装一道：档位的 allow 名单只滤镜全局工具面，按 agent
   // 注册的这几件不受它管（见 `worker-tools.ts` 头注）。派活刚回来手上只有
@@ -399,17 +401,8 @@ export interface TicketIntent {
   preset?: string
   /** 幂等键：同一次调用重放不许开第二张票。 */
   requestId?: string
-  /** 提前拼好的活；不给就按模板生成。 */
-  prompt?: string
   /** 谁提的：`main` / `ego`。不传就是 `main`，老调用行为不变。 */
   origin?: TicketOrigin
-  /** 撤回意图：影响面、可撤性、预演、撤回指南。不传就是没有，闸放行。 */
-  intent?: IntentSpec
-  /**
-   * 探路开关：true 就先落一条 `planning`，让这只子会话在只读窗口里出方案，
-   * 等它交声明（`declared`）再进执行轮。不传就是老路（直接干活）。
-   */
-  probe?: boolean
 }
 
 export interface TicketReceipt {
@@ -439,16 +432,19 @@ export interface PublishInput {
   /** 建票前的未收工票数，回执里 +1 给人看。 */
   openCount: number
   /**
-   * 分级闸降级：票照建，但不派活、落 `gated` 停在 waiting。值是给人看的原因。
-   * 不给就是原路（落票 → 派活）。
-   */
-  hold?: string
-  /**
-   * 探路窗口：落 `planning` 之后登记、派活之后撤登记（`probe.ts`）。只探路票用。
+   * 探路窗口：落 `planning` 之后登记、派活之后撤登记（`probe.ts`）。每张票都用。
    */
   probeWindows?: ProbeRegistry
   /** 票工具的兜底注册，见 `startWorker` 同一个字段。 */
   workerTools?: WorkerToolPort
+  /**
+   * 探路窗口的耐心（毫秒）：落 `planning` 那行日志打的就是这个数。
+   *
+   * 由 desk 换算好再交下来，跟它判超时用的是同一个值；不传的老调用不打这行。
+   */
+  probeTimeoutMs?: number
+  /** 日志出口：不传就静默，开票不因为少一个日志口就失败。 */
+  warn?: (message: string) => void
 }
 
 /** 落票 → 派活 → 记 worker。失败路径见文件头。 */
@@ -470,42 +466,28 @@ export async function publishTicket(input: PublishInput): Promise<TicketReceipt>
     ...(input.decision.why ? { presetWhy: input.decision.why } : {}),
     requestId,
     ...(input.config.device ? { device: input.config.device } : {}),
-    // 老调用不传这两栏：事件里就没有这两个键，投影按 `main` / 无意图兜底。
+    // 老调用不传 origin：事件里就没有这个键，投影按 `main` 兜底。
     ...(intent.origin ? { origin: intent.origin } : {}),
-    ...(intent.intent ? { intent: intent.intent } : {}),
   })
 
-  // 分级闸降级：票照建（人看得见、能接着发话），但不派活，落 waiting。
-  if (input.hold) {
-    input.commit({
-      kind: 'gated',
-      id,
-      at,
-      cause: 'reaction',
-      reason: input.hold,
-    })
-    return {
-      id,
-      status: 'waiting',
-      preset: input.decision.preset,
-      presetSource: input.decision.source,
-      openCount: input.openCount + 1,
-      reason: input.hold,
-    }
+  // 探路是必经之路，没有开关：每张票都先停在 planning，窗口由 `agent/created`
+  // 那一刀装（见 probe.ts）。登记必须在 `pool.start` 之前——新 worker 就是在
+  // 派活里面冒出来的。
+  input.commit({
+    kind: 'planning',
+    id,
+    at,
+    cause: 'tool',
+    preset: input.decision.preset,
+  })
+  // 探路开始那一行带实际生效的毫秒数：超时判定用的就是这个值，人看日志和票面
+  // 真正降级的时刻不会差一整分钟（2 分钟 = 120000ms，不是「大约两分钟」）。
+  if (input.probeTimeoutMs !== undefined) {
+    input.warn?.(
+      `[probe] 探路开始 id=${id} timeoutMs=${input.probeTimeoutMs} preset=${input.decision.preset}`,
+    )
   }
-
-  // 探路：票先停在 planning，窗口由 `agent/created` 那一刀装（见 probe.ts）。
-  // 登记必须在 `pool.start` 之前——新 worker 就是在派活里面冒出来的。
-  if (intent.probe === true) {
-    input.commit({
-      kind: 'planning',
-      id,
-      at,
-      cause: 'tool',
-      preset: input.decision.preset,
-    })
-    input.probeWindows?.expect(id)
-  }
+  input.probeWindows?.expect(id)
 
   const label = buildLabel(id, input.brief)
   const registration = await startWorker({
@@ -513,17 +495,15 @@ export async function publishTicket(input: PublishInput): Promise<TicketReceipt>
     provider: input.config.provider,
     preset: input.decision.preset,
     label,
-    prompt:
-      intent.prompt?.trim() ||
-      buildPrompt({
-        ticketId: id,
-        goal: intent.goal,
-        brief: input.brief,
-        ...(intent.dir ? { dir: intent.dir } : {}),
-        epoch: 1,
-        // 探路票的第一轮是只读轮：任务书得先把「只看不改、交声明」说在前头。
-        ...(intent.probe === true ? { round: 'probe' as const } : {}),
-      }),
+    // 第一轮永远是只读探路轮：任务书固定用探路那套，调用方给不了别的 prompt。
+    prompt: buildPrompt({
+      ticketId: id,
+      goal: intent.goal,
+      brief: input.brief,
+      ...(intent.dir ? { dir: intent.dir } : {}),
+      epoch: 1,
+      round: 'probe',
+    }),
     parent: input.parent,
     ...(intent.dir ? { cwd: intent.dir } : {}),
     ...(input.config.maxDepth ? { maxDepth: input.config.maxDepth } : {}),

@@ -1384,6 +1384,11 @@ export class TicketDesk {
 
     const workerId = ticket.workerId
     if (workerId && this.pool.alive(workerId) === true) {
+      // 续派前先拆探路窗口，跟 handleStatus 那条 idle 路一个口径：巡检兜底捞起
+      // 一张 planned 票时，探路子会话可能早就交完声明、idle 事件却丢了（重启、事
+      // 件被吞），窗口还挂在它身上。先把只读钳子松开，再投下一句，否则执行轮
+      // 手里少 write / edit / bash 三件，只能干看着。
+      this.closeProbe(ticket, workerId)
       try {
         const messageId = await this.pool.send(workerId, parent, prompt)
         this.commit({
