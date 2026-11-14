@@ -225,6 +225,89 @@ function inertBinding(outcome: RouterOutcome): RouterBinding {
   }
 }
 
+type RestrictionPrompt = 'allow' | 'dropAll' | 'none'
+
+/** 一份限制的“政策参数”：名单从哪儿来、prompt 怎么处理、要不要全量覆盖检查。 */
+interface RestrictionMode {
+  effectLabel: string
+  filter: 'allow' | 'deny'
+  list: readonly string[]
+  prompt: RestrictionPrompt
+  /** deny 专用：名单盖住全部注册工具时拒绝，别把 worker 剥光。 */
+  fullCoverageGuard?: boolean
+  /** allow 专用：registry 没动的重复 pass 不再重装。 */
+  trackMissing?: boolean
+}
+
+interface RestrictionState {
+  agent: RouterAgent
+  options: RouterOptions
+  mode: RestrictionMode
+  current: readonly string[]
+  stopRestrict?: () => void
+  promptBinding?: PromptFilterBinding
+  promptTried: boolean
+  first?: RouterOutcome
+  lastMissing: string
+  arm(): void
+}
+
+/**
+ * 两份限制共用的骨架：状态、幂等 sync、dispose/arm、对外的 RouterBinding。
+ *
+ * 白名单和 worker deny 名单的差别只在“名单从哪来、prompt 怎么剪、要不要全量
+ * 覆盖检查”，这些放进 RestrictionMode；真正的一次安装策略由 apply 给。
+ */
+function createRestrictInstaller(
+  agent: RouterAgent,
+  options: RouterOptions,
+  mode: RestrictionMode,
+  apply: (state: RestrictionState) => RouterOutcome,
+): RouterBinding {
+  let disposed = false
+  let syncing = false
+  let armed = false
+  const state: RestrictionState = {
+    agent,
+    options,
+    mode,
+    current: [],
+    promptTried: false,
+    lastMissing: '',
+    arm: () => {
+      if (armed || disposed) return
+      armed = true
+      agent.ctx.effect(() => () => dispose(), mode.effectLabel)
+    },
+  }
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
+    state.stopRestrict?.()
+    state.stopRestrict = undefined
+    state.promptBinding?.dispose()
+    state.promptBinding = undefined
+    state.current = []
+  }
+  const sync = (): RouterOutcome => {
+    if (disposed || syncing) return state.first ?? 'unchanged'
+    syncing = true
+    try {
+      return apply(state)
+    } finally {
+      syncing = false
+    }
+  }
+  sync()
+  return {
+    sync,
+    dispose,
+    installed: () => [...state.current],
+    outcome: () => state.first ?? 'unchanged',
+  }
+}
+
+
 /**
  * Bind one worker subagent's deny list and install it once.
  *
@@ -254,114 +337,66 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
   const prunePrompt = options.pruneWorkerPrompt !== false
   if (wanted.length === 0 && !prunePrompt) return inertBinding('worker')
 
-  let current: readonly string[] = []
-  let first: RouterOutcome | undefined
-  let stopRestrict: (() => void) | undefined
-  let promptBinding: PromptFilterBinding | undefined
-  let promptTried = false
-  let armed = false
-  let disposed = false
-  let syncing = false
-
-  /**
-   * Names the registry can answer for right now.
-   *
-   * The installed list counts as known too: once a deny is in force this scope
-   * reads the hidden names as absent, and a plain `get` check would then drop
-   * them from the next pass and hand the worker its memory tools back. The
-   * registry half is {@link registryLookup}, which also reads the global name
-   * list rather than `get` alone.
-   */
-  const known = (confirmed: (name: string) => boolean, name: string): boolean =>
-    confirmed(name) || current.includes(name)
-
-  const dispose = (): void => {
-    if (disposed) return
-    disposed = true
-    stopRestrict?.()
-    stopRestrict = undefined
-    promptBinding?.dispose()
-    promptBinding = undefined
-    current = []
-  }
-
-  const arm = (): void => {
-    if (armed || disposed) return
-    armed = true
-    agent.ctx.effect(() => () => dispose(), 'dsh-dispatcher.worker-deny')
-  }
-
-  /**
-   * Install the one-shot prompt pass, at most once.
-   *
-   * `promptTried` is not the same as `promptBinding !== undefined`: a host with
-   * no scoped hook answers `undefined`, and retrying that on every `tools/change`
-   * would only repeat the warning.
-   */
-  const installPrompt = (): void => {
-    if (!prunePrompt || promptTried || disposed) return
-    promptTried = true
-    promptBinding = bindPromptFilter(agent.ctx, {
-      // Nothing to keep alive: every tool section goes, so the vocabulary is
-      // never consulted.
-      allow: [],
-      dropAllToolSections: true,
-      effectLabel: 'dsh-dispatcher.worker-prompt',
-      log: options.log,
-    })
-  }
-
-  const sync = (): RouterOutcome => {
-    if (disposed) return first ?? 'unchanged'
-    if (syncing) return first ?? 'unchanged'
-    syncing = true
-    try {
-      installPrompt()
-      arm()
-      // The prompt pass stands on its own: with no deny list there is still a
-      // worker prompt to trim.
+  return createRestrictInstaller(
+    agent,
+    options,
+    {
+      effectLabel: 'dsh-dispatcher.worker-deny',
+      filter: 'deny',
+      list: wanted,
+      prompt: prunePrompt ? 'dropAll' : 'none',
+      fullCoverageGuard: true,
+    },
+    (state) => {
+      const { options, mode } = state
+      const known = (confirmed: (name: string) => boolean, name: string): boolean =>
+        confirmed(name) || state.current.includes(name)
+      if (mode.prompt === 'dropAll' && !state.promptTried) {
+        state.promptTried = true
+        state.promptBinding = bindPromptFilter(agent.ctx, {
+          allow: [],
+          dropAllToolSections: true,
+          effectLabel: 'dsh-dispatcher.worker-prompt',
+          log: options.log,
+        })
+      }
+      state.arm()
       if (wanted.length === 0) {
-        first ??= 'worker'
+        state.first ??= 'worker'
         return 'worker'
       }
-
       const lookup = registryLookup(agent, options)
       const confirmed = lookup.confirmed
       const names = wanted.filter((name) => known(confirmed, name))
       const missing = wanted.filter((name) => !names.includes(name))
-
       if (names.length === 0) {
         options.log?.(
           '[dispatcher] worker deny list names no registered tool; nothing installed (memory writes stay guarded by the memory plugin)',
         )
-        first ??= 'empty'
+        state.first ??= 'empty'
         return 'empty'
       }
-
-      // A deny list that covers the whole registry is a typo, not a rule: the
-      // worker would come up with no tools at all and every ticket would fail
-      // with "unknown tool". Refuse it while the previous pass stays in force.
-      const registered = lookup.names()
-      if (registered.length > 0 && registered.every((name) => names.includes(name))) {
-        options.log?.(
-          `[dispatcher] worker deny list covers all ${registered.length} registered tools; refusing to leave a worker with nothing`,
-        )
-        first ??= 'empty'
-        return 'empty'
+      if (mode.fullCoverageGuard) {
+        const registered = lookup.names()
+        if (registered.length > 0 && registered.every((name) => names.includes(name))) {
+          options.log?.(
+            `[dispatcher] worker deny list covers all ${registered.length} registered tools; refusing to leave a worker with nothing`,
+          )
+          state.first ??= 'empty'
+          return 'empty'
+        }
       }
-
-      if (sameNames(names, current)) {
-        first ??= 'denied'
+      if (sameNames(names, state.current)) {
+        state.first ??= 'denied'
         return 'unchanged'
       }
-
-      const previous = current
+      const previous = state.current
       const attempt = restrictPruned(agent, 'deny', names, confirmed)
       if (attempt.stop === undefined) {
         options.log?.(
           `[dispatcher] worker deny list refused: ${attempt.refused ?? 'unknown reason'} — keeping the previous one`,
         )
-        first ??= 'error'
+        state.first ??= 'error'
         return 'error'
       }
       const installed = attempt.kept
@@ -371,14 +406,13 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
           `[dispatcher] worker deny list dropped ${dropped.length} name(s) the registry no longer answers to: ${dropped.join(', ')}`,
         )
       }
-      const removed = stopRestrict
-      stopRestrict = attempt.stop
-      current = [...installed]
+      const removed = state.stopRestrict
+      state.stopRestrict = attempt.stop
+      state.current = [...installed]
       removed?.()
-      arm()
-
-      if (first === undefined) {
-        first = 'denied'
+      state.arm()
+      if (state.first === undefined) {
+        state.first = 'denied'
         options.info?.(
           `[dispatcher] worker subagents no longer see ${installed.length} tool(s): ${installed.join(', ')}`,
         )
@@ -389,7 +423,6 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
         }
         return 'denied'
       }
-
       const added = installed.filter((name) => !previous.includes(name))
       if (added.length > 0) {
         options.info?.(`[dispatcher] worker deny list grew by ${added.length}: ${added.join(', ')}`)
@@ -398,20 +431,10 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
         options.log?.(`[dispatcher] workerDenyTools still unregistered: ${missing.join(', ')}`)
       }
       return 'updated'
-    } finally {
-      syncing = false
-    }
-  }
-
-  sync()
-
-  return {
-    sync,
-    dispose,
-    installed: () => [...current],
-    outcome: () => first ?? 'unchanged',
-  }
+    },
+  )
 }
+
 
 /**
  * Bind the whitelist to one agent and install it once.
@@ -423,115 +446,56 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
  * optimisation.
  */
 export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBinding {
-  // The escape file is the emergency exit for the whole plugin, worker deny
-  // included: while it exists nothing is trimmed anywhere.
+  // The escape file is the emergency exit for the whole plugin, worker deny included.
   const escape = escapePath(options.escapeFile)
   if (existsSync(escape)) {
     options.log?.(`[dispatcher] router whitelist skipped: ${escape} exists`)
     return inertBinding('escape')
   }
-
   if (isWorkerSession(agent.session.header.origin)) return bindWorkerDeny(agent, options)
 
-  let current: readonly string[] = []
-  let first: RouterOutcome | undefined
-  let stopRestrict: (() => void) | undefined
-  let promptBinding: PromptFilterBinding | undefined
-  let armed = false
-  let disposed = false
-  let syncing = false
-  /**
-   * The missing-name set the last pass acted on, sorted and joined.
-   *
-   * The "has anything moved since I last looked" half of the short-circuit:
-   * equal means the registry repeated itself, so an install would install the
-   * same list again and only feed `tools/change`.
-   */
-  let lastMissing = ''
-
-  /**
-   * Names this pass can hand to `restrict`.
-   *
-   * Two layers on purpose. {@link registryLookup} is the authority: the global
-   * plugin view, which no restriction of ours can filter. On top of it, a name
-   * already in `current` counts as known — that is not a registry fact, it is
-   * the one thing this module must never get wrong about itself. The incident
-   * this fix comes from: a pass ran while dsh-memory's tools were momentarily
-   * unregistered (plugin reload ordering), the name was judged missing and
-   * dropped, and from then on the agent's own view could not see it either —
-   * because the restriction *we* installed had hidden it. Asking only that
-   * view made the short list self-confirming, so it never grew back.
-   */
-  const usable = (allow: readonly string[], confirmed: (name: string) => boolean): string[] => {
-    const names: string[] = []
-    for (const name of allow) {
-      if (names.includes(name)) continue
-      if (confirmed(name) || current.includes(name)) names.push(name)
-    }
-    return names
-  }
-
-  const dispose = (): void => {
-    if (disposed) return
-    disposed = true
-    stopRestrict?.()
-    stopRestrict = undefined
-    promptBinding?.dispose()
-    promptBinding = undefined
-    current = []
-  }
-
-  /** Hand the restriction's lifetime to the agent context, once. */
-  const arm = (): void => {
-    if (armed || disposed) return
-    armed = true
-    agent.ctx.effect(() => () => dispose(), 'dsh-dispatcher.router-tools')
-  }
-
-  const sync = (): RouterOutcome => {
-    if (disposed) return first ?? 'unchanged'
-    if (syncing) return first ?? 'unchanged'
-    syncing = true
-    try {
-      const allow = [...new Set(options.allow)]
+  return createRestrictInstaller(
+    agent,
+    options,
+    {
+      effectLabel: 'dsh-dispatcher.router-tools',
+      filter: 'allow',
+      list: options.allow,
+      prompt: 'allow',
+      trackMissing: true,
+    },
+    (state) => {
+      const { options, mode } = state
+      const allow = [...new Set(mode.list)]
+      const usable = (confirmed: (name: string) => boolean): string[] => {
+        const names: string[] = []
+        for (const name of allow) {
+          if (names.includes(name)) continue
+          if (confirmed(name) || state.current.includes(name)) names.push(name)
+        }
+        return names
+      }
       const { confirmed } = registryLookup(agent, options)
-      const names = usable(allow, confirmed)
+      const names = usable(confirmed)
       const missing = allow.filter((name) => !names.includes(name))
       const missingKey = [...missing].sort().join('\n')
-
       if (names.length === 0) {
         options.log?.('[dispatcher] router whitelist is empty after the self-test; nothing installed')
-        first ??= 'empty'
+        state.first ??= 'empty'
         return 'empty'
       }
-
-      /**
-       * A pass whose list is the one already installed, but still short of what
-       * `allow` asks for, is the interesting case: "no change" would be a lie
-       * about the registry and a promise to never look again.
-       *
-       * Only a *different* set of missing names is worth another install. That
-       * is the explicit "what did I last try, and has anything moved since"
-       * test: `tools.restrict` fires `tools/change`, which lands right back
-       * here, and a rule that reinstalled on every event would feed itself
-       * forever. Identical missing sets mean the registry has said nothing new
-       * since the last attempt, so the answer stands.
-       */
-      const stale = missing.length > 0 && missingKey !== lastMissing
-      if (sameNames(names, current) && !stale) {
-        first ??= 'installed'
+      const stale = missing.length > 0 && missingKey !== state.lastMissing
+      if (sameNames(names, state.current) && !stale) {
+        state.first ??= 'installed'
         return 'unchanged'
       }
-
-      const known = current.length > 0
-      // Compared against what was actually installed last time, not against
-      // `names`: a prune inside `restrictPruned` can shorten the list.
+      const known = state.current.length > 0
       const attempt = restrictPruned(agent, 'allow', names, confirmed)
       if (attempt.stop === undefined) {
         options.log?.(
           `[dispatcher] router whitelist reinstall refused: ${attempt.refused ?? 'unknown reason'} — keeping the previous one`,
         )
-        first ??= 'error'
+        state.first ??= 'error'
         return 'error'
       }
       const installed = attempt.kept
@@ -541,22 +505,20 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
           `[dispatcher] router whitelist dropped ${prunedNames.length} name(s) the registry no longer answers to: ${prunedNames.join(', ')}`,
         )
       }
-      const added = installed.filter((name) => !current.includes(name))
-      const removed = current.filter((name) => !installed.includes(name))
-
+      const added = installed.filter((name) => !state.current.includes(name))
+      const removed = state.current.filter((name) => !installed.includes(name))
       const nextPrompt = bindPromptFilter(agent.ctx, { allow: installed, log: options.log })
-      const previousStop = stopRestrict
-      const previousPrompt = promptBinding
-      stopRestrict = attempt.stop
-      promptBinding = nextPrompt
-      current = [...installed]
-      lastMissing = missingKey
+      const previousStop = state.stopRestrict
+      const previousPrompt = state.promptBinding
+      state.stopRestrict = attempt.stop
+      state.promptBinding = nextPrompt
+      state.current = [...installed]
+      state.lastMissing = missingKey
       previousStop?.()
       previousPrompt?.dispose()
-      arm()
-
+      state.arm()
       if (!known) {
-        first = 'installed'
+        state.first = 'installed'
         if (missing.length > 0) {
           options.log?.(
             `[dispatcher] routerTools names no registered global tool answers to: ${missing.join(', ')} — dropped from the whitelist until they register`,
@@ -564,8 +526,7 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
         }
         return 'installed'
       }
-
-      first ??= 'installed'
+      state.first ??= 'installed'
       if (added.length > 0) {
         options.info?.(
           `[dispatcher] router whitelist grew by ${added.length}: ${added.join(', ')} (now ${installed.length} tools)`,
@@ -582,20 +543,10 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
         )
       }
       return 'updated'
-    } finally {
-      syncing = false
-    }
-  }
-
-  sync()
-
-  return {
-    sync,
-    dispose,
-    installed: () => [...current],
-    outcome: () => first ?? 'unchanged',
-  }
+    },
+  )
 }
+
 
 /**
  * Install the whitelist (or, for a worker, the deny list) on one agent, at most

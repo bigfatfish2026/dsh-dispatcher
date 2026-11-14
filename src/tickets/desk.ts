@@ -50,9 +50,11 @@ import {
 import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
-import { judgeConflict, outOfScopePaths } from './conflict'
-import type { ConflictLevel, ConflictSide } from './conflict'
-import { normalizeResources, scanResources } from './resources'
+import { outOfScopePaths } from './conflict'
+import { normalizeResources } from './resources'
+import { TicketHandle, ticketsOfWork } from './handle'
+import { ConflictArbiter, byClaimOrder } from './arbiter'
+import { WorkerRegistry } from './registry'
 import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
 import type { ProbePort, ProbeRegistry } from './probe'
 import type { WorkerToolPort } from './worker-tools'
@@ -340,7 +342,7 @@ export class TicketDesk {
   private readonly log: TicketLog
   private readonly serialize: Serialize
   private readonly clock: Clock
-  private readonly pool: WorkerPool
+  private readonly registry: WorkerRegistry
   private readonly notifier: OwnerNotifier
   private readonly warn: (message: string) => void
   private readonly device?: string
@@ -355,12 +357,11 @@ export class TicketDesk {
    * 来第二个 idle 事件，靠它就等于靠一个已经发生过、不会重来的信号。
    */
   private readonly idleSeen = new Set<string>()
-  /** 已经 warn 过的坏资源串（票号+原串），别每次巡检都重复喊。 */
-  private readonly invalidWarned = new Set<string>()
   /** 上一轮撤回审计的时刻；`undefined` = 还没跑过。 */
   private lastAuditAt: number | undefined = undefined
   /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
   private lastRevertAudit: RevertAuditReport | undefined = undefined
+  private readonly arbiter: ConflictArbiter
   private attached = false
   private timer: unknown
   /** 上一拍巡检还在 serialize 队列里排队或正在跑：闸着，这一拍直接跳过。 */
@@ -378,10 +379,19 @@ export class TicketDesk {
     this.clock = deps.clock ?? realClock
     this.device = deps.device
     this.warn = deps.warn ?? (() => {})
-    this.pool = createWorkerPool({
-      subagents: deps.subagents,
-      agents: deps.agents ?? (() => undefined),
+    this.registry = new WorkerRegistry({
+      pool: createWorkerPool({
+        subagents: deps.subagents,
+        agents: deps.agents ?? (() => undefined),
+        warn: this.warn,
+      }),
+      log: this.log,
+    })
+    this.arbiter = new ConflictArbiter({
+      log: this.log,
+      clock: this.clock,
       warn: this.warn,
+      commit: (event) => this.commit(event),
     })
     this.notifier =
       deps.notifier ??
@@ -561,7 +571,7 @@ export class TicketDesk {
         decision,
         publisher: actor.sessionId,
         parent,
-        pool: this.pool,
+        pool: this.registry.pool,
         commit: (event) => this.commit(event),
         config: {
           provider: this.config.provider,
@@ -587,11 +597,7 @@ export class TicketDesk {
    */
   async send(id: string, text: string, actor?: Actor): Promise<SendReceipt> {
     return this.serialize(async () => {
-      const ticket = this.log.get(id)
-      if (!ticket) throw new Error(`没有票 ${id}`)
-      if (!isOpen(ticket.status)) {
-        throw new Error(`票 ${id} 已收工，要接着干就开新票`)
-      }
+      const ticket = new TicketHandle(this.log, id).openForSend()
       const body = text.trim()
       if (!body) throw new Error('send 的内容不能为空')
 
@@ -623,11 +629,11 @@ export class TicketDesk {
     return this.serialize(async () => {
       const body = text.trim()
       if (!body) throw new Error('report 不能为空')
-      const ticket = this.log.get(id)
-      if (!ticket) throw new Error(`没有票 ${id}`)
       // 归属校验在写之前：别人的票一个字节都不许落。审计 A10 指的就是这里以前
       // 只收 id、不认人。
-      if (actor) this.assertMayReport(ticket, actor)
+      const handle = new TicketHandle(this.log, id)
+      if (actor) handle.assertMayReport(actor)
+      else handle.current()
       this.appendReport(id, body, source)
       const after = this.log.get(id)!
       return { id, epoch: after.epoch, pendingReports: pending(after.reports).length }
@@ -641,7 +647,7 @@ export class TicketDesk {
    * 工具层，所以单开一个公开口子，别让工具去摸 `log.list()`。
    */
   ticketsOfWork(workerId: string): TicketView[] {
-    return this.ticketsOf(workerId).map((ticket) => this.view(ticket))
+    return this.registry.ticketsOf(workerId).map((ticket) => this.view(ticket))
   }
 
   /**
@@ -651,7 +657,7 @@ export class TicketDesk {
   adoptWorker(workerId: string | undefined): boolean {
     const watch = this.deps.watch
     if (!watch || !workerId) return false
-    const mine = this.ticketsOf(workerId).filter((ticket) => isOpen(ticket.status))
+    const mine = this.registry.ticketsOf(workerId).filter((ticket) => isOpen(ticket.status))
     if (mine.length === 0) return false
     const latest = mine.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
     return watch.subscribe(latest.id, latest.workerId ?? workerId)
@@ -681,7 +687,7 @@ export class TicketDesk {
         (intent.impact?.services?.length ?? 0) +
         (intent.impact?.remotes?.length ?? 0)
 
-      const target = this.liveTicketOf(workerId, '声明')
+      const target = TicketHandle.forWorker(this.log, workerId, '声明').current()
 
       // 没给的那一栏沿用票上已有的：声明是补充，不是把开票时的意图清空。
       const nextPlan = summary || files.length
@@ -733,7 +739,7 @@ export class TicketDesk {
     return this.serialize(async () => {
       const normalized = normalizeResources(paths)
       if (normalized.length === 0) throw new Error('touch 至少要给一个路径')
-      const target = this.liveTicketOf(workerId, '报路径')
+      const target = TicketHandle.forWorker(this.log, workerId, '报路径').current()
       this.commit({
         kind: 'touch-reported',
         id: target.id,
@@ -749,10 +755,9 @@ export class TicketDesk {
 
   async block(id: string, reason: string, actor?: Actor): Promise<BlockReceipt> {
     return this.serialize(async () => {
-      if (actor?.kind === 'worker') throw new Error('worker 不能改票的状态：只能交报告')
-      const ticket = this.log.get(id)
-      if (!ticket) throw new Error(`没有票 ${id}`)
-      if (!isOpen(ticket.status)) throw new Error(`票 ${id} 已经 ${ticket.status} 了`)
+      const handle = new TicketHandle(this.log, id)
+      handle.assertRouterCanBlock(actor)
+      const ticket = handle.openForBlock()
       const clean = reason.trim()
       if (!clean) throw new Error('block 的理由不能为空')
       if (ticket.status === 'blocked') return { id, status: 'blocked' }
@@ -775,8 +780,7 @@ export class TicketDesk {
     actor: 'main' | 'worker' = 'main',
   ): Promise<ActionReceipt> {
     return this.serialize(async () => {
-      const ticket = this.log.get(id)
-      if (!ticket) throw new Error(`没有票 ${id}`)
+      const ticket = new TicketHandle(this.log, id).current()
       const summary = typeof input.summary === 'string' ? input.summary.trim() : ''
       if (!summary) throw new Error('summary 不能为空：写清这一步干了什么')
       const length = [...summary].length
@@ -828,9 +832,9 @@ export class TicketDesk {
     opts: { outcome?: 'done' | 'dropped'; note?: string; actor?: Actor } = {},
   ): Promise<CloseReceipt> {
     return this.serialize(async () => {
-      if (opts.actor?.kind === 'worker') throw new Error('worker 不能收工：交报告，让主会话关票')
-      const ticket = this.log.get(id)
-      if (!ticket) throw new Error(`没有票 ${id}`)
+      const handle = new TicketHandle(this.log, id)
+      handle.assertRouterCanClose(opts.actor)
+      const ticket = handle.current()
       if (!isOpen(ticket.status)) {
         return { id, status: ticket.status, closed: false, openCount: this.openCount() }
       }
@@ -867,7 +871,7 @@ export class TicketDesk {
       // 先落盘再收 worker：反过来的话，abort 触发的 ended 可能先到，票还没进终态。
       // 结束通知要赶在 abort 前面，会话还在才推得进去。
       await this.closeWatch(ticket, outcome)
-      if (ticket.workerId) await this.pool.abort(ticket.workerId, `票 ${id} 已收工`)
+      if (ticket.workerId) await this.registry.abort(ticket.workerId, `票 ${id} 已收工`)
       // 收工了：这张票的挂起提醒不该再挂着（哪怕它本来就是排队票）。
       this.forgetBlocked(id)
       // 收工腾出了资源：排队里的票按开票顺序一审，能走的立刻派执行轮。
@@ -986,7 +990,7 @@ export class TicketDesk {
           ticket.status === 'running' &&
           (ticket.phase === undefined || ticket.phase === 'running') &&
           ticket.workerId &&
-          this.pool.alive(ticket.workerId) === false &&
+          this.registry.alive(ticket.workerId) === false &&
           minutesSince(ticket.updatedAt, now) >= this.config.freshMinutes
         ) {
           this.commit({
@@ -1007,9 +1011,9 @@ export class TicketDesk {
           ticket.phase === 'queued' &&
           ticket.workerId &&
           minutesSince(ticket.updatedAt, now) >= this.config.longWaitMinutes &&
-          this.pool.alive(ticket.workerId) === true
+          this.registry.alive(ticket.workerId) === true
         ) {
-          await this.pool.abort(ticket.workerId, `票 ${ticket.id} 排队超过 ${this.config.longWaitMinutes} 分钟，先放掉 worker`)
+          await this.registry.abort(ticket.workerId, `票 ${ticket.id} 排队超过 ${this.config.longWaitMinutes} 分钟，先放掉 worker`)
           this.commit({
             kind: 'ended',
             id: ticket.id,
@@ -1037,7 +1041,7 @@ export class TicketDesk {
           // `pool.alive` 分：真没了就重起一只，还在就把这一轮 steer 回原会话。
           const current = this.log.get(ticket.id) ?? ticket
           if (await this.admit(current)) {
-            this.warn(`[dispatcher] 巡检兜底放行票 ${ticket.id}（${this.workerStateText(ticket)}）`)
+            this.warn(`[dispatcher] 巡检兜底放行票 ${ticket.id}（${this.registry.describe(ticket)}）`)
             continue
           }
           // admit 没派成：要么落成了 blocked（下一拍按 blocked 那档提醒），要么
@@ -1087,7 +1091,7 @@ export class TicketDesk {
     this.stopped = true
     this.pulseWatchers.clear()
     this.stopInterval()
-    await this.pool.abortAll('desk disposed')
+    await this.registry.abortAll('desk disposed')
   }
 
   // ── 内部 ────────────────────────────────────────────────────────────
@@ -1283,9 +1287,9 @@ export class TicketDesk {
       }
       // 只有「真有一轮活在跑」才算 running；waiting/blocked 投递前先记一轮新的。
       const running = ticket.status === 'running' && ticket.workerAlive !== false
-      const alive = this.pool.alive(ticket.workerId)
+      const alive = this.registry.alive(ticket.workerId)
       try {
-        const messageId = await this.pool.send(ticket.workerId, sender, next.text)
+        const messageId = await this.registry.send(ticket.workerId, sender, next.text)
         if (!running || alive === false) {
           this.commit({
             kind: 'resumed',
@@ -1344,47 +1348,6 @@ export class TicketDesk {
       .catch((error) => this.warn(`报告提醒没发出去：${messageOf(error)}`))
   }
 
-  private ticketsOf(workerId: string): TicketSnapshot[] {
-    return this.log
-      .list()
-      .filter((ticket) => ticket.workerId !== undefined && isSameWorker(ticket.workerId, workerId))
-  }
-
-  /**
-   * 按 workerId 反查自己名下那张活票。declare 与 touch 共用：票号不由调用方给，
-   * 别人的票写不进来；没票、票已结束都直接报错，别让子会话以为写成功了。
-   */
-  /**
-   * 谁能往这张票上写报告：worker 只能写自己名下的票，主会话只能写自己开的票。
-   *
-   * `source === 'auto'` 的补报是票台自己写的，不经过这里（没有 actor）。
-   * 老票没有 publisher（2026-11-04 之前的行）时放行主会话，只做能做的校验。
-   */
-  private assertMayReport(ticket: TicketSnapshot, actor: Actor): void {
-    if (actor.kind === 'worker') {
-      if (!isSameWorker(ticket.workerId, actor.sessionId)) {
-        throw new Error(`票 ${ticket.id} 不挂在当前 worker 名下，报告拒收`)
-      }
-      return
-    }
-    if (ticket.publisher !== undefined && ticket.publisher !== actor.sessionId) {
-      throw new Error(`票 ${ticket.id} 不是这个会话开的，报告拒收`)
-    }
-  }
-
-  private liveTicketOf(workerId: string, verb: string): TicketSnapshot {
-    const mine = this.ticketsOf(workerId)
-    if (mine.length === 0) throw new Error('没有挂在这个 worker 上的票')
-    const live = mine.filter((ticket) => isOpen(ticket.status))
-    if (live.length === 0) {
-      // 拿最近那张的号说清楚是哪张结束了，别只回一句「不行」。
-      const last = mine.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
-      throw new Error(`票 ${last.id} 已结束（${last.status}），不能再${verb}`)
-    }
-    // 一张 worker 名下正常情况下只有一张活票；多张时取最近动过的那张，并在
-    // 回执里带票号，别让子会话猜自己刚写到哪张上。
-    return live.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
-  }
 
   private signal(ticket: TicketSnapshot, reason: IdleReason, sinceMinutes: number): boolean {
     // 指纹带 statusSince：同一轮只提醒一次，waiting→running→waiting 能再提醒。
@@ -1510,7 +1473,7 @@ export class TicketDesk {
     if (!workerId) return
     const info = (payload ?? {}) as { stopReason?: unknown; lastAssistantMessage?: unknown }
     const stopReason = typeof info.stopReason === 'string' && info.stopReason ? info.stopReason : 'end'
-    for (const ticket of this.ticketsOf(workerId)) {
+    for (const ticket of this.registry.ticketsOf(workerId)) {
       if (!isOpen(ticket.status) || !ticket.workerId) continue
       const epochReports = ticket.epochReports
       this.commit({
@@ -1541,90 +1504,6 @@ export class TicketDesk {
   }
 
   // ── 冲突判定与排队 ──────────────────────────────────────────────────
-
-  /**
-   * 这张票在判定里长什么样。
-   *
-   * 声明里的 writes/reads 原样用。只有降级票（`degraded`：探路超时，声明没等到）
-   * 才按设计稿 §8 兜底：拿 `plan.files` 的父目录，连 plan 都没有才拿票的 dir
-   * 整片算写——它没声明清楚，不能当「不冲突」。
-   *
-   * 正常的票 writes 空就是纯读票：reads 里有什么只按只读算，不许顶成写。验证票
-   * 读一份文档却被判成写整片目录、跟别人撞上排队，就是这里以前无条件兜底造成的。
-   */
-  private conflictSide(ticket: TicketSnapshot): ConflictSide {
-    const writes = [...(ticket.intent?.writes ?? [])]
-    const reads = [...(ticket.intent?.reads ?? [])]
-    if (ticket.degraded === true && writes.length === 0) {
-      for (const file of ticket.plan?.files ?? []) {
-        const parent = dirname(file.path)
-        const uri = `dir:${parent}`
-        if (parent && parent !== '.' && !writes.includes(uri)) writes.push(uri)
-      }
-      if (writes.length === 0 && ticket.dir) writes.push(`dir:${ticket.dir}`)
-    }
-    return { writes, reads }
-  }
-
-  /**
-   * 拿这张票去撞现在所有没收工的票（自己不算）。
-   *
-   * 谁挡谁只按「谁先抢到这片资源」定，见 `byClaimOrder`：先交声明的在前，
-   * 没交声明的排在所有交过声明的后面，声明时刻相同才退回排队序号 `seq`。
-   * 只有排在自己**前面**的票能拦自己；排在自己后面的票一律不算阻塞——它在
-   * 等自己先走。以前的实现是「只看谁先被判定」：先 declare 的 A 探路子会话后
-   * idle，反过来被后 declare 的 B 挡成 blocked，方向是反的。
-   *
-   * 这样已经 running 的票不会被后来的票改判：后来者排不过它，只能排在它后面。
-   * 两张票互不冲突时照旧各自派活；弱冲突只留票号，票面上一行提示。
-   */
-  private judgeTicket(ticket: TicketSnapshot): {
-    level: ConflictLevel
-    waitOn: ConflictWait[]
-    weak: string[]
-  } {
-    const all = this.log.list()
-    const mine = this.conflictSide(ticket)
-    // 脏声明不该把判定整锅端了：认不出来的串先喊一声（带票号与原文），判定继续。
-    const scan = scanResources([...(mine.writes ?? []), ...(mine.reads ?? [])])
-    for (const bad of scan.invalid) {
-      const key = `${ticket.id}:${bad.raw}`
-      if (this.invalidWarned.has(key)) continue
-      this.invalidWarned.add(key)
-      this.warn(`[dispatcher] 票 ${ticket.id} 的资源串不合法：${bad.raw}（${bad.reason}），按不认识处理继续判`)
-    }
-    const waitOn: ConflictWait[] = []
-    const weak: string[] = []
-    let strong = false
-    for (const other of all) {
-      if (other.id === ticket.id || !isOpen(other.status)) continue
-      // 停在 waiting 且 worker 已经不在的票不占资源：它不会自己接着跑，等有人
-      // 重新派活时 admit 会再判一次。workerAlive=true 的 waiting 不跳过——那是
-      // 正常收工等人回话，随时可能 resumed，跳过会把同仓两票放到一起。
-      if (other.status === 'waiting' && other.workerAlive === false) continue
-      // 排在自己后面的票不挡自己：FIFO 只看前面还欠着谁的账。
-      if (byClaimOrder(other, ticket) >= 0) continue
-      let verdict
-      try {
-        verdict = judgeConflict(mine, this.conflictSide(other))
-      } catch (error) {
-        // 判定本身出了意料外的岔子：按 weak 放行并留痕，别让一张脏票打断整轮。
-        this.warn(
-          `[dispatcher] 票 ${ticket.id} 与 ${other.id} 冲突判定失败，按 weak 兜底：${messageOf(error)}`,
-        )
-        weak.push(other.id)
-        continue
-      }
-      if (verdict.level === 'none') continue
-      if (verdict.level === 'strong') {
-        strong = true
-        waitOn.push({ ticketId: other.id, resources: [...verdict.resources] })
-      } else if (!weak.includes(other.id)) {
-        weak.push(other.id)
-      }
-    }
-    return { level: strong ? 'strong' : weak.length > 0 ? 'weak' : 'none', waitOn, weak }
-  }
 
   /**
    * 判一张票的档装不装得上这活。返回驳回理由（undefined = 放行）。
@@ -1690,14 +1569,14 @@ export class TicketDesk {
     })
 
     const workerId = ticket.workerId
-    if (workerId && this.pool.alive(workerId) === true) {
+    if (workerId && this.registry.alive(workerId) === true) {
       // 续派前先拆探路窗口，跟 handleStatus 那条 idle 路一个口径：巡检兜底捞起
       // 一张 planned 票时，探路子会话可能早就交完声明、idle 事件却丢了（重启、事
       // 件被吞），窗口还挂在它身上。先把只读钳子松开，再投下一句，否则执行轮
       // 手里少 write / edit / bash 三件，只能干看着。
       this.closeProbe(ticket, workerId)
       try {
-        const messageId = await this.pool.send(workerId, parent, prompt)
+        const messageId = await this.registry.send(workerId, parent, prompt)
         this.commit({
           kind: 'resumed',
           id: ticket.id,
@@ -1712,7 +1591,7 @@ export class TicketDesk {
         // 只为了插件热重载后那点漏网：装过就直接返回，不会重复注册。
         this.deps.workerTools?.attach(workerId)
         // 这一轮已经投出去了：它不再是「空闲待派」，等下一次 idle 再记。
-        this.idleSeen.delete(workerId)
+        this.registry.clearIdle(workerId)
         return true
       } catch (error) {
         // 活表里还在、话却投不进去：当成真没了，往下走 spawn 那条路。
@@ -1768,7 +1647,7 @@ export class TicketDesk {
         at: this.at(),
         requestId: ticket.requestId ?? ticket.id,
         ...(this.device ? { device: this.device } : {}),
-        pool: this.pool,
+        pool: this.registry.pool,
         commit: (event) => this.commit(event),
         ...(this.deps.workerTools ? { workerTools: this.deps.workerTools } : {}),
         failure: `票 ${ticket.id} 的声明已就绪`,
@@ -1797,17 +1676,8 @@ export class TicketDesk {
       this.warn(`票 ${current.id} 没有声明（没有 declared 事件），不进执行轮`)
       return false
     }
-    const verdict = this.judgeTicket(current)
+    const verdict = this.arbiter.checkAndRecord(current)
     if (verdict.level === 'strong') {
-      this.commit({
-        kind: 'conflict-checked',
-        id: current.id,
-        at: this.at(),
-        cause: 'reaction',
-        level: 'strong',
-        waitOn: verdict.waitOn,
-        ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
-      })
       const blockedBy = verdict.waitOn.map((wait) => wait.ticketId).join('、')
       this.warn(`票 ${current.id} 撞上 ${blockedBy}，先排队等放行`)
       // 排队的那一刻写进巡检事实，主会话下一轮就能看见在等谁；origin 是 main
@@ -1819,15 +1689,6 @@ export class TicketDesk {
       })
       return false
     }
-    this.commit({
-      kind: 'conflict-checked',
-      id: current.id,
-      at: this.at(),
-      cause: 'reaction',
-      level: verdict.level,
-      waitOn: [],
-      ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
-    })
     if (!(await this.startTask(current))) {
       this.rollbackPlanned(current)
       return false
@@ -1873,34 +1734,14 @@ export class TicketDesk {
       if (!isOpen(queued.status) || queued.phase !== 'queued') continue
       const current = this.log.get(queued.id)
       if (!current || !isOpen(current.status) || current.phase !== 'queued') continue
-      const verdict = this.judgeTicket(current)
+      const verdict = this.arbiter.checkAndRecord(current, { onlyIfChanged: true })
       if (verdict.level === 'strong') {
-        // 排队的对手换了（收工前又开了新的票占同一片）：重写名单；没变就不写，
-        // 不然每次收工都往日志里塞一遍同样的行。
-        if (!sameWait(current.waitOn ?? [], verdict.waitOn)) {
-          this.commit({
-            kind: 'conflict-checked',
-            id: current.id,
-            at: this.at(),
-            cause: 'reaction',
-            level: 'strong',
-            waitOn: verdict.waitOn,
-            ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
-          })
-          // 对手换了：事实里的名单跟着换，不另起一条。
+        // 对手换了才重写名单；没变不写，免得每次收工都塞一遍同样的行。
+        if (verdict.recorded) {
           this.rememberBlocked(this.log.get(current.id) ?? current, { waitOn: verdict.waitOn })
         }
         continue
       }
-      this.commit({
-        kind: 'conflict-checked',
-        id: current.id,
-        at: this.at(),
-        cause: 'reaction',
-        level: verdict.level,
-        waitOn: [],
-        ...(verdict.weak.length > 0 ? { weak: verdict.weak } : {}),
-      })
       if (!(await this.startTask(current))) {
         this.rollbackPlanned(current)
         continue
@@ -1985,25 +1826,6 @@ export class TicketDesk {
   }
 
   /**
-   * 兜底放行时这只 worker 算什么状态：只给日志，不参与判定。
-   *
-   * 「已死」= 票上没有 workerId，或者活表里查不到（`pool.alive` 返回 false；没有
-   * 活表时返回 undefined，同样没法把活投过去，一样按重起处理）。
-   * 「正忙」= 活表里在、但这一轮投出去之后还没回过 idle：steer 的话话会排在下一个
-   * step 边界，不打断它在跑的那一步。
-   * 「空闲」= 活表里在、而且见过它 idle：直接起下一轮。
-   */
-  private workerStateText(ticket: TicketSnapshot): string {
-    const workerId = ticket.workerId
-    if (!workerId) return '没有 workerId，重起一只'
-    const alive = this.pool.alive(workerId)
-    if (alive !== true) return `${workerId} 已死（活表 alive=${String(alive)}），重起一只`
-    return this.idleSeen.has(workerId)
-      ? `${workerId} 空闲，steer 回原会话`
-      : `${workerId} 正忙，steer 到下一个 step 边界`
-  }
-
-  /**
    * worker 变 idle：票该进 waiting，但先看队列——有排队的话这一轮还没完，
    * 投过去继续干（设计 §4 第 5 行）。投递失败就留在 running，等下一条或巡检。
    */
@@ -2013,8 +1835,8 @@ export class TicketDesk {
     if (record.status !== 'idle' || !sessionId) return
     // 记一笔「这只空下来了」，只给兜底的日志和排查用；放行与否不看它（见
     // `idleSeen` 的注释：降级前已经 idle 过的那条路不会再有第二个事件）。
-    this.idleSeen.add(sessionId)
-    for (const ticket of this.ticketsOf(sessionId)) {
+    this.registry.markIdle(sessionId)
+    for (const ticket of this.registry.ticketsOf(sessionId)) {
       if (ticket.status !== 'running') continue
       // 探路窗口先拆，再投排队的话：探路子会话 idle 下来就说明它这一轮说完了，
       // 后面投进来的活要能写盘。
@@ -2055,7 +1877,7 @@ export class TicketDesk {
   private async handleDisposed(payload: unknown): Promise<void> {
     const sessionId = agentIdOf((payload as { agent?: unknown })?.agent)
     if (!sessionId) return
-    for (const ticket of this.ticketsOf(sessionId)) {
+    for (const ticket of this.registry.ticketsOf(sessionId)) {
       if (!isOpen(ticket.status) || !ticket.workerId) continue
       if (minutesSince(ticket.updatedAt, this.clock.now()) < this.config.freshMinutes) continue
       this.commit({
@@ -2074,41 +1896,12 @@ export class TicketDesk {
 }
 
 /**
- * 冲突排队的先后：谁先抢到这片资源，谁在前。
- *
- * 只看交声明的时刻（`declaredAt`）——判定发生在探路子会话 idle 那一拍，比的是
- * 声明先后，不是「谁先被判定」。没交声明的票（快路径、还在探路、老票）排在
- * 所有交过声明的后面；两张都没交声明、或者声明时刻撞在同一毫秒，退回排队
- * 序号 `seq`（`byQueueOrder`）。这个比较是全序，三张以上的链式排队也定得死。
- */
-function byClaimOrder(a: TicketSnapshot, b: TicketSnapshot): number {
-  const mine = a.declaredAt
-  const other = b.declaredAt
-  if (mine && other) {
-    if (mine !== other) return mine < other ? -1 : 1
-    return byQueueOrder(a, b)
-  }
-  if (mine) return -1
-  if (other) return 1
-  return byQueueOrder(a, b)
-}
-
-/**
  * 这一轮是不是被「打断」收的：`dsh-agent` 的 turn/end 原因是这几个。
  *
  * 只用来判「要不要补报告」：被打断的一轮不是干完了，硬补一条只会让人误判。
  */
 function isInterruptedStop(reason: string): boolean {
   return /^(?:interrupted|aborted|canceled|cancelled)$/i.test(reason)
-}
-
-/** 排队名单有没有变：没变就不重复写日志（每次收工都会重扫一遍）。 */
-function sameWait(a: readonly ConflictWait[], b: readonly ConflictWait[]): boolean {
-  if (a.length !== b.length) return false
-  return a.every((wait, i) => {
-    const other = b[i]
-    return wait.ticketId === other.ticketId && wait.resources.join('\n') === other.resources.join('\n')
-  })
 }
 
 export function createDesk(deps: DeskDeps): TicketDesk {
