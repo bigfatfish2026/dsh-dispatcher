@@ -36,6 +36,54 @@ describe('foldEvents', () => {
     })
   })
 
+  it('delivered 不把 planning 票从 waiting 推回 running（审计 A7）', () => {
+    const at = (second: number): string => `2026-11-01T00:0${second}:00.000Z`
+    const snapshots = foldEvents([
+      {
+        kind: 'published',
+        id: 't-probe',
+        at: at(0),
+        goal: '探路轮别被投递推醒',
+        brief: 'A7',
+        publisher: 'session-main',
+        preset: 't2',
+        presetSource: 'fallback',
+      },
+      { kind: 'planning', id: 't-probe', at: at(1), cause: 'tool' },
+      { kind: 'spawned', id: 't-probe', at: at(2), cause: 'tool', workerId: 'worker-p1', preset: 't2' },
+      { kind: 'ended', id: 't-probe', at: at(3), cause: 'lifecycle', workerId: 'worker-p1', stopReason: 'end', epochReports: 0 },
+      { kind: 'queued', id: 't-probe', at: at(4), cause: 'reaction', input: { id: 'i-1', text: '接着探' } },
+      { kind: 'delivered', id: 't-probe', at: at(5), cause: 'reaction', entry: { kind: 'input', id: 'i-1' } },
+    ])
+    const ticket = snapshots[0]!
+    // 探路相位投递只说明「话到了、人还活着」：status/statusSince 一个都不许动。
+    expect(ticket).toMatchObject({ phase: 'planning', status: 'waiting', workerAlive: true })
+    expect(ticket.statusSince).toBe(at(3))
+    expect(ticket.inputs[0]).toMatchObject({ id: 'i-1', text: expect.any(String), delivered: true })
+  })
+
+  it('不在 planning 的 delivered 仍把 waiting 票推回 running', () => {
+    const at = (second: number): string => `2026-11-01T00:0${second}:00.000Z`
+    const snapshots = foldEvents([
+      {
+        kind: 'published',
+        id: 't-task',
+        at: at(0),
+        goal: '执行轮该被投递推醒',
+        brief: '对照',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+      },
+      { kind: 'spawned', id: 't-task', at: at(1), cause: 'tool', workerId: 'worker-p1', preset: 't1' },
+      { kind: 'ended', id: 't-task', at: at(2), cause: 'lifecycle', workerId: 'worker-p1', stopReason: 'end', epochReports: 0 },
+      { kind: 'queued', id: 't-task', at: at(3), cause: 'reaction', input: { id: 'i-2', text: '接着干' } },
+      { kind: 'delivered', id: 't-task', at: at(4), cause: 'reaction', entry: { kind: 'input', id: 'i-2' } },
+    ])
+    expect(snapshots[0]).toMatchObject({ status: 'running', workerAlive: true })
+    expect(snapshots[0]!.statusSince).toBe(at(4))
+  })
+
   it('keeps tickets separate', () => {
     const snapshots = foldEvents([
       { id: 't-1', at: '2026-11-01T00:00:00.000Z', goal: 'a' },

@@ -53,11 +53,17 @@ describe('buildPrompt：三套任务书', () => {
         writes: ['file:src/tickets/publish.ts', 'dir:tests'],
         reads: ['dir:src/tickets'],
         reversibility: 'auto',
+        plan: {
+          summary: '改 publish.ts 的任务书',
+          files: [{ path: 'src/tickets/publish.ts', what: '按轮次出三套' }],
+        },
       },
     })
 
     expect(prompt).toContain(GOAL)
     expect(prompt).toContain(TICKET)
+    expect(prompt).toContain('方案：改 publish.ts 的任务书')
+    expect(prompt).toContain('要改的文件：src/tickets/publish.ts（按轮次出三套）')
     expect(prompt).toContain('你探路时声明了这些资源')
     expect(prompt).toContain('file:src/tickets/publish.ts')
     expect(prompt).toContain('dir:tests')
@@ -93,6 +99,32 @@ describe('buildPrompt：三套任务书', () => {
     expect(prompt).toContain('dispatch_touch')
     // 降级票没有可信声明，别拿空声明去划边界。
     expect(prompt).not.toContain('你探路时声明了这些资源')
+  })
+
+  it('超长 plan 被截断：摘要 200 字、文件最多 8 个，intent 照常显示', () => {
+    const longSummary = '长'.repeat(500)
+    const files = Array.from({ length: 12 }, (_, index) => ({
+      path: `src/f${index}.ts`,
+      what: '说'.repeat(100),
+    }))
+    const prompt = buildPrompt({
+      ...base,
+      epoch: 2,
+      round: 'task',
+      declared: {
+        writes: ['file:src/keep.ts'],
+        plan: { summary: longSummary, files },
+      },
+    })
+
+    // 摘要截到 200 字：201 个连续「长」不该出现，省略号要有。
+    expect(prompt).not.toContain('长'.repeat(201))
+    expect(prompt).toContain('…')
+    expect(prompt).toContain('src/f7.ts')
+    expect(prompt).not.toContain('src/f8.ts')
+    expect(prompt).toContain('等 12 个文件')
+    // 截断只发生在 plan 上，intent 的资源照常念。
+    expect(prompt).toContain('file:src/keep.ts')
   })
 
   it('不传轮次就当执行轮', () => {
@@ -145,6 +177,8 @@ describe('派活接线：任务书按轮次真的换了', () => {
     expect(h.log.get(id)!.workerId).toBe('worker-2')
     const text = h.subagents.spawned[1]!.request.prompt[0]!.text
     expect(text).toContain(INTENT.goal)
+    expect(text).toContain('方案：改 publish.ts 的任务书')
+    expect(text).toContain('要改的文件：src/tickets/publish.ts（按轮次出三套）')
     expect(text).toContain('你探路时声明了这些资源')
     expect(text).toContain('file:src/tickets/publish.ts')
     expect(text).toContain('dir:tests')
@@ -250,6 +284,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
     const text = h.subagents.sent[0]!.text
     expect(text).toContain('第 2 轮')
     expect(text).toContain(INTENT.goal)
+    expect(text).toContain('方案：改 publish.ts 的任务书')
     expect(text).toContain('你探路时声明了这些资源')
     expect(text).toContain('file:src/tickets/publish.ts')
     expect(text).toContain('只动声明里写过的资源，声明之外的东西一律别碰。')

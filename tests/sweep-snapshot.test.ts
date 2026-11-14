@@ -56,7 +56,7 @@ describe('巡检事实走快照，不走消息', () => {
     const host = mountPlugin()
     const main = host.agents[0]!
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
 
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
@@ -72,7 +72,7 @@ describe('巡检事实走快照，不走消息', () => {
   it('快照只进主会话：worker 会话里不出现', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
 
@@ -88,7 +88,7 @@ describe('巡检事实走快照，不走消息', () => {
   it('dispatch_read 读掉之后条目消失', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
     expect(await sweepText(host)).toContain(id)
@@ -103,7 +103,7 @@ describe('巡检事实走快照，不走消息', () => {
   it('dispatch_list 看一眼也算读过', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
     expect(await sweepText(host)).toContain(id)
@@ -117,7 +117,7 @@ describe('巡检事实走快照，不走消息', () => {
   it('dispatch_close 收工之后条目消失', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
     expect(await sweepText(host)).toContain(id)
@@ -151,7 +151,7 @@ describe('巡检事实走快照，不走消息', () => {
   it('两次装配逐字相同，解开又合上也不抖', async () => {
     const host = mountPlugin()
     const id = await openTicket(host)
-    const worker = host.makeAgent('subagent')
+    const worker = host.makeAgent('subagent', 'worker-1')
     await host.call('dispatch_report', { id, text: '报告：改完了' }, { agent: worker })
     await host.settled()
 

@@ -279,7 +279,16 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
           ? deliver(previous.reports, event.at, event.entry.id)
           : previous.reports
       // 投递成功本身就说明「人活着」；只有 input 才是「又有一轮活在跑」。
+      //
+      // planning 相位是只读探路轮，没有「执行轮在跑」这回事：投递只把话记下、
+      // 标记人还活着，不推 status，也不重置 statusSince。否则一张探路中的票会被
+      // 推成 running 后卡在 handleStatus 的 planning 分支里，既没人管也不算排队，
+      // 只能等探路超时降级（审计 A7）。
       if (event.entry.kind === 'input' && !isTerminal(previous.status)) {
+        if (previous.phase === 'planning') {
+          state.set(event.id, { ...previous, updatedAt: event.at, inputs, reports, workerAlive: true })
+          return
+        }
         state.set(
           event.id,
           advance(previous, event.at, {

@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { TicketStore, foldEvents, pending } from '../src/store'
 import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
+import type { FakePluginHost } from './helpers/plugin-harness'
 
 const dirs: string[] = []
 
@@ -60,6 +61,66 @@ interface ReportsOutput {
 interface ListOutput {
   tickets: Array<{ id: string; pendingReports: number }>
 }
+
+describe('dispatch_report 归属', () => {
+  /** 一张已派出子会话的票：publisher 是 session-main，worker 是 worker-p1。 */
+  function probeTicket(): string {
+    return logFile([
+      {
+        kind: 'published',
+        id: 't-own',
+        at: T(0),
+        goal: '只写自己的票',
+        brief: '报告归属',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: 'req-report-own',
+      },
+      { kind: 'spawned', id: 't-own', at: T(1), cause: 'tool', workerId: 'worker-p1', preset: 't1' },
+    ])
+  }
+
+  function rows(file: string): Array<Record<string, unknown>> {
+    return readFileSync(file, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+  }
+
+  function callWith(host: FakePluginHost, agent: unknown, text: string): Promise<unknown> {
+    return host.call('dispatch_report', { id: 't-own', text }, { agent: agent as never })
+  }
+
+  it('自己名下的 worker 能报：追加一行 reported，票状态不动', async () => {
+    const file = probeTicket()
+    const host = mountPlugin({ config: { stateFile: file } })
+    const out = (await callWith(host, host.makeAgent('subagent', 'worker-p1'), '干完了')) as {
+      id: string
+      pendingReports: number
+    }
+    expect(out).toMatchObject({ id: 't-own', pendingReports: 1 })
+    const last = rows(file).at(-1)!
+    expect(last).toMatchObject({ kind: 'reported', id: 't-own' })
+    expect((last.report as { text: string }).text).toBe('干完了')
+    const ticket = new TicketStore(file).get('t-own')!
+    expect(ticket.status).toBe('running')
+  })
+
+  it('别人的 worker 与不是开票方的主会话都拒收，库里一行都不多', async () => {
+    const file = probeTicket()
+    const host = mountPlugin({ config: { stateFile: file } })
+    const before = rows(file).length
+    await expect(callWith(host, host.makeAgent('subagent', 'worker-other'), '冒名报告')).rejects.toThrow(
+      /不挂在当前 worker 名下/,
+    )
+    await expect(callWith(host, host.makeAgent(undefined, 'session-other'), '越权报告')).rejects.toThrow(
+      /不是这个会话开的/,
+    )
+    expect(rows(file)).toHaveLength(before)
+    expect(new TicketStore(file).get('t-own')!.reports).toHaveLength(0)
+  })
+})
 
 describe('dispatch_read', () => {
   it('默认只返回未读，读完标记已读，«n 归零', async () => {

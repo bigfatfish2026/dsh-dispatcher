@@ -149,6 +149,18 @@ function actorOf(exec: unknown): Actor {
   return { kind: 'main', sessionId }
 }
 
+/**
+ * 调 `dispatch_report` 的调用者身份：worker 会话标 worker，其余按主会话。
+ * 归属判定在 desk 里（`assertMayReport`），这里只负责把身份带过去；拿不到
+ * 会话 id 就当场报错，别把报告记到一张不知道谁的票上。
+ */
+function callerActorOf(exec: unknown): Actor {
+  const agent = (exec as { agent?: { session?: { id?: string; header?: { origin?: string } } } } | undefined)?.agent
+  const sessionId = agent?.session?.id
+  if (!sessionId) throw new Error('不知道是哪个会话在调这个工具：报告得记在发起人名下')
+  return { kind: isWorkerSession(agent?.session?.header?.origin) ? 'worker' : 'main', sessionId }
+}
+
 function objectOf(value: unknown): Record<string, unknown> | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   return value as Record<string, unknown>
@@ -1378,8 +1390,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
         { type: 'text', text: `report recorded on ticket ${value.id} (round ${value.epoch})` },
       ],
     },
-    async execute(args) {
-      const receipt = await desk.report(args.id, args.text, 'worker')
+    async execute(args, exec) {
+      const receipt = await desk.report(args.id, args.text, 'worker', callerActorOf(exec))
       return { id: receipt.id, epoch: receipt.epoch, pendingReports: receipt.pendingReports }
     },
   })

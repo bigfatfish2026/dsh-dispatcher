@@ -595,10 +595,20 @@ export class TicketDesk {
     })
   }
 
-  async report(id: string, text: string, source: 'worker' | 'auto' = 'worker'): Promise<ReportReceipt> {
+  async report(
+    id: string,
+    text: string,
+    source: 'worker' | 'auto' = 'worker',
+    actor?: Actor,
+  ): Promise<ReportReceipt> {
     return this.serialize(async () => {
       const body = text.trim()
       if (!body) throw new Error('report 不能为空')
+      const ticket = this.log.get(id)
+      if (!ticket) throw new Error(`没有票 ${id}`)
+      // 归属校验在写之前：别人的票一个字节都不许落。审计 A10 指的就是这里以前
+      // 只收 id、不认人。
+      if (actor) this.assertMayReport(ticket, actor)
       this.appendReport(id, body, source)
       const after = this.log.get(id)!
       return { id, epoch: after.epoch, pendingReports: pending(after.reports).length }
@@ -1252,6 +1262,24 @@ export class TicketDesk {
    * 按 workerId 反查自己名下那张活票。declare 与 touch 共用：票号不由调用方给，
    * 别人的票写不进来；没票、票已结束都直接报错，别让子会话以为写成功了。
    */
+  /**
+   * 谁能往这张票上写报告：worker 只能写自己名下的票，主会话只能写自己开的票。
+   *
+   * `source === 'auto'` 的补报是票台自己写的，不经过这里（没有 actor）。
+   * 老票没有 publisher（2026-11-04 之前的行）时放行主会话，只做能做的校验。
+   */
+  private assertMayReport(ticket: TicketSnapshot, actor: Actor): void {
+    if (actor.kind === 'worker') {
+      if (!isSameWorker(ticket.workerId, actor.sessionId)) {
+        throw new Error(`票 ${ticket.id} 不挂在当前 worker 名下，报告拒收`)
+      }
+      return
+    }
+    if (ticket.publisher !== undefined && ticket.publisher !== actor.sessionId) {
+      throw new Error(`票 ${ticket.id} 不是这个会话开的，报告拒收`)
+    }
+  }
+
   private liveTicketOf(workerId: string, verb: string): TicketSnapshot {
     const mine = this.ticketsOf(workerId)
     if (mine.length === 0) throw new Error('没有挂在这个 worker 上的票')
@@ -1560,6 +1588,8 @@ export class TicketDesk {
         ...(ticket.intent?.writes ? { writes: ticket.intent.writes } : {}),
         ...(ticket.intent?.reads ? { reads: ticket.intent.reads } : {}),
         ...(ticket.intent?.reversibility ? { reversibility: ticket.intent.reversibility } : {}),
+        // 方案一起带过去：执行子会话不用拿 goal 重新摸一遍文件（审计 A3）。
+        ...(ticket.plan ? { plan: ticket.plan } : {}),
       },
     })
 
@@ -1907,6 +1937,9 @@ export class TicketDesk {
         if (delivered > 0) continue
         // 投不出去：票还是 running，但没有真活在跑。落 waiting 但标记人还在。
       }
+      // 这行 continue 不能删（2026-11-14 A7 复查）：没有它就会继续落到下面的
+      // `idled`，票变成 status=waiting + phase=planning；而 maintain 的探路降级
+      // 只认 status=running && phase=planning，这张票会永久卡住、再没人管。
       if (current.phase === 'planning') continue
       this.commit({
         kind: 'idled',

@@ -210,11 +210,23 @@ export function buildLabel(ticketId: string, brief: string): string {
  */
 export type PromptRound = 'probe' | 'task' | 'degraded'
 
+/** 探路时交的方案：执行轮在任务书里念摘要与文件清单，别让子会话重新摸一遍。 */
+export interface PromptPlanFile {
+  path: string
+  what?: string
+}
+
+export interface PromptPlan {
+  summary?: string
+  files?: PromptPlanFile[]
+}
+
 /** 探路时声明过的资源：执行轮拿它划边界，只在 prompt 里念一句。 */
 export interface PromptResources {
   writes?: string[]
   reads?: string[]
   reversibility?: string
+  plan?: PromptPlan
 }
 
 export interface PromptInput {
@@ -274,17 +286,52 @@ export function buildPrompt(input: PromptInput): string {
   return lines.join('\n')
 }
 
-/** 执行轮开头那一行：探路声明过的写/读资源；声明是空的就明说，别装成有。 */
+/** 任务书里的 plan 有长度上限：摘要是给人看的，不是把整份方案搬进去。 */
+const PLAN_SUMMARY_MAX = 200
+const PLAN_FILES_MAX = 8
+const PLAN_FILE_WHAT_MAX = 60
+
+/** 按字符（不是字节）截断，保留完整字符，末尾给一个省略号。 */
+function clipPlanText(text: string, max: number): string {
+  const chars = Array.from(text)
+  return chars.length <= max ? text : `${chars.slice(0, max).join('')}…`
+}
+
+/** 方案一行：摘要 + 前几个文件；超出的只说总数，别把任务书撑爆。 */
+function planLine(plan: PromptPlan | undefined): string | undefined {
+  const summary = plan?.summary?.trim()
+  const files = (plan?.files ?? []).filter((file) => typeof file.path === 'string' && file.path.trim() !== '')
+  if (!summary && files.length === 0) return undefined
+  const parts: string[] = []
+  if (summary) parts.push(`方案：${clipPlanText(summary, PLAN_SUMMARY_MAX)}`)
+  if (files.length > 0) {
+    const shown = files.slice(0, PLAN_FILES_MAX).map((file) => {
+      const path = file.path.trim()
+      const what = file.what?.trim()
+      return what ? `${path}（${clipPlanText(what, PLAN_FILE_WHAT_MAX)}）` : path
+    })
+    const more = files.length > shown.length ? ` 等 ${files.length} 个文件` : ''
+    parts.push(`要改的文件：${shown.join('、')}${more}`)
+  }
+  return `你探路时交了这份${parts.join('；')}。`
+}
+
+/** 执行轮开头那一行：先念方案，再念声明过的写/读资源；都没有就明说。 */
 function declaredLine(declared: PromptResources | undefined): string {
   const writes = declared?.writes?.filter(Boolean) ?? []
   const reads = declared?.reads?.filter(Boolean) ?? []
+  const lines: string[] = []
+  const plan = planLine(declared?.plan)
+  if (plan) lines.push(plan)
   if (writes.length === 0 && reads.length === 0) {
-    return '探路时没交资源声明，动手前照票面的工作目录把边界定下来。'
+    lines.push('探路时没交资源声明，动手前照票面的工作目录把边界定下来。')
+    return lines.join('')
   }
   const parts: string[] = []
   if (writes.length > 0) parts.push(`写 ${writes.join('、')}`)
   if (reads.length > 0) parts.push(`读 ${reads.join('、')}`)
-  return `你探路时声明了这些资源：${parts.join('；')}。`
+  lines.push(`你探路时声明了这些资源：${parts.join('；')}。`)
+  return lines.join('')
 }
 
 /** 派活一次要的全部东西：开票与「放行重投」共用，免得两处各拼一套 spawn 参数。 */
