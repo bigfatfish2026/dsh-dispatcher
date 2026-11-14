@@ -22,16 +22,18 @@ import type {
   ConflictWait,
   IntentSpec,
   TicketEvent,
+  TicketPhase,
   TicketPlan,
   TicketSnapshot,
   TicketStatus,
 } from '../store'
-import { newEntryId, newTicketId } from '../store/log'
+import { byQueueOrder, newEntryId, newTicketId } from '../store/log'
 import type { TicketLog } from '../store/log'
 import type { Clock } from './clock'
 import { realClock } from './clock'
 import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
+import type { WorkerWatch } from './watch'
 import { judgeConflict, outOfScopePaths } from './conflict'
 import type { ConflictLevel, ConflictSide } from './conflict'
 import { normalizeResources } from './resources'
@@ -41,7 +43,7 @@ import type { WorkerToolPort } from './worker-tools'
 import type { Classifier, PresetCatalog, PresetDecision, TicketIntent, TicketReceipt } from './publish'
 import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from './preset-guard'
 import type { PresetRejection } from './preset-guard'
-import { auditClosedTickets, checkRevertIntent, normalizeUndo, REVERT_AUDIT_DAYS, RevertRejectedError } from './revert'
+import { auditClosedTickets, normalizeUndo, REVERT_AUDIT_DAYS } from './revert'
 import type { RevertAuditReport } from './revert'
 import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
 import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
@@ -59,13 +61,7 @@ export type {
 } from './publish'
 export type { Clock } from './clock'
 export type { IdleReason, OwnerNotifier } from './notify'
-export type {
-  RevertAuditFinding,
-  RevertAuditKind,
-  RevertAuditReport,
-  RevertGateCode,
-  RevertGateDecision,
-} from './revert'
+export type { RevertAuditFinding, RevertAuditKind, RevertAuditReport } from './revert'
 
 /**
  * 票台自己的配置。刻意不复用插件那份 `Config`：那一份是给工具面读的，改它的
@@ -174,6 +170,11 @@ export interface DeskDeps {
   /** 主会话当前挂的档（可选探测）；没有就不问。 */
   routerPreset?: () => string | undefined
   notifier?: OwnerNotifier
+  /**
+   * 子会话自己的状态订阅（`watch.ts`）：`spawned` 那一刻按票挂上，被挡/放行/收工
+   * 各推一句。desk 只负责把事件喂进去，打断与守卫在 watch 那一层。
+   */
+  watch?: WorkerWatch
   /** 探路窗口（`probe.ts`）：desk 只拆不建，装窗口在 `agent/created` 那一刀。 */
   probe?: ProbePort & ProbeRegistry
   /**
@@ -257,9 +258,11 @@ export interface ReadTicket {
   goal: string
   brief: string
   status: TicketStatus
+  /** 探路/排队阶段位：快路径与老票没有这一栏。 */
+  phase?: TicketPhase
   pendingReports: number
   reports: ReadLine[]
-  /** 建票意图；老票没有这一栏。 */
+  /** 票上的意图（`declared` 折进来）；老票或没交声明就没有这一栏。 */
   intent?: IntentSpec
   /** 探路方案；快路径或老票没有这一栏。 */
   plan?: TicketPlan
@@ -324,6 +327,15 @@ export class TicketDesk {
   private readonly device?: string
   /** 提醒指纹：`id:reason:statusSince`。同一轮同一理由只提醒一次。 */
   private readonly reminded = new Map<string, string>()
+  /**
+   * 见过 idle 的 worker：handleStatus 收下、再派一轮就划掉。
+   *
+   * 只用来认「worker 空闲」这一种状态，给兜底那行日志和排查用。判「要不要放行」
+   * 只看票面 phase=planned，绝不靠这个集合有没有它的名字——探路子会话在降级前已经
+   * idle 过的那条路（t-mwgc7327-kc8h 拆掉兜底之后的真死锁），集合里有它也不会再
+   * 来第二个 idle 事件，靠它就等于靠一个已经发生过、不会重来的信号。
+   */
+  private readonly idleSeen = new Set<string>()
   /** 上一轮撤回审计的时刻；`undefined` = 还没跑过。 */
   private lastAuditAt: number | undefined = undefined
   /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
@@ -422,6 +434,7 @@ export class TicketDesk {
           goal: ticket.goal,
           brief: briefOf(ticket, this.config.briefMaxColumns),
           status: ticket.status,
+          ...(ticket.phase ? { phase: ticket.phase } : {}),
           // 记完账再数：这一轮读走的就不算未读了。
           pendingReports: pending((this.log.get(ticket.id) ?? ticket).reports).length,
           reports: lines,
@@ -461,18 +474,6 @@ export class TicketDesk {
       )
       if (repeat) return this.receiptFor(repeat, true)
 
-      // 分级闸：只对带 intent 的票生效，老票 / 老调用原样放行。拒绝在这里、
-      // 在名额和分类器之前——被拒的票一个字节都不写。
-      const gate = checkRevertIntent({ origin: intent.origin, intent: intent.intent })
-      if (gate.action === 'reject') {
-        const head = Array.from(goal).slice(0, 40).join('')
-        this.warn(
-          `[dispatcher] 撤回闸驳回 code=${gate.code} origin=${intent.origin ?? 'main'} brief=${brief} goal=${head} 原因=${gate.reason}`,
-        )
-        throw new RevertRejectedError(gate.code, gate.reason)
-      }
-      const hold = gate.action === 'downgrade' ? gate.reason : undefined
-
       const openCount = tickets.filter((ticket) => isOpen(ticket.status)).length
       // 名额拆成两本账：正在干的和排队挂起的分开数，谁满了说谁，不合并成一个总数。
       const execCount = tickets.filter(
@@ -501,12 +502,11 @@ export class TicketDesk {
         classify: this.deps.classify,
         strategy: this.config.presetStrategy,
         defaultPreset: this.config.defaultPreset,
-        // 探路票不继承主会话当前挂的档。子会话的会话档在 spawn 那一刻钉死
+        // 票一律不继承主会话当前挂的档。子会话的会话档在 spawn 那一刻钉死
         // （`SessionHeader.agentPreset` 是 durable 的，`tools.restrict` 只减
-        // 不加），放行后的执行轮是 followup 复用同一个会话，改不了档——探路轮
-        // 落成只读档就等于把执行轮的 write / bash / dispatch_touch 一起钉死。
-        // 主会话当前挂的档是它自己那一轮的事，不该落成这张票的会话档。
-        ...(intent.probe === true ? {} : { routerPreset: this.deps.routerPreset?.() }),
+        // 不加），放行后的执行轮是 followup 复用同一个会话，改不了档——那是探路轮
+        // 的第二阶段，落成只读档就等于把执行轮的 write / bash / dispatch_touch
+        // 一起钉死。主会话当前挂的档是它自己那一轮的事，不该落成这张票的会话档。
         requestPreset: intent.preset,
         goal,
         brief,
@@ -548,9 +548,12 @@ export class TicketDesk {
           ...(this.device ? { device: this.device } : {}),
         },
         openCount,
-        ...(hold ? { hold } : {}),
         ...(this.deps.probe ? { probeWindows: this.deps.probe } : {}),
         ...(this.deps.workerTools ? { workerTools: this.deps.workerTools } : {}),
+        // 探路窗口的耐心按毫秒交下去：落 `planning` 那行日志打的就是这个数，
+        // 跟 `degradeProbe` 判超时用的是同一个换算，人看日志和实际生效不会差。
+        probeTimeoutMs: this.probeTimeoutMs(),
+        warn: this.warn,
       })
     })
   }
@@ -611,6 +614,19 @@ export class TicketDesk {
   }
 
   /**
+   * 热重载/重启后补订阅：活表里已经有这只子会话，但这一份 desk 还没按票给它挂过
+   * 订阅。`agent/created` 那一刀会调它，找不到名下的活票就什么也不做。
+   */
+  adoptWorker(workerId: string | undefined): boolean {
+    const watch = this.deps.watch
+    if (!watch || !workerId) return false
+    const mine = this.ticketsOf(workerId).filter((ticket) => isOpen(ticket.status))
+    if (mine.length === 0) return false
+    const latest = mine.reduce((best, ticket) => (ticket.updatedAt >= best.updatedAt ? ticket : best))
+    return watch.subscribe(latest.id, latest.workerId ?? workerId)
+  }
+
+  /**
    * 探路交活：plan 与 intent 一起落成一条 `declared`。
    *
    * 票号**不由调用方给**：按 workerId 反查自己名下那张活票，别人的票写不进来。
@@ -633,9 +649,6 @@ export class TicketDesk {
         (intent.impact?.paths?.length ?? 0) +
         (intent.impact?.services?.length ?? 0) +
         (intent.impact?.remotes?.length ?? 0)
-      if (!summary && files.length === 0 && resources === 0) {
-        throw new Error('declare 至少要给 plan 或 intent：空声明没法判定')
-      }
 
       const target = this.liveTicketOf(workerId, '声明')
 
@@ -644,6 +657,14 @@ export class TicketDesk {
         ? { ...(summary ? { summary } : {}), ...(files.length ? { files } : {}) }
         : target.plan ?? {}
       const nextIntent = Object.keys(intent).length > 0 ? intent : target.intent ?? {}
+      // 探路是每张票的必经流程，所以声明必须交齐：plan 说清改哪儿，intent 划出
+      // 读写边界。少哪一半都不进执行轮——admit 前那道硬校验只认完整的声明。
+      if (!summary && files.length === 0) {
+        throw new Error('declare 必须给 plan：要改哪几个文件、每个一句话说改什么')
+      }
+      if (Object.keys(nextIntent).length === 0) {
+        throw new Error('declare 必须给 intent：writes / reads 用六个前缀写，再给 reversibility')
+      }
 
       this.commit({
         kind: 'declared',
@@ -799,6 +820,8 @@ export class TicketDesk {
         ...(outOfScope.length > 0 ? { outOfScope } : {}),
       })
       // 先落盘再收 worker：反过来的话，abort 触发的 ended 可能先到，票还没进终态。
+      // 结束通知要赶在 abort 前面，会话还在才推得进去。
+      await this.closeWatch(ticket, outcome)
       if (ticket.workerId) await this.pool.abort(ticket.workerId, `票 ${id} 已收工`)
       // 收工了：这张票的挂起提醒不该再挂着（哪怕它本来就是排队票）。
       this.forgetBlocked(id)
@@ -911,8 +934,25 @@ export class TicketDesk {
       let signals = 0
       for (const ticket of this.log.list()) {
         if (!isOpen(ticket.status)) continue
-        // 探路超时：跟下面三档提醒各走各的，降级完这一张票就不再扫了。
-        if (ticket.phase === 'planning' && this.degradeProbe(ticket, now)) continue
+        // 探路超时：跟下面三档提醒各走各的。降级那一笔写完就当场 admit（见
+        // `degradeProbe`），所以降级成功这张票已经不在 planned 了，这一拍到此为止。
+        // 只认 status=running：blocked 是排队、waiting 有人在看，都不是「一轮在跑」。
+        if (ticket.status === 'running' && ticket.phase === 'planning') {
+          if (await this.degradeProbe(ticket, now)) continue
+        } else if (ticket.status === 'running' && ticket.phase === 'planned') {
+          // 兜底：票面说「方案就绪、等派活」，就该有人接。不看 idle 事件来没来过
+          // ——探路子会话可能在降级之前就已经 idle 过一次，那之后不会再有第二个 idle
+          // 事件（t-mwgc7327-kc8h 拆掉空声明兜底之后就是这么死锁的）。判据只有
+          // 票面两条：phase=planned 且 declaredAt 在；活没活着由 `startTask` 按
+          // `pool.alive` 分：真没了就重起一只，还在就把这一轮 steer 回原会话。
+          const current = this.log.get(ticket.id) ?? ticket
+          if (await this.admit(current)) {
+            this.warn(`[dispatcher] 巡检兜底放行票 ${ticket.id}（${this.workerStateText(ticket)}）`)
+            continue
+          }
+          // admit 没派成：要么落成了 blocked（下一拍按 blocked 那档提醒），要么
+          // 派活失败退回了 planned（下一拍接着试）。都不在这里再写票。
+        }
         const since = minutesSince(ticket.statusSince, now)
 
         if (ticket.status === 'waiting' && since >= this.config.waitingMinutes) {
@@ -954,6 +994,87 @@ export class TicketDesk {
 
   private commit(event: TicketEvent): void {
     this.log.commit(event)
+    // 票写成了才喂订阅：通知永远挂在「票面已经是这个状态」之后，读到的票和收到
+    // 的话不会打架。喂的过程全是 best-effort，不许影响这一笔写（见 `feedWatch`）。
+    this.feedWatch(event)
+  }
+
+  /**
+   * 把刚落的这条票事件转给子会话自己的订阅（`watch.ts`）。
+   *
+   * 只认几个「票面变了、子会话该知道」的边：`spawned` 订上，`blocked`（人工挂起）
+   * 与 `conflict-checked(strong)`（冲突排队）按住它，其余放行边（`resumed` /
+   * 投进来一条 message / 弱冲突判定）只解开按住、不发言——那些路径本来就有任务
+   * 书或主会话的话送过去，多一句只会让它多跑一轮空转。
+   *
+   * 整只包了 try/catch：通知这一层出任何岔子，都不该让票写失败、也不该拦住排队。
+   */
+  private feedWatch(event: TicketEvent): void {
+    const watch = this.deps.watch
+    if (!watch) return
+    const kind = (event as { kind?: unknown }).kind
+    if (typeof kind !== 'string') return
+    const ticket = this.log.get(event.id)
+    const brief = ticket ? briefOf(ticket, this.config.briefMaxColumns) : ''
+    try {
+      switch (kind) {
+        case 'spawned':
+          watch.subscribe(event.id, (event as { workerId: string }).workerId)
+          return
+        case 'blocked':
+          void watch.blocked({
+            ticketId: event.id,
+            brief,
+            reason: (event as { reason?: string }).reason ?? '',
+          })
+          return
+        case 'conflict-checked': {
+          const verdict = event as { level?: string; waitOn?: ConflictWait[] }
+          if (verdict.level === 'strong') {
+            void watch.blocked({
+              ticketId: event.id,
+              brief,
+              waitOn: verdict.waitOn ?? [],
+            })
+          } else {
+            // 判完了、任务书马上送过去：先松守卫（票已经不挡了），按住的标记留着，
+            // 等 `released` 那一句说清楚再一起撤。
+            watch.clear(event.id, { resume: true })
+          }
+          return
+        }
+        case 'delivered': {
+          // 只有「主会话给子会话发了话」才算放行；报告送达不碰按住状态。
+          const entry = (event as { entry?: { kind?: string } }).entry
+          if (entry?.kind === 'input') watch.clear(event.id)
+          return
+        }
+        default:
+          return
+      }
+    } catch (error) {
+      this.warn(`票 ${event.id} 的状态通知没发出去：${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * 收工前先给这只子会话一句结束通知，再收会话。
+   *
+   * 顺序不能反：`pool.abort` 会把会话收掉，abort 之后再推就没人接了。通知本身
+   * 不抛（`watch.closed` 内部兜住），所以这里等它一下不会拖住票台的判定。
+   */
+  private async closeWatch(ticket: TicketSnapshot, outcome: 'done' | 'dropped'): Promise<void> {
+    const watch = this.deps.watch
+    if (!watch || !ticket.workerId) return
+    try {
+      await watch.closed({
+        ticketId: ticket.id,
+        brief: briefOf(ticket, this.config.briefMaxColumns),
+        outcome,
+      })
+    } catch (error) {
+      this.warn(`票 ${ticket.id} 的结束通知没送到：${messageOf(error)}`)
+    }
   }
 
   private busEmit(channel: string, payload: unknown): void {
@@ -1189,14 +1310,22 @@ export class TicketDesk {
    */
   private rememberBlocked(
     ticket: TicketSnapshot,
-    extra: { waitOn?: readonly ConflictWait[]; reason?: string } = {},
+    extra: { waitOn?: readonly ConflictWait[]; reason?: string; wake?: boolean } = {},
   ): void {
+    // 冲突事实里带上对手的 brief：主会话看见「被谁挡的」不用再翻票。
+    const waitOn = extra.waitOn?.map((wait) => {
+      const other = this.log.get(wait.ticketId)
+      const brief = other ? briefOf(other, this.config.briefMaxColumns) : undefined
+      return { ticketId: wait.ticketId, resources: [...wait.resources], ...(brief ? { brief } : {}) }
+    })
     void this.notifier
       .blocked({
         ticketId: ticket.id,
         brief: briefOf(ticket, this.config.briefMaxColumns),
-        ...(extra.waitOn?.length ? { waitOn: extra.waitOn } : {}),
+        ...(ticket.publisher ? { publisher: ticket.publisher } : {}),
+        ...(waitOn?.length ? { waitOn } : {}),
         ...(extra.reason ? { reason: extra.reason } : {}),
+        ...(extra.wake === true ? { wake: true } : {}),
       })
       .catch((error) => this.warn(`挂起提醒没记上：${messageOf(error)}`))
   }
@@ -1206,6 +1335,34 @@ export class TicketDesk {
     void this.notifier
       .resumed(ticketId)
       .catch((error) => this.warn(`挂起提醒没摘掉：${messageOf(error)}`))
+  }
+
+  /**
+   * 冲突排队放行：摘掉挂起事实 + 推开票方一句「轮到它了」。
+   *
+   * 挡路的票号从票上原来的 `waitOn` 取（这一轮判完 waitOn 已经是空的）；
+   * 收工的票还在日志里，brief 不会因为排到它而丢。
+   */
+  private notifyReleased(ticket: TicketSnapshot): void {
+    const releasedBy = (ticket.waitOn ?? []).map((wait) => wait.ticketId)
+    this.forgetBlocked(ticket.id)
+    // 给被按住的那只子会话一句「已放行」：任务书已经在 `startTask` 里送出去了，
+    // 这句排在它后面，被 steer 接在下一个 step 边界，不另起一轮。
+    void this.deps.watch
+      ?.released({
+        ticketId: ticket.id,
+        brief: briefOf(ticket, this.config.briefMaxColumns),
+        ...(releasedBy.length > 0 ? { releasedBy } : {}),
+      })
+      .catch((error) => this.warn(`放行通知没送到（票 ${ticket.id}）：${messageOf(error)}`))
+    void this.notifier
+      .released({
+        ticketId: ticket.id,
+        brief: briefOf(ticket, this.config.briefMaxColumns),
+        ...(ticket.publisher ? { publisher: ticket.publisher } : {}),
+        ...(releasedBy.length > 0 ? { releasedBy } : {}),
+      })
+      .catch((error) => this.warn(`放行提醒没送出去：${messageOf(error)}`))
   }
 
   /** 宿主信号统一入口：进队列、吞异常——宿主回调里抛错会打断别人的监听。 */
@@ -1244,6 +1401,9 @@ export class TicketDesk {
         epochReports,
         ...(this.device ? { device: this.device } : {}),
       })
+      // 票台自己打断的那一轮（被挡、关票）不算「干完了」：别把被掐断的半句话
+      // 记成报告，也别发「干完没交报告」——那会把主会话往错的方向带。
+      if (isInterruptedStop(stopReason)) continue
       if (epochReports > 0) continue
       const last = typeof info.lastAssistantMessage === 'string' ? info.lastAssistantMessage.trim() : ''
       if (this.config.autoReport && last) {
@@ -1287,13 +1447,14 @@ export class TicketDesk {
   /**
    * 拿这张票去撞现在所有没收工的票（自己不算）。
    *
-   * 强冲突按排队序号（`seq` 升序，就是开票先后）记 `{ ticketId, resources }`，
-   * 弱冲突只留票号：前者拦、后者只是票面上一行提示。判定本身是纯函数，这里只管
-   * 挑对手和汇总；同一张对手票只记一次。没有 seq 的老票仍按 createdAt / id 排，
-   * 见 `store/log.ts` 的 `byQueueOrder`。
+   * 谁挡谁只按「谁先抢到这片资源」定，见 `byClaimOrder`：先交声明的在前，
+   * 没交声明的排在所有交过声明的后面，声明时刻相同才退回排队序号 `seq`。
+   * 只有排在自己**前面**的票能拦自己；排在自己后面的票一律不算阻塞——它在
+   * 等自己先走。以前的实现是「只看谁先被判定」：先 declare 的 A 探路子会话后
+   * idle，反过来被后 declare 的 B 挡成 blocked，方向是反的。
    *
-   * 排在自己**后面**的排队票不算阻塞：它在等我先走（FIFO）。排在前面的排队票
-   * 照样拦——前排没放行，后面的不许抢跑。放行那条路靠这一条做到「依次放行」。
+   * 这样已经 running 的票不会被后来的票改判：后来者排不过它，只能排在它后面。
+   * 两张票互不冲突时照旧各自派活；弱冲突只留票号，票面上一行提示。
    */
   private judgeTicket(ticket: TicketSnapshot): {
     level: ConflictLevel
@@ -1302,13 +1463,13 @@ export class TicketDesk {
   } {
     const all = this.log.list()
     const mine = this.conflictSide(ticket)
-    const myIndex = all.findIndex((row) => row.id === ticket.id)
     const waitOn: ConflictWait[] = []
     const weak: string[] = []
     let strong = false
-    for (const [index, other] of all.entries()) {
+    for (const other of all) {
       if (other.id === ticket.id || !isOpen(other.status)) continue
-      if (other.phase === 'blocked' && index > myIndex) continue
+      // 排在自己后面的票不挡自己：FIFO 只看前面还欠着谁的账。
+      if (byClaimOrder(other, ticket) >= 0) continue
       const verdict = judgeConflict(mine, this.conflictSide(other))
       if (verdict.level === 'none') continue
       if (verdict.level === 'strong') {
@@ -1404,6 +1565,8 @@ export class TicketDesk {
         // 老会话的工具面在 spawn 时就装好了（`worker-tools.ts`）；这里再伸一次手
         // 只为了插件热重载后那点漏网：装过就直接返回，不会重复注册。
         this.deps.workerTools?.attach(workerId)
+        // 这一轮已经投出去了：它不再是「空闲待派」，等下一次 idle 再记。
+        this.idleSeen.delete(workerId)
         return true
       } catch (error) {
         // 活表里还在、话却投不进去：当成真没了，往下走 spawn 那条路。
@@ -1481,6 +1644,13 @@ export class TicketDesk {
   private async admit(ticket: TicketSnapshot): Promise<boolean> {
     const current = this.log.get(ticket.id) ?? ticket
     if (!isOpen(current.status) || current.phase !== 'planned') return false
+    // 硬校验：没有 declared 就不 admit。探路是每张票的必经流程，声明是它的
+    // 唯一产物；phase=planned 只由 `declared` 折出来，这里再兜一道——别让将来
+    // 任何一条新路径把没声明的票塞进执行轮。
+    if (!current.declaredAt) {
+      this.warn(`票 ${current.id} 没有声明（没有 declared 事件），不进执行轮`)
+      return false
+    }
     const verdict = this.judgeTicket(current)
     if (verdict.level === 'strong') {
       this.commit({
@@ -1494,8 +1664,13 @@ export class TicketDesk {
       })
       const blockedBy = verdict.waitOn.map((wait) => wait.ticketId).join('、')
       this.warn(`票 ${current.id} 撞上 ${blockedBy}，先排队等放行`)
-      // 排队的那一刻写进巡检事实，主会话下一轮就能看见在等谁。
-      this.rememberBlocked(this.log.get(current.id) ?? current, { waitOn: verdict.waitOn })
+      // 排队的那一刻写进巡检事实，主会话下一轮就能看见在等谁；origin 是 main
+      // 的票同时推开票方一句——它就是主会话，在跑的话下一个 step 就收到。
+      // ego 提的票只落事实：不把叫人绕过 ego 自己的回合。
+      this.rememberBlocked(this.log.get(current.id) ?? current, {
+        waitOn: verdict.waitOn,
+        wake: (current.origin ?? 'main') !== 'ego',
+      })
       return false
     }
     this.commit({
@@ -1539,14 +1714,16 @@ export class TicketDesk {
   /**
    * 有票收工了，回头放行排队里的票。
    *
-   * FIFO：按排队序号 `seq` 升序（就是开票先后；老票按 createdAt / id）扫
-   * `phase === 'blocked'`，一张一张来——先放行完这张、让它的 phase 落成
+   * FIFO：按 `byClaimOrder`（交声明先后；没声明/同毫秒退回排队序号 `seq`）
+   * 扫 `phase === 'blocked'`，一张一张来——先放行完这张、让它的 phase 落成
    * running，再判下一张，否则三张票会同时看到「对手已经不在了」一起冲出去。
-   * 派不出去就留在队里，等下次收工再试。
+   * 顺序必须跟判定用同一把尺：按 seq 扫会先把「后声明、票号在前」的那张放
+   * 出去，于是真正先声明的反而看着它跑。派不出去就留在队里，等下次收工再试。
    */
   private async releaseBlocked(): Promise<string[]> {
     const released: string[] = []
-    for (const queued of this.log.list()) {
+    const queue = [...this.log.list()].sort(byClaimOrder)
+    for (const queued of queue) {
       if (!isOpen(queued.status) || queued.phase !== 'blocked') continue
       const current = this.log.get(queued.id)
       if (!current || !isOpen(current.status) || current.phase !== 'blocked') continue
@@ -1582,8 +1759,8 @@ export class TicketDesk {
         this.rollbackPlanned(current)
         continue
       }
-      // 放行了：挂起那条从事实里撤掉，别让它一直挂在主会话的上下文里。
-      this.forgetBlocked(current.id)
+      // 放行了：挂起那条从事实里撤掉，再推开票方一句，别让人干等。
+      this.notifyReleased(current)
       released.push(current.id)
     }
     return released
@@ -1592,40 +1769,40 @@ export class TicketDesk {
   /**
    * 拆探路窗口：探路子会话 idle 下来，只读钳子该松。
    *
-   * 纯释放——除了「票还停在 planning」时补一条空声明，不写别的东西：交过声明
-   * 的票（phase 已是 planned）这里一个字节都不落。补声明的 plan/intent 照抄票上
-   * 的（没有就是空对象），因为 idle 只说明「这一轮说完了」，没说清方案是什么。
+   * 纯释放：不补声明、不推 phase。以前这里会给「idle 了但没交声明」的票补一条
+   * 空 `declared`，那条就是「不探路也能进执行」的后门——现在声明只能由子会话
+   * 自己用 `dispatch_declare` 交，没交就留在 planning，等补声明或巡检超时降级。
    */
   private closeProbe(ticket: TicketSnapshot, sessionId: string): void {
     const probe = this.deps.probe
     if (!probe) return
     probe.release(ticket.workerId ?? sessionId)
-    if (ticket.phase !== 'planning') return
-    const current = this.log.get(ticket.id) ?? ticket
-    // 这中间可能已经被别人的 commit 转成 planned（比如子会话刚交了声明）：再查一次。
-    if (current.phase !== 'planning') return
-    this.commit({
-      kind: 'declared',
-      id: current.id,
-      at: this.at(),
-      cause: 'lifecycle',
-      plan: current.plan ?? {},
-      intent: current.intent ?? {},
-      workerId: current.workerId ?? sessionId,
-    })
   }
 
   /**
    * 探路超时：票停在 planning 太久，说明这只探路子会话要么没交活要么没了。
    *
    * 不拦巡检——它只是巡检里的一小段。降级的语义是「声明拿不到了」：按整片 dir
-   * 当写进兜底（设计稿 §8），票转 planned 并标 degraded，窗口拆掉；执行轮照常
-   * 由主会话的动作推进。
+   * 当写进兜底（设计稿 §8），票转 planned 并标 degraded，窗口拆掉。
+   *
+   * 降级写完当场就把这一轮推下去：重取票面、走同一条 `admit`（判冲突 → 没有
+   * 冲突就派执行轮）。以前这里只改票面，派活要等那只探路子会话自己回合结束发
+   * `agent/status idle`——它要是在降级之前已经 idle 过一次，那之后就再也没有
+   * 事件，票永久停 running+planned（今天 8 张票空窗 92 秒到 4 分 54 秒，其中
+   * 就有这条路）。所以降级是「拿不到声明」的终点，不是等 idle 的起点。
+   *
+   * 返回 true = 这张票确实降级了（不管 admit 派没派成，票已经离开 planning）。
    */
-  private degradeProbe(ticket: TicketSnapshot, now: Date): boolean {
-    const since = minutesSince(ticket.epochStartedAt ?? ticket.statusSince, now)
-    if (since < this.config.probeTimeoutMinutes) return false
+  private async degradeProbe(ticket: TicketSnapshot, now: Date): Promise<boolean> {
+    const timeoutMs = this.probeTimeoutMs()
+    // 毫秒精确：`minutesSince` 把差取整到分钟，92 秒就被四舍五入成 2 分钟判超时。
+    // 这里只比毫秒差；时间解析不出来时 NaN 的比较一律 false，宁可晚降级不误降。
+    const sinceMs = now.getTime() - Date.parse(ticket.epochStartedAt ?? ticket.statusSince)
+    if (!(sinceMs >= timeoutMs)) return false
     const probe = this.deps.probe
+    // 窗口没被预期会话领走（身份对不上 / agent/created 压根没来）也算失败：
+    // 先让登记那边打日志收账，再照旧走降级，别静默放行带写工具的探路轮。
+    probe?.expire?.(ticket.id)
     probe?.releaseTicket(ticket.id)
     try {
       this.commit({
@@ -1643,7 +1820,41 @@ export class TicketDesk {
       this.warn(`探路降级没写成（票 ${ticket.id}）：${messageOf(error)}`)
       return false
     }
+    const current = this.log.get(ticket.id)
+    if (!current) return true
+    // 当场推进，不等 idle。派不派得成由 admit 判：撞上了就 blocked 排队，
+    // 派活失败退回 planned，下一拍巡检兜底接着试。
+    await this.admit(current)
     return true
+  }
+
+  /**
+   * 探路窗口的耐心，毫秒。
+   *
+   * 配置写分钟（人读的），换算只乘 60000、不做分钟级取整：2 分钟就是 120000ms，
+   * 不会被四舍五入提前或者拖后大半分钟。落 `planning` 那行日志打的就是这个数。
+   */
+  private probeTimeoutMs(): number {
+    return Math.max(0, Math.round(this.config.probeTimeoutMinutes * 60_000))
+  }
+
+  /**
+   * 兜底放行时这只 worker 算什么状态：只给日志，不参与判定。
+   *
+   * 「已死」= 票上没有 workerId，或者活表里查不到（`pool.alive` 返回 false；没有
+   * 活表时返回 undefined，同样没法把活投过去，一样按重起处理）。
+   * 「正忙」= 活表里在、但这一轮投出去之后还没回过 idle：steer 的话话会排在下一个
+   * step 边界，不打断它在跑的那一步。
+   * 「空闲」= 活表里在、而且见过它 idle：直接起下一轮。
+   */
+  private workerStateText(ticket: TicketSnapshot): string {
+    const workerId = ticket.workerId
+    if (!workerId) return '没有 workerId，重起一只'
+    const alive = this.pool.alive(workerId)
+    if (alive !== true) return `${workerId} 已死（活表 alive=${String(alive)}），重起一只`
+    return this.idleSeen.has(workerId)
+      ? `${workerId} 空闲，steer 回原会话`
+      : `${workerId} 正忙，steer 到下一个 step 边界`
   }
 
   /**
@@ -1654,10 +1865,13 @@ export class TicketDesk {
     const record = (payload ?? {}) as { status?: unknown; agent?: unknown }
     const sessionId = agentIdOf(record.agent)
     if (record.status !== 'idle' || !sessionId) return
+    // 记一笔「这只空下来了」，只给兜底的日志和排查用；放行与否不看它（见
+    // `idleSeen` 的注释：降级前已经 idle 过的那条路不会再有第二个事件）。
+    this.idleSeen.add(sessionId)
     for (const ticket of this.ticketsOf(sessionId)) {
       if (ticket.status !== 'running') continue
       // 探路窗口先拆，再投排队的话：探路子会话 idle 下来就说明它这一轮说完了，
-      // 后面投进来的活要能写盘。拆窗口本身不碰 status，票还在 planning 才补声明。
+      // 后面投进来的活要能写盘。
       this.closeProbe(ticket, sessionId)
       const current = this.log.get(ticket.id) ?? ticket
       // 探路收工就是判定那一刻：这一轮不是「进 waiting」，而是判冲突然派执行轮。
@@ -1666,11 +1880,14 @@ export class TicketDesk {
         await this.admit(current)
         continue
       }
+      // 探路轮说完了却没交声明：不进执行轮。票留在 planning（status 不动），
+      // 等子会话补 declare，或者巡检到点降级；这里不替它补一条空声明。
       if (pending(ticket.inputs).length > 0) {
         const delivered = await this.deliverQueued(ticket.id)
         if (delivered > 0) continue
         // 投不出去：票还是 running，但没有真活在跑。落 waiting 但标记人还在。
       }
+      if (current.phase === 'planning') continue
       this.commit({
         kind: 'idled',
         id: ticket.id,
@@ -1705,6 +1922,35 @@ export class TicketDesk {
       this.busEmit('dispatcher/worker-gone', { id: ticket.id, workerId: ticket.workerId })
     }
   }
+}
+
+/**
+ * 冲突排队的先后：谁先抢到这片资源，谁在前。
+ *
+ * 只看交声明的时刻（`declaredAt`）——判定发生在探路子会话 idle 那一拍，比的是
+ * 声明先后，不是「谁先被判定」。没交声明的票（快路径、还在探路、老票）排在
+ * 所有交过声明的后面；两张都没交声明、或者声明时刻撞在同一毫秒，退回排队
+ * 序号 `seq`（`byQueueOrder`）。这个比较是全序，三张以上的链式排队也定得死。
+ */
+function byClaimOrder(a: TicketSnapshot, b: TicketSnapshot): number {
+  const mine = a.declaredAt
+  const other = b.declaredAt
+  if (mine && other) {
+    if (mine !== other) return mine < other ? -1 : 1
+    return byQueueOrder(a, b)
+  }
+  if (mine) return -1
+  if (other) return 1
+  return byQueueOrder(a, b)
+}
+
+/**
+ * 这一轮是不是被「打断」收的：`dsh-agent` 的 turn/end 原因是这几个。
+ *
+ * 只用来判「要不要补报告」：被打断的一轮不是干完了，硬补一条只会让人误判。
+ */
+function isInterruptedStop(reason: string): boolean {
+  return /^(?:interrupted|aborted|canceled|cancelled)$/i.test(reason)
 }
 
 /** 排队名单有没有变：没变就不重复写日志（每次收工都会重扫一遍）。 */

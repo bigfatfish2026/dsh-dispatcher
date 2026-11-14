@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { intentPlanLines } from '../src/index'
+import type { OwnerNotifier } from '../src/tickets/notify'
 import type { ProbePort, ProbeRegistry } from '../src/tickets/probe'
 import { flush, makeDesk } from './helpers/desk-harness'
 import type { Harness } from './helpers/desk-harness'
@@ -35,22 +36,21 @@ function desk(): Harness {
   return h
 }
 
-/** 开一张探路票：writes/reads 走 intent 落 `published`，探路子会话随后派出去。 */
+/**
+ * 开一张探路票，再让探路子会话把 writes/reads 声明上来。
+ *
+ * 2026-11-14 起 open 不收 intent，意图只能走 `dispatch_declare`；冲突判定读的
+ * 仍是票上折出来的那一栏。
+ */
 async function openProbe(
   h: Harness,
   goal: string,
   writes: string[],
   reads: string[] = [],
 ): Promise<string> {
-  const receipt = await h.desk.open(
-    {
-      goal,
-      brief: goal,
-      probe: true,
-      intent: { writes, ...(reads.length ? { reads } : {}) },
-    },
-    h.main,
-  )
+  const receipt = await h.desk.open({ goal, brief: goal }, h.main)
+  const workerId = h.log.get(receipt.id)!.workerId!
+  await h.desk.declare(workerId, { summary: goal }, { writes, ...(reads.length ? { reads } : {}) })
   // 不推假时钟：同一毫秒开票也该稳定按开票先后走，靠的是票上的排队序号 seq
   // （`published` 里那一条），不是 createdAt。
   return receipt.id
@@ -91,6 +91,64 @@ describe('探路收工那刻判定', () => {
     // 票面上看得见「在等谁、等什么」。
     const view = h.desk.list().find((row) => row.id === second)!
     expect(intentPlanLines(view)).toContain(`    waiting on ${first} (${DIR})`)
+  })
+
+  it('第二张 declare 撞车：当场通知开票方；前一张收工放行时再通知一次', async () => {
+    const blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]> = []
+    const releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]> = []
+    const notifier: OwnerNotifier = {
+      reportArrived: async () => true,
+      idle: async () => true,
+      noReport: async () => true,
+      blocked: async (input) => {
+        blockedCalls.push(input)
+        return true
+      },
+      resumed: async () => true,
+      released: async (input) => {
+        releasedCalls.push(input)
+        return true
+      },
+    }
+    const h = makeDesk({
+      config: { defaultPreset: 't1', sweepMs: 0 },
+      probe: fakeProbe(),
+      notifier,
+    })
+    h.desk.attach()
+
+    const first = await openProbe(h, '占住目录', [DIR])
+    // 第一张先判、先跑起来：探路轮收工后派执行轮。
+    await idle(h, 'worker-1')
+    expect(h.log.get(first)!.phase).toBe('running')
+    expect(h.log.get(first)!.waitOn).toBeUndefined()
+
+    const second = await openProbe(h, '抢目录', [DIR])
+    await idle(h, h.log.get(second)!.workerId!)
+
+    const queued = h.log.get(second)!
+    expect(queued.phase).toBe('blocked')
+    expect(queued.waitOn).toEqual([{ ticketId: first, resources: [DIR] }])
+    // 开票方当场收到：被挡的票、被谁挡的（id + brief）、撞在哪些路径上。
+    expect(blockedCalls).toHaveLength(1)
+    expect(blockedCalls[0]).toMatchObject({
+      ticketId: second,
+      brief: '抢目录',
+      wake: true,
+      waitOn: [{ ticketId: first, resources: [DIR], brief: '占住目录' }],
+    })
+
+    await h.desk.close(first)
+    await flush()
+
+    expect(h.log.get(second)!.phase).not.toBe('blocked')
+    // 放行也吱一声：谁放行的、轮到谁了。
+    expect(releasedCalls).toHaveLength(1)
+    expect(releasedCalls[0]).toMatchObject({
+      ticketId: second,
+      brief: '抢目录',
+      releasedBy: [first],
+    })
   })
 
   it('弱冲突：照常派活，票面上留一行提示票号', async () => {
@@ -156,23 +214,25 @@ describe('探路收工那刻判定', () => {
     })
     h.desk.attach()
     const blocker = await openProbe(h, '改目录甲', [DIR])
+    // 挡路那张先真的跑起来：探路收工、派执行轮，它已经是 running 的写入方。
+    await idle(h, 'worker-1')
+    expect(h.log.get(blocker)!.phase).toBe('running')
     const receipt = await h.desk.open(
-      { goal: '只交了半截的降级票', brief: '降级票', dir: '/tmp/conflict-ws', probe: true },
+      { goal: '只交了半截的降级票', brief: '降级票', dir: '/tmp/conflict-ws' },
       h.main,
     )
     const planner = receipt.id
     h.clock.advance(3 * 60_000)
+    // 降级当拍就判：撞上占着这片目录的票就排队，不等探路子会话 idle。
     await h.desk.maintain()
     const degraded = h.log.get(planner)!
     expect(degraded.degraded).toBe(true)
-    expect(degraded.phase).toBe('planned')
-
-    await idle(h, degraded.workerId!)
 
     const blocked = h.log.get(planner)!
     expect(blocked.phase).toBe('blocked')
     expect(blocked.waitOn).toEqual([{ ticketId: blocker, resources: [DIR] }])
-    expect(h.subagents.spawned).toHaveLength(2)
+    // 判输了不派：两只探路 + 一张执行轮，planner 没有执行轮。
+    expect(h.subagents.spawned).toHaveLength(3)
   })
 })
 
@@ -294,4 +354,115 @@ describe('排队序号', () => {
       expect(h.log.get(third)!.waitOn).toBeUndefined()
     }
   }, 30_000)
+})
+
+describe('先来后到按交声明顺序，不按谁先被判定', () => {
+  /** 记下 notifier 被叫了哪些：blocked / released 各自一条一条攒。 */
+  function capture(): {
+    notifier: OwnerNotifier
+    blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]>
+    releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]>
+  } {
+    const blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]> = []
+    const releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]> = []
+    const notifier: OwnerNotifier = {
+      reportArrived: async () => true,
+      idle: async () => true,
+      noReport: async () => true,
+      blocked: async (input) => {
+        blockedCalls.push(input)
+        return true
+      },
+      resumed: async () => true,
+      released: async (input) => {
+        releasedCalls.push(input)
+        return true
+      },
+    }
+    return { notifier, blockedCalls, releasedCalls }
+  }
+
+  /** 只开票不声明：让测试自己摆 declare 的先后。 */
+  async function openBare(h: Harness, goal: string): Promise<string> {
+    const receipt = await h.desk.open({ goal, brief: goal }, h.main)
+    return receipt.id
+  }
+
+  it('A 先 declare、B 后 declare：A 的探路子会话后收工也先跑，B 排队 waitOn A', async () => {
+    const { notifier, blockedCalls, releasedCalls } = capture()
+    const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe: fakeProbe(), notifier })
+    h.desk.attach()
+    const a = await openBare(h, 'A 先声明')
+    const b = await openBare(h, 'B 后声明')
+    const wa = h.log.get(a)!.workerId!
+    const wb = h.log.get(b)!.workerId!
+    await h.desk.declare(wa, { summary: 'A 先声明' }, { writes: [DIR] })
+    h.clock.advance(1000)
+    await h.desk.declare(wb, { summary: 'B 后声明' }, { writes: [DIR] })
+
+    // A 的探路子会话后收工：这一刻判的是 A，但 A 是先交声明的那一侧，不许被 B 挡。
+    await idle(h, wa)
+    expect(h.log.get(a)!.phase).toBe('running')
+    expect(h.log.get(a)!.waitOn).toBeUndefined()
+
+    const spawnedAfterA = h.subagents.spawned.length
+    await idle(h, wb)
+    const queued = h.log.get(b)!
+    expect(queued.phase).toBe('blocked')
+    expect(queued.waitOn).toEqual([{ ticketId: a, resources: [DIR] }])
+    // 已经跑起来的 A 不被后到的 B 改判：phase 还是 running，也没多派一轮。
+    expect(h.log.get(a)!.phase).toBe('running')
+    expect(h.subagents.spawned).toHaveLength(spawnedAfterA)
+    // 通知到开票方：被挡那一刻一条，放行再一条，都指名 publisher。
+    expect(blockedCalls).toHaveLength(1)
+    expect(blockedCalls[0]).toMatchObject({
+      ticketId: b,
+      brief: 'B 后声明',
+      publisher: 'session-main',
+      wake: true,
+      waitOn: [{ ticketId: a, brief: 'A 先声明', resources: [DIR] }],
+    })
+
+    await h.desk.close(a, { actor: h.main })
+    expect(h.log.get(b)!.phase).toBe('running')
+    expect(h.log.get(b)!.waitOn).toBeUndefined()
+    expect(releasedCalls).toHaveLength(1)
+    expect(releasedCalls[0]).toMatchObject({ ticketId: b, publisher: 'session-main', releasedBy: [a] })
+  })
+
+  it('反向：B 后开票但先 declare，先到先得跟着 declare 顺序走', async () => {
+    const h = desk()
+    // A 的票号在前（seq 小），B 的票号在后：只看票号会判反。
+    const a = await openBare(h, 'A 后声明')
+    const b = await openBare(h, 'B 先声明')
+    const wa = h.log.get(a)!.workerId!
+    const wb = h.log.get(b)!.workerId!
+    await h.desk.declare(wb, { summary: 'B 先声明' }, { writes: [DIR] })
+    h.clock.advance(1000)
+    await h.desk.declare(wa, { summary: 'A 后声明' }, { writes: [DIR] })
+
+    await idle(h, wb)
+    expect(h.log.get(b)!.phase).toBe('running')
+    await idle(h, wa)
+    const queued = h.log.get(a)!
+    expect(queued.phase).toBe('blocked')
+    expect(queued.waitOn).toEqual([{ ticketId: b, resources: [DIR] }])
+  })
+
+  it('声明时刻一模一样时退回排队序号：先开的票先跑', async () => {
+    const h = desk()
+    const a = await openBare(h, '同一毫秒的 A')
+    const b = await openBare(h, '同一毫秒的 B')
+    const wa = h.log.get(a)!.workerId!
+    const wb = h.log.get(b)!.workerId!
+    // 一秒都不推：两边的 declaredAt 完全一样。
+    await h.desk.declare(wa, { summary: 'A' }, { writes: [DIR] })
+    await h.desk.declare(wb, { summary: 'B' }, { writes: [DIR] })
+
+    await idle(h, wa)
+    expect(h.log.get(a)!.phase).toBe('running')
+    await idle(h, wb)
+    expect(h.log.get(b)!.phase).toBe('blocked')
+    expect(h.log.get(b)!.waitOn).toEqual([{ ticketId: a, resources: [DIR] }])
+  })
 })

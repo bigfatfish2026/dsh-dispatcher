@@ -205,7 +205,7 @@ export interface TicketSnapshot {
   presetWhy?: string
   /** 提票人：`main`（人/主会话）或 `ego`。老票没有这一栏，读起来是 `main`。 */
   origin?: TicketOrigin
-  /** 建票意图：影响面、可撤性、预演、撤回指南；老票没有就是 undefined。 */
+  /** 由 `dispatch_declare` 的 `declared` 折进来：影响面、可撤性、预演、撤回指南；老票没有就是 undefined。 */
   intent?: IntentSpec
   /** 探路子会话交的方案（`declared` 折进来）；没探路或老票就是 undefined。 */
   plan?: TicketPlan
@@ -215,6 +215,15 @@ export interface TicketSnapshot {
    * 各走各的。快路径和老票没有。
    */
   phase?: TicketPhase
+  /**
+   * 交声明那一刻（第一条 `declared.at`）：冲突排队「先来后到」按它比。
+   *
+   * 判定发生在探路子会话 idle 那一拍，不是 declare 那一拍——两张票谁先被判定
+   * 跟谁先抢到资源没关系，只有声明时刻能定先后。只认第一次声明：重新声明、
+   * 降级、派活失败回滚都不刷新它，否则排队顺序会被后来的动作改掉。快路径和
+   * 老票没有这一栏，排序退回排队序号 `seq`。
+   */
+  declaredAt?: string
   /**
    * 冲突排队：这张票在 `blocked` 时撞的是谁、撞了什么（`conflict-checked` 折
    * 进来）。放行或重新声明时清空。老票、快路径的票没有这一栏。
@@ -327,7 +336,10 @@ export interface Published extends EventBase {
    * 审计能区分「人点的不可撤动作」和「ego 想点的」。
    */
   origin?: TicketOrigin
-  /** 建票意图；老调用不写，快照里就是 undefined。 */
+  /**
+   * 开票意图。2026-11-14 起 `dispatch_open` 不再收 intent，这个键只出现在
+   * 老日志里；新票的意图走 `declared` 事件，reducer 折叠时照样认这一栏。
+   */
   intent?: IntentSpec
 }
 

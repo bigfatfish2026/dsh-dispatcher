@@ -373,6 +373,9 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
         plan: event.plan,
         intent: event.intent,
         phase: 'planned',
+        // 排队先后只认第一次声明：重新声明 / 降级 / 回滚都走这条事件，
+        // 不能让它们把「谁先抢到这片资源」改掉。
+        declaredAt: previous.declaredAt ?? event.at,
         degraded: event.degraded === true,
         // 重新声明 = 影响面变了：旧的排队关系和弱冲突提示都不作数，等下一次判。
         waitOn: undefined,

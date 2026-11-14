@@ -7,6 +7,19 @@ async function opened(options: Parameters<typeof makeDesk>[0] = {}) {
   return { h, id: receipt.id }
 }
 
+/**
+ * 把票推过探路轮：子会话交声明，idle 当场判过，执行任务投回同一只会话（epoch+1）。
+ * 探路是每张票的必经流程，测「执行轮」的行为得先走完这一步。
+ */
+async function toTask(h: ReturnType<typeof makeDesk>, id: string): Promise<void> {
+  h.desk.attach()
+  h.agents.markAlive('worker-1')
+  await h.desk.declare('worker-1', { summary: '探完了' }, { writes: ['dir:/tmp/desk-state'] })
+  h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
+  await flush()
+  expect(h.log.get(id)!.phase).toBe('running')
+}
+
 describe('报告', () => {
   it('只追加，不动状态；报告正文不进提醒', async () => {
     const { h, id } = await opened()
@@ -93,7 +106,7 @@ describe('end / idle', () => {
 
   it('idle 且队列空了：落 waiting，但标记人还活着', async () => {
     const { h, id } = await opened()
-    h.desk.attach()
+    await toTask(h, id)
     h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
     await flush()
     const ticket = h.log.get(id)!
@@ -103,7 +116,7 @@ describe('end / idle', () => {
 
   it('worker 被回收：2 分钟内的抖动不算，过了才落 waiting', async () => {
     const { h, id } = await opened()
-    h.desk.attach()
+    await toTask(h, id)
     h.host.emit('agent/disposed', { agent: { id: 'worker-1' } })
     await flush()
     expect(h.log.get(id)!.status).toBe('running')
@@ -243,7 +256,7 @@ describe('并发的两次开票', () => {
     ])
     expect(second.id).toBe(first.id)
     expect(h.subagents.spawned).toHaveLength(1)
-    expect(h.backend.kinds()).toEqual(['published', 'spawned'])
+    expect(h.backend.kinds()).toEqual(['published', 'planning', 'spawned'])
   })
 
   it('两个不同的人在活表里，各开一张也串得住', async () => {
@@ -256,6 +269,6 @@ describe('并发的两次开票', () => {
       ),
     ])
     expect(a.id).not.toBe(b.id)
-    expect(h.backend.kinds()).toEqual(['published', 'spawned', 'published', 'spawned'])
+    expect(h.backend.kinds()).toEqual(['published', 'planning', 'spawned', 'published', 'planning', 'spawned'])
   })
 })

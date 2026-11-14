@@ -174,7 +174,29 @@ describe('dispatch_declare', () => {
 
     await expect(
       call('dispatch_declare', {}, { agent: worker(host, 'worker-probe-1') }),
-    ).rejects.toThrow('至少要给 plan 或 intent')
+    ).rejects.toThrow(/declare 必须给 plan/)
+    expect(rows(file)).toHaveLength(before)
+  })
+
+  it('只给 plan 不给 intent，票上也没有旧 intent：拒绝，不进执行轮', async () => {
+    const file = probeTicket()
+    const { host, call } = mount(file)
+    const before = rows(file).length
+
+    await expect(
+      call('dispatch_declare', { plan }, { agent: worker(host, 'worker-probe-1') }),
+    ).rejects.toThrow(/declare 必须给 intent/)
+    expect(rows(file)).toHaveLength(before)
+  })
+
+  it('只给 intent 不给 plan：拒绝', async () => {
+    const file = probeTicket()
+    const { host, call } = mount(file)
+    const before = rows(file).length
+
+    await expect(
+      call('dispatch_declare', { intent }, { agent: worker(host, 'worker-probe-1') }),
+    ).rejects.toThrow(/declare 必须给 plan/)
     expect(rows(file)).toHaveLength(before)
   })
 })

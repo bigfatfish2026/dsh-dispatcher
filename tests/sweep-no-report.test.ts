@@ -27,6 +27,9 @@ function recorder() {
       async resumed() {
         return true
       },
+      async released() {
+        return true
+      },
     },
   }
 }

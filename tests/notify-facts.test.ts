@@ -99,6 +99,79 @@ describe('只有等维护者决定才叫醒', () => {
   })
 })
 
+describe('冲突排队：事实 + 推开票方', () => {
+  it('blocked 带 wake：事实里写清对手 id + brief + 路径，同时 wake 一句', async () => {
+    const { facts, wakes, notifier } = setup()
+
+    await notifier.blocked({
+      ticketId: 't-wait',
+      brief: '抢目录',
+      wake: true,
+      waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
+    })
+
+    expect(facts.text()).toContain('票 t-wait 因 dir:/a/b 与 t-block「占住目录」 冲突挂起')
+    expect(wakes).toHaveLength(1)
+    expect(wakes[0]!.startsWith(SWEEP_PREFIX)).toBe(true)
+    expect(wakes[0]).toContain('t-wait「抢目录」')
+    expect(wakes[0]).toContain('t-block「占住目录」')
+    expect(wakes[0]).toContain('dir:/a/b')
+    expect(wakes[0]).toContain('不是维护者在说话')
+  })
+
+  it('人工挂起不带 wake：只记事实，一句话都不推', async () => {
+    const { facts, wakes, notifier } = setup()
+
+    await notifier.blocked({ ticketId: 't-manual', brief: '等拍板', reason: '等维护者拍板' })
+
+    expect(facts.text()).toContain('等维护者拍板')
+    expect(wakes).toHaveLength(0)
+  })
+
+  it('指名开票方：blocked 与 released 都把 publisher 交给 wake 的第二参', async () => {
+    const facts = createSweepFacts({ clock: fakeClock() })
+    const calls: { text: string; to?: string }[] = []
+    const notifier = createNotifier({
+      facts,
+      wake: (text, to) => {
+        calls.push({ text, to })
+        return true
+      },
+    })
+
+    await notifier.blocked({
+      ticketId: 't-wait',
+      brief: '抢目录',
+      wake: true,
+      publisher: 'session-main',
+      waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
+    })
+    await notifier.released({ ticketId: 't-wait', brief: '抢目录', publisher: 'session-main', releasedBy: ['t-block'] })
+
+    // 两条都指名同一个开票方：主会话不止一个时，话不能被推到另一个那里去。
+    expect(calls.map((call) => call.to)).toEqual(['session-main', 'session-main'])
+  })
+
+  it('released：摘掉挂起事实，再推一句「轮到它了」', async () => {
+    const { facts, wakes, notifier } = setup()
+    await notifier.blocked({
+      ticketId: 't-wait',
+      brief: '抢目录',
+      wake: true,
+      waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
+    })
+    expect(facts.size()).toBe(1)
+
+    await notifier.released({ ticketId: 't-wait', brief: '抢目录', releasedBy: ['t-block'] })
+
+    expect(facts.text()).toBe('')
+    const last = wakes.at(-1)!
+    expect(last).toContain('t-wait「抢目录」已放行')
+    expect(last).toContain('t-block 已收工')
+    expect(last).toContain('不是维护者在说话')
+  })
+})
+
 describe('文本稳定，缓存不抖', () => {
   it('同一批提醒连续渲染两次一字不差，同一个五分钟窗口里也不动', async () => {
     const { clock, facts, notifier } = setup()

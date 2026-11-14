@@ -43,13 +43,13 @@ describe('开票：定档', () => {
     expect(classify.calls).toBe(0)
   })
 
-  it('主会话自己挂了档：用它，source 记 router', async () => {
+  it('主会话自己挂了档：一律不吃，开票照分类器选（探路票不继承主会话档）', async () => {
     const classify = fakeClassifier('t2')
     const h = makeDesk({ classify, routerPreset: 't2' })
     const receipt = await h.desk.open(INTENT, h.main)
     expect(receipt.preset).toBe('t2')
-    expect(receipt.presetSource).toBe('router')
-    expect(classify.calls).toBe(0)
+    expect(receipt.presetSource).toBe('llm')
+    expect(classify.calls).toBe(1)
   })
 
   it('分类器超时就回落默认档，不把开票卡死', async () => {
@@ -111,10 +111,11 @@ describe('开票：发布与补偿', () => {
   it('先 published 再 spawned，两行的 at 都是同一次时钟', async () => {
     const h = makeDesk()
     const receipt = await h.desk.open(INTENT, h.main)
-    expect(h.backend.kinds()).toEqual(['published', 'spawned'])
+    // 每张票先落 planning（探路轮），再派活。
+    expect(h.backend.kinds()).toEqual(['published', 'planning', 'spawned'])
     const at = h.clock.now().toISOString()
     for (const event of h.backend.events_) expect(event.at).toBe(at)
-    const spawned = h.backend.events_[1] as Spawned
+    const spawned = h.backend.events_[2] as Spawned
     expect(spawned.workerId).toBe('worker-1')
     expect(spawned.preset).toBe('t1')
     expect(spawned.device).toBe('board-test')
@@ -149,7 +150,7 @@ describe('开票：发布与补偿', () => {
     const h = makeDesk()
     h.subagents.failNext(new Error('provider 挂了'))
     await expect(h.desk.open(INTENT, h.main)).rejects.toThrow(/派活失败/)
-    expect(h.backend.kinds()).toEqual(['published', 'spawn-failed'])
+    expect(h.backend.kinds()).toEqual(['published', 'planning', 'spawn-failed'])
     const ticket = h.log.list()[0]!
     expect(ticket.status).toBe('open')
     expect(ticket.note).toContain('provider 挂了')
@@ -161,7 +162,7 @@ describe('开票：发布与补偿', () => {
     h.backend.failOn = (event) => (event as { kind?: string }).kind === 'spawned'
     await expect(h.desk.open(INTENT, h.main)).rejects.toThrow(/记账失败/)
     expect(h.subagents.disposed).toEqual(['worker-1'])
-    expect(h.backend.kinds()).toEqual(['published', 'spawn-failed'])
+    expect(h.backend.kinds()).toEqual(['published', 'planning', 'spawn-failed'])
     expect(h.log.list()[0]!.status).toBe('open')
   })
 
@@ -172,7 +173,7 @@ describe('开票：发布与补偿', () => {
     expect(second.id).toBe(first.id)
     expect(second.duplicate).toBe(first.id)
     expect(h.subagents.spawned).toHaveLength(1)
-    expect(h.lines()).toBe(2)
+    expect(h.lines()).toBe(3)
   })
 
   it('同一个人同一件事窗口内又开一张：指向已有票，不重复派', async () => {

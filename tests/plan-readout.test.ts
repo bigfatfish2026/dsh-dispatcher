@@ -34,6 +34,7 @@ interface PlanIntent {
 interface TicketRow extends PlanIntent {
   id: string
   status: string
+  phase?: string
   brief: string
   pendingReports: number
 }
@@ -105,12 +106,15 @@ describe('intent / plan 从工具里读得回来', () => {
     expect(row.intent?.undo?.kind).toBe('git')
     // 状态仍只由主会话的动作写：planning / declared / touch-reported 都不改它。
     expect(row.status).toBe('open')
+    // phase 是单独一栏：声明完了就等放行，票面别跟干活票长得一样。
+    expect(row.phase).toBe('planned')
   })
 
   it('dispatch_list 的文本行里也有 plan 与 intent，模型看得见', async () => {
     const host = mountPlugin({ config: { stateFile: declaredTicket() } })
     const output = (await host.call('dispatch_list', {})) as ListOutput
     const text = renderOf(host, 'dispatch_list', output)
+    expect(text).toContain('open（待放行）：资源串归一化')
     expect(text).toContain('plan：新增 resources.ts 并补测试（src/tickets/resources.ts）')
     expect(text).toContain('intent：paths file:/home/user/dev/dsh-dispatcher/src/tickets/resources.ts')
     expect(text).toContain('reversibility auto')
@@ -137,8 +141,74 @@ describe('intent / plan 从工具里读得回来', () => {
     const row = output.tickets[0]!
     expect('intent' in row).toBe(false)
     expect('plan' in row).toBe(false)
+    // 老票没有 phase：不许在票面上撑出 undefined。
+    expect('phase' in row).toBe(false)
     const text = renderOf(host, 'dispatch_list', output)
     expect(text).not.toContain('plan：')
     expect(text).not.toContain('intent：')
+    expect(text).not.toContain('undefined')
+    expect(text).not.toContain('（')
+  })
+
+  it('票面把 phase 翻成中文：探路中 / 冲突排队', async () => {
+    const file = logFile([
+      {
+        kind: 'published',
+        id: 't-probe',
+        at: T(0),
+        goal: '先探一下',
+        brief: '先探一下',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: 'req-probe',
+      },
+      { kind: 'planning', id: 't-probe', at: T(1), preset: 't1', workerId: 'probe-1' },
+      {
+        kind: 'published',
+        id: 't-queued',
+        at: T(2),
+        goal: '抢同一片',
+        brief: '抢同一片',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: 'req-queued',
+      },
+      { kind: 'spawned', id: 't-queued', at: T(3), workerId: 'worker-1', provider: 'test', preset: 't1' },
+      {
+        kind: 'declared',
+        id: 't-queued',
+        at: T(4),
+        plan: { summary: '改同一片' },
+        intent: { writes: ['dir:/a/b'] },
+      },
+      {
+        kind: 'conflict-checked',
+        id: 't-queued',
+        at: T(5),
+        level: 'strong',
+        waitOn: [{ ticketId: 't-probe', resources: ['dir:/a/b'] }],
+      },
+      { kind: 'reported', id: 't-queued', at: T(6), report: { id: 'r-1', text: '排着队' }, source: 'worker' },
+    ])
+    const host = mountPlugin({ config: { stateFile: file } })
+    const output = (await host.call('dispatch_list', {})) as ListOutput
+    const probe = output.tickets.find((ticket) => ticket.id === 't-probe')!
+    const queued = output.tickets.find((ticket) => ticket.id === 't-queued')!
+    expect(probe.phase).toBe('planning')
+    expect(queued.phase).toBe('blocked')
+
+    const text = renderOf(host, 'dispatch_list', output)
+    expect(text).toContain('t-probe open（探路中）：先探一下')
+    expect(text).toContain('t-queued running（冲突排队）：抢同一片')
+    expect(text).toContain('waiting on t-probe (dir:/a/b)')
+
+    // dispatch_read 的票头也带同一行标记。
+    const read = (await host.call('dispatch_read', {})) as ReadOutput
+    const readRow = read.tickets.find((ticket) => ticket.id === 't-queued')!
+    expect(readRow.phase).toBe('blocked')
+    const readText = renderOf(host, 'dispatch_read', read)
+    expect(readText).toContain('ticket t-queued running（冲突排队）：抢同一片')
   })
 })

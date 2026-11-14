@@ -58,6 +58,7 @@ export type {
   TicketEvent,
   TicketEventKind,
   TicketOrigin,
+  TicketPhase,
   TicketPlan,
   TicketSnapshot,
   TicketStatus,

@@ -215,6 +215,8 @@ export function makeDesk(
     now?: Date
     agents?: ReturnType<typeof fakeAgents>
     notifier?: DeskDeps['notifier']
+    /** 子会话的状态订阅：测试自己建一只，记下推了哪几句、打断了谁。 */
+    watch?: DeskDeps['watch']
     device?: string
     /** 主会话当前挂的档（可选探测）。 */
     routerPreset?: string
@@ -259,6 +261,7 @@ export function makeDesk(
     device: options.device ?? 'board-test',
     warn: (message) => warnings.push(message),
     ...(options.notifier ? { notifier: options.notifier } : {}),
+    ...(options.watch ? { watch: options.watch } : {}),
   })
   return {
     desk,

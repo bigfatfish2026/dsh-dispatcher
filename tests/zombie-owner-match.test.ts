@@ -150,6 +150,9 @@ describe('worker 没了以后', () => {
         async resumed() {
           return true
         },
+        async released() {
+          return true
+        },
       },
     })
     const { id } = await h.desk.open(INTENT, h.main)

@@ -21,6 +21,7 @@ import type { TicketEventsService, TicketEventPublisher } from './store/bus'
 import { TicketLog } from './store/log'
 import { ProbeWindows } from './tickets/probe'
 import { WorkerTicketTools } from './tickets/worker-tools'
+import { createWorkerWatch } from './tickets/watch'
 import { createDesk } from './tickets/desk'
 import type { Serialize, TicketView } from './tickets/desk'
 import { createLlmClassifier } from './tickets/classify'
@@ -162,8 +163,9 @@ function stringsOf(value: unknown): string[] | undefined {
 /**
  * 把工具参数里的 `intent` 收敛成协议形状：只留认识的栏，空值丢掉。
  *
- * 模型多塞的键不进日志；`reversibility` 给了非法值直接报错，不静默降级——
- * 悄悄当成 `auto` 就等于把闸拆了。
+ * 模型多塞的键不进日志；`reversibility` 给了不认识的值就整栏丢掉，不静默
+ * 降级成 `auto`（那等于把闸拆了），也不报错——2026-11-14 起 intent 只由
+ * `dispatch_declare` 交，声明里写错一个字不该把整条声明拒掉。
  */
 function intentSpecOf(raw: unknown): IntentSpec | undefined {
   const value = objectOf(raw)
@@ -186,12 +188,8 @@ function intentSpecOf(raw: unknown): IntentSpec | undefined {
   const reads = stringsOf(value.reads)
   if (writes) spec.writes = writes
   if (reads) spec.reads = reads
-  if (value.reversibility !== undefined) {
-    const reversibility = value.reversibility
-    if (reversibility !== 'auto' && reversibility !== 'manual' && reversibility !== 'none') {
-      throw new Error(`intent.reversibility 只能是 auto / manual / none，收到「${String(reversibility)}」`)
-    }
-    spec.reversibility = reversibility
+  if (value.reversibility === 'auto' || value.reversibility === 'manual' || value.reversibility === 'none') {
+    spec.reversibility = value.reversibility
   }
   const dryRun = objectOf(value.dryRun)
   if (dryRun && typeof dryRun.ok === 'boolean') {
@@ -240,13 +238,28 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * phase 的中文标记：票面只有 status 时，探路中/等放行/排队三档在屏上跟干活
+ * 票长得一模一样。只在 phase 有值且不是 `running` 时补，老票不会撑出 undefined。
+ */
+const PHASE_MARKS: Record<string, string> = {
+  planning: '探路中',
+  planned: '待放行',
+  blocked: '冲突排队',
+}
+
+function phaseMark(phase: string | undefined): string {
+  const mark = phase ? PHASE_MARKS[phase] : undefined
+  return mark ? `（${mark}）` : ''
+}
+
 function ticketLine(view: TicketView): string {
   const marks = [
     view.stale ? '!' : '',
     view.pendingInputs ? '»' + view.pendingInputs : '',
     view.pendingReports ? '«' + view.pendingReports : '',
   ].join('')
-  return `${marks ? marks + ' ' : ''}${view.id} ${view.status}：${view.brief}`
+  return `${marks ? marks + ' ' : ''}${view.id} ${view.status}${phaseMark(view.phase)}：${view.brief}`
 }
 
 /**
@@ -556,18 +569,33 @@ export function apply(ctx: Context, config: ConfigShape): void {
     warn,
   })
 
-  /** 提醒落在哪个会话上：第一个主会话（非子会话）且能 followup 的。 */
-  const wake = async (body: string): Promise<boolean> => {
-    for (const agent of agentsOf()?.list() ?? []) {
-      if (isWorkerSession(agent.session?.header?.origin)) continue
-      if (typeof agent.followup !== 'function') continue
-      await agent.followup({
+  /**
+   * 提醒落在哪个会话上。
+   *
+   * 有 `to`（被挡/放行那张票的开票方）就先指名送它——这台机器上挂两个主会话
+   * 时，话不能推给另一个；指名的不在活表（会话没了/重启过）再回落第一个主会话，
+   * 至少别把话吞掉。子会话不收票台通知：它只在执行轮里干活。
+   */
+  const wake = async (body: string, to?: string): Promise<boolean> => {
+    const usable = (agent: AgentLike): boolean =>
+      !isWorkerSession(agent.session?.header?.origin) && typeof agent.followup === 'function'
+    const deliver = async (agent: AgentLike): Promise<boolean> => {
+      await agent.followup!({
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text: body }],
         source: { kind: 'dsh-dispatcher' },
       })
       return true
+    }
+    const list = agentsOf()?.list() ?? []
+    if (to) {
+      const named = list.find((agent) => agent.session?.id === to)
+      if (named && usable(named)) return deliver(named)
+    }
+    for (const agent of list) {
+      if (!usable(agent)) continue
+      return deliver(agent)
     }
     return false
   }
@@ -582,6 +610,68 @@ export function apply(ctx: Context, config: ConfigShape): void {
   // 的 phase（事件折出来的），不靠 status。装窗口这一刀只能在 `agent/created`
   // 里——宿主不给我们「派活前先改这只 agent」的别的口。
   const probeWindows = new ProbeWindows({ warn })
+
+  // ── 子会话的状态订阅：被挡就真停手 ────────────────────────────────
+  // `spawned` 那一刻按票订上（desk 把事件喂进来，见 `desk.feedWatch`），被挡时
+  // 先同步标记、再 cancel 打断当前这一轮、然后推一句短话。另外给 worker 会话
+  // 装一道写类工具守卫：票被挡期间 `write` / `edit` / `bash` 直接拒，打断之后
+  // 那一轮也别想再落下手。订阅失败一律只 warn，不影响票台。
+  const workerWatch = createWorkerWatch({
+    agents: () => {
+      const agents = agentsOf()
+      return agents ? { get: (id: string) => agents.get?.(id) } : undefined
+    },
+    warn,
+    info,
+  })
+  ctx.effect(() => () => workerWatch.dispose(), 'dsh-dispatcher.worker-watch')
+
+  /** 已经装过守卫的 worker 会话（同一只装一次）。 */
+  const guardedWorkers = new WeakSet<object>()
+  const workerGuardStops = new Set<() => void>()
+  /**
+   * 给一只 worker 会话装「被挡期间不许写」的工具守卫。判不判是每次调用现查的
+   * （`workerWatch.writeBlockReason`），所以装上去之后就跟着票的状态走。
+   */
+  const installWorkerGuard = (agent: unknown): void => {
+    const scope = agent as {
+      session?: { id?: string; header?: { origin?: string } }
+      ctx?: {
+        effect?: (callback: () => () => void, label?: string) => unknown
+        tools?: {
+          guard?: (guard: (execution: { name: string; arguments: unknown }) => string | undefined) => unknown
+        }
+      }
+    }
+    if (!isWorkerSession(scope?.session?.header?.origin)) return
+    if (guardedWorkers.has(agent as object)) return
+    const workerId = scope.session?.id
+    const guard = scope.ctx?.tools?.guard
+    if (!workerId || typeof guard !== 'function') return
+    guardedWorkers.add(agent as object)
+    try {
+      const stop = guard.call(scope.ctx?.tools, (execution) =>
+        workerWatch.writeBlockReason(workerId, execution.name),
+      )
+      if (typeof stop !== 'function') return
+      const release = stop as () => void
+      workerGuardStops.add(release)
+      scope.ctx?.effect?.(
+        () => () => {
+          workerGuardStops.delete(release)
+          release()
+        },
+        'dsh-dispatcher.worker-block-guard',
+      )
+    } catch (error) {
+      warn(
+        `[dispatcher] 子会话 ${workerId} 的停手守卫没装上：${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+  // 热重载时活表里可能已经有一批 worker：先补一遍，别只等新建那一刀。
+  for (const agent of agentsOf()?.list() ?? []) installWorkerGuard(agent)
+
   // 三个票工具的兜底注册：定义在下面注册完之后才建（`workerTicketTools` 先留空），
   // 但 `agent/created` 只在新会话冒出来时才触发，那时候它已经在了。
   let workerTicketTools: WorkerTicketTools | undefined
@@ -591,13 +681,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
     // 一道：档位的 allow 名单只滤镜全局工具面，`restrict` 动不了按 agent 注册
     // 的这几件（见 `worker-tools.ts`）。认人跟 router 一个口径。
     const origin = (agent as { session?: { header?: { origin?: string } } }).session?.header?.origin
-    if (isWorkerSession(origin)) workerTicketTools?.attach(agent as never)
+    if (isWorkerSession(origin)) {
+      workerTicketTools?.attach(agent as never)
+      installWorkerGuard(agent)
+      // 重启/热重载之后这只子会话名下的票还开着：补订阅，别让它变成聋子。
+      desk.adoptWorker((agent as { session?: { id?: string } }).session?.id)
+    }
     return undefined
   })
   ctx.effect(() => () => {
     probeWindows.releaseAll()
+    for (const release of [...workerGuardStops]) release()
   }, 'dsh-dispatcher.probe-windows')
-
   const desk = createDesk({
     log,
     serialize,
@@ -621,6 +716,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     classify: config.presetStrategy === 'static' ? undefined : classifier,
     routerPreset,
     notifier: createNotifier({ wake, facts: sweepFacts, quiet: false, warn }),
+    watch: workerWatch,
     probe: probeWindows,
     workerTools: {
       attach: (workerId) =>
@@ -776,7 +872,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     defineTool({
       name: 'dispatch_open',
       description:
-        'Open a ticket and hand the work to a 子会话 in one step: the desk picks the preset, starts the 子会话, writes the ticket and returns its id. Call it before answering the person — never spawn a subagent yourself.',
+        'Open a ticket and hand the work to a 子会话 in one step: the desk picks the preset, starts the 子会话, writes the ticket and returns its id. Call it before answering the person — never spawn a subagent yourself. Every ticket starts with a read-only probe round: that first 子会话 has no write / edit / bash, reads the code and hands its plan and intent back with dispatch_declare before anything is touched. dispatch_open takes neither intent nor probe — there is no path that skips the probe round.',
       parameters: {
         goal: { type: 'string', required: true, description: 'What the 子会话 is asked to do, verbatim and complete.' },
         brief: {
@@ -786,71 +882,11 @@ export function apply(ctx: Context, config: ConfigShape): void {
             'Required: the one line the little screen shows under the ticket title — a short phrase, not a sentence. At most briefMaxColumns character columns (34 by default), a 汉字 counts 2, so about 17 汉字 is the ceiling. Empty, whitespace-only or punctuation-only is rejected.',
         },
         dir: { type: 'string', description: 'Working directory the 子会话 should use, if any.' },
-        probe: {
-          type: 'boolean',
-          description:
-            'Probe first: the 子会话 starts in a read-only window (no write / edit / bash) and hands back a plan before anything is touched. Default false — the old one-shot path.',
-        },
         origin: {
           type: 'string',
           enum: ['main', 'ego'],
           description:
-            'Who is opening this ticket. Omit for main (the person / main session). ego must pass "ego": a ticket it opens with intent.reversibility=none is refused.',
-        },
-        intent: {
-          type: 'object',
-          additionalProperties: false,
-          description:
-            'Optional reversal intent. Omitting the whole field keeps the old behaviour. writes / reads: resource URIs (file:/dir:/git:/svc:/port:/dev:) this ticket touches; impact: what the work touches; reversibility: auto / manual / none; dryRun: what the rehearsal showed; undo: how to take it back.',
-          properties: {
-            writes: {
-              type: 'array',
-              items: { type: 'string' },
-              description:
-                'Resources this ticket will write, as URIs: file:/dir:/git:/svc:/port:/dev: (see the six prefixes). Optional.',
-            },
-            reads: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Same URI form: resources this ticket only reads. Optional.',
-            },
-            impact: {
-              type: 'object',
-              additionalProperties: false,
-              description: 'What the work touches. Paths, services and remotes, as concrete strings.',
-              properties: {
-                paths: { type: 'array', items: { type: 'string' }, description: 'File or directory paths.' },
-                services: { type: 'array', items: { type: 'string' }, description: 'systemd units or other services.' },
-                remotes: { type: 'array', items: { type: 'string' }, description: 'git remotes / hosts / accounts.' },
-              },
-            },
-            reversibility: {
-              type: 'string',
-              enum: ['auto', 'manual', 'none'],
-              description:
-                'auto = the side effect is confined and can be undone in one step; manual = a person has to follow undo.howto; none = cannot be taken back (restart, push, sent message).',
-            },
-            dryRun: {
-              type: 'object',
-              additionalProperties: false,
-              description: 'Result of a rehearsal (--dry-run, config dump, diff). ok=false downgrades the ticket to waiting.',
-              properties: {
-                ok: { type: 'boolean', required: true, description: 'Whether the rehearsal passed.' },
-                detail: { type: 'string', description: 'One line a person can read when ok=false.' },
-              },
-            },
-            undo: {
-              type: 'object',
-              additionalProperties: false,
-              description:
-                'How to undo it. howto must be a concrete command or a concrete path; generic lines like "revert it" are rejected.',
-              properties: {
-                kind: { type: 'string', required: true, description: 'file / git / service / message / config …' },
-                ref: { type: 'string', description: 'Backup path, commit sha, message id, unit name.' },
-                howto: { type: 'string', required: true, description: 'The exact command or path a person would run.' },
-              },
-            },
-          },
+            'Who is opening this ticket. Omit for main (the person / main session). ego must pass "ego".',
         },
       },
       output: {
@@ -877,18 +913,26 @@ export function apply(ctx: Context, config: ConfigShape): void {
         ],
       },
       async execute(args, exec) {
-        const raw = args as unknown as { origin?: unknown; intent?: unknown; probe?: unknown }
-        const intent = intentSpecOf(raw.intent)
+        const raw = args as unknown as Record<string, unknown>
+        // 老调用方还会塞 intent：不静默忽略——那会让人以为意图已经落库。
+        // 明说去哪儿交，模型下一轮就会改用 dispatch_declare。
+        if (raw.intent !== undefined) {
+          throw new Error(
+            'dispatch_open 不再收 intent：子会话探路后会自己用 dispatch_declare 交代 intent',
+          )
+        }
+        // probe 开关也删了：所有票一律探路，没有「不探路直接干」的快路径。
+        // 静默忽略会让人以为快路径还在，所以照 intent 的做法明拒。
+        if (raw.probe !== undefined) {
+          throw new Error('dispatch_open 不再收 probe：所有票一律先探路，没有跳过的快路径')
+        }
         const receipt = await desk.open(
           {
             goal: args.goal,
             brief: args.brief,
             ...(args.dir ? { dir: args.dir } : {}),
-            // 不传 = 老路（fast path）：`probe` 只多一条 planning，别的行为一个字不变。
-            ...(raw.probe === true ? { probe: true } : {}),
             ...(requestIdOf(exec) ? { requestId: requestIdOf(exec) as string } : {}),
             ...(raw.origin ? { origin: raw.origin as TicketOrigin } : {}),
-            ...(intent ? { intent } : {}),
           },
           actorOf(exec),
         )
@@ -967,6 +1011,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
                 properties: {
                   id: { type: 'string' },
                   status: { type: 'string' },
+                  phase: { type: 'string' },
                   goal: { type: 'string' },
                   pendingReports: { type: 'number' },
                   intent: {
@@ -1040,7 +1085,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           const tickets = value.tickets ?? []
           if (tickets.length === 0) return [{ type: 'text', text: 'no reports' }]
           const blocks = tickets.map((ticket) => {
-            const head = `ticket ${ticket.id} ${ticket.status}：${ticket.goal}`
+            const head = `ticket ${ticket.id} ${ticket.status}${phaseMark(ticket.phase)}：${ticket.goal}`
             const body = (ticket.reports ?? []).map(
               (report) => `  #${report.n}${report.read ? ' (read)' : ''} ${report.text}`,
             )
@@ -1076,6 +1121,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           return {
             id: ticket.id,
             status: ticket.status,
+            ...(ticket.phase ? { phase: ticket.phase } : {}),
             goal: ticket.goal,
             pendingReports: ticket.pendingReports,
             ...(ticket.intent ? { intent: ticket.intent } : {}),
@@ -1184,6 +1230,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
                 properties: {
                   id: { type: 'string' },
                   status: { type: 'string' },
+                  phase: { type: 'string' },
                   brief: { type: 'string' },
                   ageMinutes: { type: 'number' },
                   stale: { type: 'boolean' },
@@ -1289,6 +1336,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
           tickets: views.map((view) => ({
             id: view.id,
             status: view.status,
+            ...(view.phase ? { phase: view.phase } : {}),
             brief: view.brief,
             ageMinutes: view.ageMinutes,
             stale: view.stale,
@@ -1369,7 +1417,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
         type: 'object',
         additionalProperties: false,
         description:
-          'Reversal intent, same shape as dispatch_open: writes, reads, impact, reversibility, dryRun, undo.',
+          'Reversal intent: writes, reads, impact, reversibility, dryRun, undo. This is where intent comes from now — dispatch_open does not take it.',
         properties: {
           writes: {
             type: 'array',
@@ -1435,7 +1483,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
       render: (_args, value) => [
         {
           type: 'text',
-          text: `declared on ticket ${value.id}: ${value.files} file(s), ${value.resources} resource(s)`,
+          // 回执只说「交上了」，不说「放行」：冲突判定要等探路子会话 idle 那一拍，
+          // 以前的英文回执被子会话读成「已经判过、放行了」。
+          text: `ticket ${value.id} 已登记 ${value.files} 个文件、${value.resources} 个资源，等探路收工后判定冲突`,
         },
       ],
     },

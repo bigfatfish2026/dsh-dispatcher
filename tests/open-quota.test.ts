@@ -35,10 +35,9 @@ async function openN(h: Harness, n: number, tag: string): Promise<string[]> {
 }
 
 async function probeOpen(h: Harness, goal: string, dir = DIR): Promise<string> {
-  const receipt = await h.desk.open(
-    { goal, brief: goal, probe: true, intent: { writes: [dir] } },
-    h.main,
-  )
+  const receipt = await h.desk.open({ goal, brief: goal }, h.main)
+  const workerId = h.log.get(receipt.id)!.workerId!
+  await h.desk.declare(workerId, { summary: goal }, { writes: [dir] })
   return receipt.id
 }
 

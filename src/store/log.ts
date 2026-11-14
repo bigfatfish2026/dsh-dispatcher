@@ -40,7 +40,7 @@ export function newEntryId(now: Date = new Date()): string {
  * 换掉 `localeCompare` 是因为它走 ICU，457 张票一次排序实测 49µs，
  * 巡检每 10 秒跑一轮不值当。
  */
-function byQueueOrder(a: TicketSnapshot, b: TicketSnapshot): number {
+export function byQueueOrder(a: TicketSnapshot, b: TicketSnapshot): number {
   if (typeof a.seq === 'number' && typeof b.seq === 'number' && a.seq !== b.seq) {
     return a.seq - b.seq
   }

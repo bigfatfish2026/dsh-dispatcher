@@ -34,10 +34,9 @@ function setup() {
 }
 
 async function probeOpen(h: Harness, goal: string): Promise<string> {
-  const receipt = await h.desk.open(
-    { goal, brief: goal, probe: true, intent: { writes: [DIR] } },
-    h.main,
-  )
+  const receipt = await h.desk.open({ goal, brief: goal }, h.main)
+  const workerId = h.log.get(receipt.id)!.workerId!
+  await h.desk.declare(workerId, { summary: goal }, { writes: [DIR] })
   return receipt.id
 }
 
@@ -71,7 +70,7 @@ describe('挂起留一条事实', () => {
 
     await idle(h, 'worker-2')
     expect(h.log.get(waiting)!.phase).toBe('blocked')
-    expect(facts.text()).toContain(`票 ${waiting} 因 ${DIR} 与 ${blocker} 冲突挂起，等它关闭后放行。`)
+    expect(facts.text()).toContain(`票 ${waiting} 因 ${DIR} 与 ${blocker}「占住目录」 冲突挂起，等它关闭后放行。`)
     expect(facts.text()).not.toContain('blocked')
 
     await h.desk.close(blocker)

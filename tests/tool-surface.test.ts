@@ -46,12 +46,15 @@ describe('工具面', () => {
     }
   })
 
-  it('dispatch_open 只要 goal/brief 两个必填参数，另加可选的 dir/origin/intent/probe，不暴露 workerId', () => {
+  it('dispatch_open 只要 goal/brief 两个必填参数，另加可选的 dir/origin，不暴露 intent/probe/workerId', () => {
     const schema = (mountPlugin().definition('dispatch_open').parameters ?? {}) as {
       properties?: Record<string, unknown>
       required?: string[]
     }
-    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['brief', 'dir', 'goal', 'intent', 'origin', 'probe'])
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['brief', 'dir', 'goal', 'origin'])
+    expect(schema.properties).not.toHaveProperty('intent')
+    // probe 开关随快路径一起删了：探路是每张票的必经流程，不是参数。
+    expect(schema.properties).not.toHaveProperty('probe')
     expect([...(schema.required ?? [])].sort()).toEqual(['brief', 'goal'])
   })
 
@@ -83,6 +86,34 @@ describe('工具面', () => {
 })
 
 describe('开票', () => {
+  it('带 intent 直接拒：说清去哪儿交，一个字节都不写', async () => {
+    const host = mountPlugin()
+    await expect(
+      host.call('dispatch_open', {
+        goal: '把测试补齐',
+        brief: '补齐测试',
+        intent: { writes: ['file:/home/user/dev/dsh-dispatcher/src/index.ts'] },
+      }),
+    ).rejects.toThrow(/dispatch_open 不再收 intent.*dispatch_declare/)
+    expect(lines(host)).toHaveLength(0)
+  })
+
+  it('带 probe 直接拒：所有票一律探路，没有跳过的快路径', async () => {
+    const host = mountPlugin()
+    await expect(
+      host.call('dispatch_open', { goal: '改个配置', brief: '改配置', probe: true }),
+    ).rejects.toThrow(/dispatch_open 不再收 probe.*一律先探路/)
+    expect(lines(host)).toHaveLength(0)
+  })
+
+  it('不带 intent 正常开票：意图留给子会话探路后 declare', async () => {
+    const host = mountPlugin()
+    const id = await opened(host)
+    expect(id).toMatch(/^t-/)
+    const first = lines(host).find((line) => line.kind === 'published')!
+    expect(first).not.toHaveProperty('intent')
+  })
+
   it('没配默认档、注册表也没给默认：直接报错，一张票都不写', async () => {
     const host = mountPlugin({
       config: { defaultPreset: '' },

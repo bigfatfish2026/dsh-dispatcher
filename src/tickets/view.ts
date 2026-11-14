@@ -7,7 +7,15 @@
  * 只需要这一个纯函数，不用把整个票台拖起来。
  */
 import { briefOf, isOpen, minutesSince, pending } from '../store'
-import type { ConflictWait, IntentSpec, PresetSource, TicketPlan, TicketSnapshot, TicketStatus } from '../store'
+import type {
+  ConflictWait,
+  IntentSpec,
+  PresetSource,
+  TicketPhase,
+  TicketPlan,
+  TicketSnapshot,
+  TicketStatus,
+} from '../store'
 
 /** 工具面看到的票：只有该看的，没有内部字段。 */
 export interface TicketView {
@@ -15,6 +23,11 @@ export interface TicketView {
   goal: string
   brief: string
   status: TicketStatus
+  /**
+   * 探路/排队阶段位：`planning` 探路中、`planned` 待放行、`blocked` 冲突排队、
+   * `running` 真在跑。快路径与老票没有这一栏，票面就别多写。
+   */
+  phase?: TicketPhase
   statusSince: string
   ageMinutes: number
   stale: boolean
@@ -29,7 +42,7 @@ export interface TicketView {
   pendingInputs: number
   pendingReports: number
   /**
-   * 建票意图：影响面、可撤性、预演、撤回指南。老票没有这一栏，整个键不出现。
+   * 票上的意图：影响面、可撤性、预演、撤回指南。来自 `declared`；老票没有这一栏，整个键不出现。
    * 只给主会话的 dispatch_list / dispatch_read 读回，不进跨进程 JSON（那一层的
    * 形状由 `readout.ts` 的 schema 版本管，加字段要单独升版）。
    */
@@ -76,6 +89,7 @@ export function ticketView(ticket: TicketSnapshot, options: ViewOptions): Ticket
     goal: ticket.goal,
     brief: briefOf(ticket, options.briefMaxColumns),
     status: ticket.status,
+    ...(ticket.phase ? { phase: ticket.phase } : {}),
     statusSince: ticket.statusSince,
     ageMinutes,
     stale,

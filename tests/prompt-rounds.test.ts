@@ -121,7 +121,7 @@ describe('派活接线：任务书按轮次真的换了', () => {
 
   it('探路票第一轮派出去的是只读任务书', async () => {
     const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe: probePort })
-    await h.desk.open({ ...INTENT, probe: true }, h.main)
+    await h.desk.open({ ...INTENT }, h.main)
     const text = h.subagents.spawned[0]!.request.prompt[0]!.text
     expect(text).toContain('这一轮是只读轮')
     expect(text).toContain('dispatch_declare')
@@ -132,7 +132,7 @@ describe('派活接线：任务书按轮次真的换了', () => {
 
   it('放行后的执行轮带着探路声明，末尾画了边界', async () => {
     const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe: probePort })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
     await h.desk.declare(
       'worker-1',
       { summary: '改 publish.ts 的任务书', files: [{ path: 'src/tickets/publish.ts', what: '按轮次出三套' }] },
@@ -154,14 +154,15 @@ describe('派活接线：任务书按轮次真的换了', () => {
 
   it('探路超时降级后投的那轮走降级任务书', async () => {
     const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0, probeTimeoutMinutes: 2 }, probe: probePort })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
     h.clock.advance(3 * 60_000)
+    // 降级当拍就派：探路那只不在活表里，这一轮是重起的一只新子会话。
     await h.desk.maintain()
-    expect(h.log.get(id)!.degraded).toBe(true)
-
-    h.desk.attach()
-    h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
-    await flush()
+    const ticket = h.log.get(id)!
+    expect(ticket.degraded).toBe(true)
+    expect(ticket.phase).toBe('running')
+    expect(ticket.workerId).toBe('worker-2')
+    expect(h.subagents.spawned).toHaveLength(2)
 
     const text = h.subagents.spawned[1]!.request.prompt[0]!.text
     expect(text).toContain('探路超时')
@@ -220,7 +221,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
       probe: probe.port,
       presets: fakePresets(TEST_PRESETS, 't1', TOOLSETS),
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
     expect(h.subagents.spawned).toHaveLength(1)
     expect(h.subagents.spawned[0]!.request.prompt[0]!.text).toContain('这一轮是只读轮')
 
@@ -269,15 +270,12 @@ describe('执行轮接线：原会话还在就 followup', () => {
       probe: countingProbe().port,
       presets: fakePresets(TEST_PRESETS, 't1', TOOLSETS),
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
+    // 探路那只还在活表里：降级当拍就把降级轮 steer 回同一个会话，不再新起一只。
+    h.agents.markAlive('worker-1')
     h.clock.advance(3 * 60_000)
     await h.desk.maintain()
     expect(h.log.get(id)!.degraded).toBe(true)
-
-    h.agents.markAlive('worker-1')
-    h.desk.attach()
-    h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
-    await flush()
 
     expect(h.subagents.spawned).toHaveLength(1)
     const text = h.subagents.sent[0]!.text
@@ -294,7 +292,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
       probe: countingProbe().port,
       presets: fakePresets(TEST_PRESETS, 't1', TOOLSETS),
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
     await h.desk.declare(
       'worker-1',
       { summary: '改一处', files: [{ path: 'src/tickets/publish.ts' }] },
@@ -318,7 +316,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
       presets: fakePresets(TEST_PRESETS, 't1', TOOLSETS),
       routerPreset: 't2',
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
 
     // 会话档钉死在 spawn，落成只读档连 write / edit 都收不回来；探路那轮的
     // 只读靠窗口那三件 deny，不吃主会话当前挂的档。
@@ -331,7 +329,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
     h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
     await flush()
 
-    // 非探路票照旧认主会话挂的档（下面这张），探路票不认。
+    // 没有「非探路票」了：所有票一律不认主会话挂的档，按分类器选。
     expect(h.log.get(id)!.workerId).toBe('worker-1')
     expect(h.log.get(id)!.preset).toBe('t1')
 
@@ -343,7 +341,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
     })
     const receipt = await plain.desk.open(INTENT, plain.main)
     expect(receipt.preset).toBe('t2')
-    expect(receipt.presetSource).toBe('router')
+    expect(receipt.presetSource).toBe('llm')
   })
 
   it('重新 spawn 时分类器给的档没有 bash：驳回去，票挂起等人换档', async () => {
@@ -362,7 +360,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
       presets: fakePresets(TEST_PRESETS, 't1', TOOLSETS),
       classify,
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true }, h.main)
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
     await h.desk.declare('worker-1', { summary: '改一处' }, { writes: [], reads: [] })
     h.agents.markGone('worker-1')
     h.desk.attach()
@@ -393,7 +391,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
         },
       },
     })
-    const { id } = await h.desk.open({ ...INTENT, probe: true, preset: 't2' }, h.main)
+    const { id } = await h.desk.open({ ...INTENT, preset: 't2' }, h.main)
     expect(h.subagents.spawned[0]!.request.agentPreset).toBe('t2')
     // t2 的 allow 名单里没有 dispatch_touch：工具面靠 agent 层那一道兜住。
     expect(attached).toEqual(['worker-1'])

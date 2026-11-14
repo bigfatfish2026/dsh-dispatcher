@@ -10,11 +10,21 @@ function idleSignals(h: ReturnType<typeof makeDesk>) {
   return h.bus.filter((entry) => entry.channel === 'dispatcher/ticket-idle')
 }
 
+/** 先把票推过探路轮：交声明 + idle，执行任务投回同一只（epoch+1）。 */
+async function toTask(h: ReturnType<typeof makeDesk>, id: string): Promise<void> {
+  h.desk.attach()
+  h.agents.markAlive('worker-1')
+  await h.desk.declare('worker-1', { summary: '探完了' }, { writes: ['dir:/tmp/desk-sweep'] })
+  h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
+  await flush()
+  expect(h.log.get(id)!.phase).toBe('running')
+}
+
 describe('巡检信号', () => {
   it('waiting 满 20 分钟提醒一次；再扫一遍不重复打扰', async () => {
     const h = makeDesk(MANUAL)
     const { id } = await h.desk.open(INTENT, h.main)
-    h.desk.attach()
+    await toTask(h, id)
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
     expect(h.log.get(id)!.status).toBe('waiting')
@@ -78,7 +88,7 @@ describe('巡检信号', () => {
   it('状态轮换以后可以再提醒一次：指纹带 statusSince', async () => {
     const h = makeDesk(MANUAL)
     const { id } = await h.desk.open(INTENT, h.main)
-    h.desk.attach()
+    await toTask(h, id)
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
     h.clock.advance(minutes(20))

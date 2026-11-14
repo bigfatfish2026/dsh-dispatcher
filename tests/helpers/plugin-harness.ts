@@ -83,6 +83,8 @@ export interface FakeAgent {
   messages: string[]
   /** 按 agent 层注册的工具名：`restrict` 的 allow/deny 名单碰不到这一摞。 */
   scoped: string[]
+  /** 装在这只 agent 上的工具守卫（`ctx.tools.guard`）：票被挡期间拦写。 */
+  guards: Array<(execution: { name: string; arguments: unknown }) => string | undefined>
   followup(message: { content?: Array<{ text?: string }> }): Promise<unknown>
   ctx: {
     effect(callback: () => () => void, label?: string): unknown
@@ -166,11 +168,13 @@ export function fakePluginHost(
   const makeAgent = (origin?: string, id?: string): FakeAgent => {
     const name = id ?? `session-${origin ?? 'main'}-${Math.random().toString(16).slice(2, 8)}`
     const scoped: string[] = []
+    const guards: FakeAgent['guards'] = []
     const agent: FakeAgent = {
       id: name,
       session: { id: name, header: origin ? { origin } : {} },
       messages: [],
       scoped,
+      guards,
       async followup(message) {
         const first = message.content?.[0]?.text
         if (first) agent.messages.push(first)
@@ -205,7 +209,13 @@ export function fakePluginHost(
             }
           },
           get: (toolName: string) => (registry.has(toolName) ? { name: toolName } : undefined),
-          guard: () => () => {},
+          guard(guard) {
+            guards.push(guard)
+            return () => {
+              const at = guards.indexOf(guard)
+              if (at >= 0) guards.splice(at, 1)
+            }
+          },
         },
       },
     }

@@ -27,8 +27,8 @@ export interface SweepFact {
   since: string
   /** 未读报告条数：`report` 类才有。 */
   unread?: number
-  /** 冲突挂起撞的对手与资源：`blocked` 类才有。 */
-  waitOn?: readonly { ticketId: string; resources: readonly string[] }[]
+  /** 冲突挂起撞的对手与资源：`blocked` 类才有。`brief` 是对手票的一句话摘要。 */
+  waitOn?: readonly { ticketId: string; resources: readonly string[]; brief?: string }[]
   /** 人工挂起的理由：`blocked` 类才有，和 `waitOn` 二选一。 */
   reason?: string
 }
@@ -68,7 +68,9 @@ function lineOf(fact: SweepFact, now: Date): string {
       const waits = fact.waitOn ?? []
       if (waits.length > 0) {
         const resources = [...new Set(waits.flatMap((wait) => wait.resources))].join('、')
-        const by = waits.map((wait) => wait.ticketId).join('、')
+        const by = waits
+          .map((wait) => (wait.brief ? `${wait.ticketId}「${wait.brief}」` : wait.ticketId))
+          .join('、')
         return resources
           ? `票 ${fact.ticketId} 因 ${resources} 与 ${by} 冲突挂起，等它关闭后放行。`
           : `票 ${fact.ticketId} 与 ${by} 冲突挂起，等它关闭后放行。`

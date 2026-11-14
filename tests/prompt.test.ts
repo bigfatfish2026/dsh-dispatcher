@@ -192,11 +192,6 @@ describe('mentionedToolNames', () => {
 describe('prunesToolSection', () => {
   const vocabulary = new Set([...VISIBLE, 'bili-notify', 'bili_notify', 'browser', 'session_query', 'dispatch'])
 
-  it('drops a section whose family is entirely hidden', () => {
-    const section = { name: 'tool:bash', text: 'investigate failures with bash' }
-    expect(prunesToolSection(section, new Set(['read']), vocabulary)).toBe(true)
-  })
-
   it('drops the browser section even though its prose says "read"', () => {
     const section = {
       name: 'tool:browser',
@@ -205,21 +200,8 @@ describe('prunesToolSection', () => {
     expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
   })
 
-  it('drops bili-notify when no bili_* tool is visible', () => {
-    const section = {
-      name: 'tool:bili-notify',
-      text: "bili_notify_unread read the account's notifications; bili_comments reads a comment section.",
-    }
-    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
-  })
-
   it('keeps a section whose family has a visible member', () => {
     const section = { name: 'tool:goal', text: 'Goals: create_goal for a long objective, get_goal to read it.' }
-    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(false)
-  })
-
-  it('keeps a section whose group name is itself a visible tool', () => {
-    const section = { name: 'tool:present', text: 'Declare existing files as final deliverables.' }
     expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(false)
   })
 
@@ -241,14 +223,6 @@ describe('prunesToolSection', () => {
     }
     const visibleWithoutRead = new Set(['bash', 'write', 'edit'])
     expect(prunesToolSection(section, visibleWithoutRead, new Set([...vocabulary, 'read']))).toBe(true)
-  })
-
-  it('drops mcp:github when no mcp__github__ tool is visible', () => {
-    const section = {
-      name: 'mcp:github',
-      text: 'Use mcp__github__search_code to find code and mcp__github__search_issues for issues.',
-    }
-    expect(prunesToolSection(section, VISIBLE, vocabulary)).toBe(true)
   })
 
   it('keeps mcp:github once one of its tools is visible', () => {

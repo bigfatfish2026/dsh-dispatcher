@@ -33,6 +33,9 @@ export const TICKET_EVENT_NAMES = {
   planning: 'dispatcher.ticket.planning',
   declared: 'dispatcher.ticket.declared',
   'touch-reported': 'dispatcher.ticket.touch-reported',
+  // 漏过一版：2026-11-14 之前这张表里没有它，冲突判定在 events 总线上落成
+  // `dispatcher.ticket.legacy`，按 `.status` 名字订阅的监听器一条都收不到。
+  'conflict-checked': 'dispatcher.ticket.conflict-checked',
   blocked: 'dispatcher.ticket.blocked',
   gated: 'dispatcher.ticket.gated',
   closed: 'dispatcher.ticket.closed',

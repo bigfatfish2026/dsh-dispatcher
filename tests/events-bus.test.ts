@@ -136,6 +136,12 @@ describe('事件名映射', () => {
     expect(ticketEventName({ kind: 'reported', id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent)).toBe(
       'dispatcher.ticket.reported',
     )
+    // 冲突判定有自己的名字：落成 legacy 的话，按 status 订阅的监听器全漏。
+    expect(
+      ticketEventName({ kind: 'conflict-checked', id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent),
+    ).toBe('dispatcher.ticket.conflict-checked')
+    expect(TICKET_EVENT_NAMES['conflict-checked']).not.toBe(TICKET_EVENT_NAMES.legacy)
+    expect(TICKET_EVENT_DEFS.map((def) => def.name)).toContain('dispatcher.ticket.conflict-checked')
     // 没有 kind 的老行：不认识的都归 legacy，payload 原样保留。
     expect(ticketEventName({ id: 't', at: '2026-11-09T00:00:00.000Z' } as TicketEvent)).toBe(
       'dispatcher.ticket.legacy',
@@ -305,7 +311,7 @@ describe('events 服务不在：一个字节都不变', () => {
 
     const stored = rows(dbFile)
     expect(stored[0]).toMatchObject({ seq: 1, type: 'published', ticketId: opened.id })
-    expect(stored.map((row) => row.type)).toEqual(['published', 'spawned', 'queued', 'resumed', 'delivered'])
+    expect(stored.map((row) => row.type)).toEqual(['published', 'planning', 'spawned', 'queued', 'resumed', 'delivered'])
     for (const row of stored) {
       const payload = JSON.parse(row.payload) as TicketEvent & { at: string }
       // 直写：ticketId 是票号，ts 就是事件自己的 at，payload 是原事件。
@@ -334,7 +340,7 @@ describe('events 服务不在：一个字节都不变', () => {
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
-    expect(lines.map((line) => line.kind)).toEqual(['published', 'spawned'])
+    expect(lines.map((line) => line.kind)).toEqual(['published', 'planning', 'spawned'])
   })
 })
 
@@ -359,7 +365,7 @@ describe('events 服务半残：注册不上就整条退回去', () => {
     await host.call('dispatch_open', { goal: 'g', brief: 'b' })
     await host.settled()
 
-    expect(rows(dbFile).map((row) => row.type)).toEqual(['published', 'spawned'])
+    expect(rows(dbFile).map((row) => row.type)).toEqual(['published', 'planning', 'spawned'])
   })
 })
 
