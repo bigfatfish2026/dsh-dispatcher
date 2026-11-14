@@ -44,13 +44,34 @@ export function resolveProfileConfigPath(env: NodeJS.ProcessEnv = process.env): 
   return undefined
 }
 
+/**
+ * 找不到 profile 配置时的提示。CLI 这时只能回退到默认 jsonl，而活库多半是
+ * sqlite；静默回退会把死档里的旧票报成 running，所以固定往 stderr 打一行。
+ * 只提示，不改回退行为本身。
+ */
+function warnMissingProfile(reason: string): void {
+  process.stderr.write(
+    `[dsh-dispatcher] warn: ${reason}，后端回退 jsonl 默认值，可能不是活库；` +
+      '无人值守请先 export DSH_PROFILE=qqbot（或用 DSH_PROFILE_DIR 指名 profile 目录），' +
+      '或给 tickets 加 --backend sqlite\n',
+  )
+}
+
 /** 读 profile 配置；文件不存在、读不动、解析不出来都回退成空对象。 */
 export function loadCliConfig(env: NodeJS.ProcessEnv = process.env): CliConfig {
   const file = resolveProfileConfigPath(env)
-  if (!file || !existsSync(file)) return {}
+  if (!file) {
+    warnMissingProfile('没找到 profile 配置（DSH_PROFILE / DSH_PROFILE_DIR 都没设）')
+    return {}
+  }
+  if (!existsSync(file)) {
+    warnMissingProfile(`没找到 profile 配置 ${file}`)
+    return {}
+  }
   try {
     return parseDispatcherConfig(readFileSync(file, 'utf8'))
   } catch {
+    warnMissingProfile(`读不了 profile 配置 ${file}`)
     return {}
   }
 }
