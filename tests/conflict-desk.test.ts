@@ -466,3 +466,18 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
     expect(h.log.get(b)!.waitOn).toEqual([{ ticketId: a, resources: [DIR] }])
   })
 })
+
+
+describe('脏资源串在票台上只 warn 不打断', () => {
+  it('票声明里有 cmd:：warn 带票号与原文，合法资源照常判强、票照常排队', async () => {
+    const h = desk()
+    const blocker = await openProbe(h, '占目录', [DIR])
+    const bad = await openProbe(h, '脏声明', [DIR, 'cmd:dsh --dump-config'])
+    await idle(h, h.log.get(bad)!.workerId!)
+
+    expect(h.warnings.join('\n')).toContain(`票 ${bad} 的资源串不合法`)
+    expect(h.warnings.join('\n')).toContain('cmd:dsh --dump-config')
+    expect(h.log.get(bad)!.phase).toBe('queued')
+    expect(h.log.get(bad)!.waitOn?.[0]?.ticketId).toBe(blocker)
+  })
+})

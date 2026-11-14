@@ -3,9 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
+  expandGitRoots,
+  findGitRoot,
   normalizeResource,
   normalizeResources,
   parseResource,
+  scanResources,
   RESOURCE_KINDS,
 } from '../src/tickets/resources'
 
@@ -142,5 +145,65 @@ describe('批量归一化', () => {
 
   it('空清单就是空清单', () => {
     expect(normalizeResources([])).toEqual([])
+  })
+})
+
+
+describe('git 根探测与自动补全（A5，假 fs）', () => {
+  const paths: Record<string, 'file' | 'dir'> = {
+    '/repo': 'dir',
+    '/repo/.git': 'dir',
+    '/repo/a.ts': 'file',
+    '/repo/deep/b.ts': 'file',
+    '/wt': 'dir',
+    '/wt/.git': 'file',
+    '/wt/x.ts': 'file',
+    '/outside/c.ts': 'file',
+  }
+  const stat = (path: string): 'file' | 'dir' | undefined => paths[path]
+  const readText = (path: string): string | undefined =>
+    path === '/wt/.git' ? 'gitdir: /repo/.git/worktrees/wt\n' : undefined
+  const options = { stat, readText, realpath: () => undefined }
+
+  it('主仓库：.git 是目录，根就是那一层', () => {
+    expect(findGitRoot('/repo/deep/b.ts', options)).toEqual({ top: '/repo', root: '/repo', worktree: false })
+  })
+
+  it('worktree：.git 是文件，gitdir 解析到共用仓库根', () => {
+    expect(findGitRoot('/wt/x.ts', options)).toEqual({ top: '/wt', root: '/repo', worktree: true })
+  })
+
+  it('仓外路径探不到仓库，返回 undefined', () => {
+    expect(findGitRoot('/outside/c.ts', options)).toBeUndefined()
+  })
+
+  it('expandGitRoots 给仓内路径补 git 根，不碰仓外，已声明的 git 原样保留', () => {
+    expect(expandGitRoots(['file:/repo/a.ts'], options)).toEqual(['file:/repo/a.ts', 'git:/repo'])
+    expect(expandGitRoots(['file:/wt/x.ts'], options)).toEqual(['file:/wt/x.ts', 'git:/wt'])
+    expect(expandGitRoots(['file:/outside/c.ts'], options)).toEqual(['file:/outside/c.ts'])
+    expect(expandGitRoots(['git:/repo'], options)).toEqual(['git:/repo'])
+  })
+})
+
+describe('脏资源串：宽容扫描不抛（历史票兜底）', () => {
+  const SHAPES = [
+    ['cmd:dsh --profile qqbot --dump-config', '命令不是资源'],
+    ['http:docs.deepseek.com', 'http 不是资源前缀'],
+    ['port:192.0.2.10:8080 (example-gateway gateway, group/ds)', '端口写法不合法'],
+    ['', '空串'],
+  ] as const
+
+  it.each(SHAPES)('%s 不抛，记进 invalid', (raw) => {
+    const scan = scanResources([raw])
+    expect(scan.resources).toEqual([])
+    expect(scan.invalid).toHaveLength(1)
+    expect(scan.invalid[0]).toMatchObject({ raw })
+    expect(scan.invalid[0]!.reason.length).toBeGreaterThan(0)
+  })
+
+  it('合法资源照常归一化，脏的只进 invalid，不互相影响', () => {
+    const scan = scanResources(['file:/tmp/a.ts', 'cmd:ls', 'port:61208', 'http:x', 'file:/tmp/a.ts'])
+    expect(scan.resources).toEqual(['file:/tmp/a.ts', 'port:61208'])
+    expect(scan.invalid.map((item) => item.raw)).toEqual(['cmd:ls', 'http:x'])
   })
 })

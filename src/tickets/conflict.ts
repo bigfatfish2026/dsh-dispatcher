@@ -2,7 +2,7 @@
  * 两票资源冲突判定（设计稿 v0.2.4 §6）。
  *
  * 输入是两张票的资源声明，`{ writes, reads }`，元素是 `resources.ts` 那六种前缀
- * 的资源串；进来先过一次 `normalizeResources`，两票只在同一个写法下求交。输出
+ * 的资源串；进来先过一次 `scanGitResources`，两票只在同一个写法下求交。输出
  * 三档：strong（拦）、weak（提示放行）、none（不冲突），附人话理由与撞上的资源。
  *
  * 判据按写对写分档，只有两边都写才可能强冲突：一边只读、一边写一律降到 weak。
@@ -13,8 +13,14 @@
  * 一件故意不管的事：`writes` 为空但票标了 degraded 的目录回填由调用方先做。
  */
 import { dirname } from 'node:path'
-import { normalizeResources, parseResource } from './resources'
+import { findGitRoot, parseResource, scanGitResources, scanResources } from './resources'
+import type { InvalidResource, ResourceOptions } from './resources'
 import type { ResourceKind } from './resources'
+
+/** 判定时可注入的资源探测（测试用假 fs，生产用默认实现）。 */
+export interface ConflictOptions {
+  resources?: ResourceOptions
+}
 
 /** 一张票的声明：写什么、只读什么。缺席就是空。 */
 export interface ConflictSide {
@@ -25,11 +31,18 @@ export interface ConflictSide {
 /** strong 拦、weak 提示放行、none 不相交。 */
 export type ConflictLevel = 'strong' | 'weak' | 'none'
 
+/** 判定时认不出来的资源串：标明是哪一侧的，调用方好带上票号 warn。 */
+export interface InvalidConflictResource extends InvalidResource {
+  side: 'a' | 'b'
+}
+
 /** 判定结果：`reasons` 是人话，`resources` 是撞上的归一化资源串。 */
 export interface ConflictVerdict {
   level: ConflictLevel
   reasons: string[]
   resources: string[]
+  /** 声明里认不出来的串；不影响其余资源的判定，但要让人看见。 */
+  invalid?: InvalidConflictResource[]
 }
 
 interface Resource {
@@ -39,8 +52,24 @@ interface Resource {
   uri: string
 }
 
-function toResources(raw: readonly string[] | undefined): Resource[] {
-  return normalizeResources(raw ?? []).map((uri) => {
+function toResources(
+  raw: readonly string[] | undefined,
+  options: ConflictOptions,
+): { resources: Resource[]; invalid: InvalidResource[] } {
+  const scan = scanGitResources(raw ?? [], options.resources)
+  const resources = scan.resources.map((uri) => {
+    const { kind, value } = parseResource(uri)
+    return { kind, value, uri }
+  })
+  return { resources, invalid: scan.invalid }
+}
+
+/**
+ * 不补 git 根的归一化：越界对账只认票面写下的资源，自动补的仓库根会把
+ * 「同仓但没声明」的文件也盖过去，那就失去对账意义了。
+ */
+function toPlainResources(raw: readonly string[] | undefined): Resource[] {
+  return scanResources(raw ?? []).resources.map((uri) => {
     const { kind, value } = parseResource(uri)
     return { kind, value, uri }
   })
@@ -54,10 +83,21 @@ function under(child: string, parent: string): boolean {
 }
 
 /** 同一个资源，或祖先/后代关系（读与写求交用，包含相等）。 */
-function sameOrContains(a: Resource, b: Resource): boolean {
+function sameRepo(a: Resource, b: Resource, options: ConflictOptions): boolean {
+  if (a.kind !== 'git' || b.kind !== 'git') return false
+  const ga = findGitRoot(a.value, options.resources)
+  const gb = findGitRoot(b.value, options.resources)
+  return ga !== undefined && gb !== undefined && ga.root === gb.root
+}
+
+function sameOrContains(a: Resource, b: Resource, options: ConflictOptions): boolean {
   if (a.kind === b.kind) {
-    // dir 与 git 都按路径边界双向判；git 退化成目录，不单列。
-    if (a.kind === 'dir' || a.kind === 'git') return under(a.value, b.value) || under(b.value, a.value)
+    // dir 按路径边界双向判；git 先看是不是同一个仓库，再看路径边界。
+    if (a.kind === 'dir') return under(a.value, b.value) || under(b.value, a.value)
+    if (a.kind === 'git') {
+      if (a.value === b.value || sameRepo(a, b, options)) return true
+      return under(a.value, b.value) || under(b.value, a.value)
+    }
     return a.value === b.value
   }
   const dir = a.kind === 'dir' ? a : b.kind === 'dir' ? b : undefined
@@ -69,9 +109,22 @@ function sameOrContains(a: Resource, b: Resource): boolean {
   return under(other.value, dir.value)
 }
 
-/** 两边都写、都是 git：按路径边界判，相等或互为祖先后代都强。 */
-function gitGitHit(a: Resource, b: Resource): string | undefined {
+/**
+ * 两边都写、都是 git：判级按设计稿 §6 的两种模式。
+ *
+ * - 同一个仓库根、都没声明 worktree：强（共享 index/HEAD/stash）；
+ * - 同一仓库的两个不同 worktree：不在这里拦，落到 weak；
+ * - 一边 worktree、一边仓库根：强（保守，worktree 之外还有共享状态）；
+ * - 探不到仓库（老票 / 假路径）：退回原来的路径边界判，相等或互为祖先都强。
+ */
+function gitGitHit(a: Resource, b: Resource, options: ConflictOptions): string | undefined {
   if (a.value === b.value) return `两票都写同一个 git 路径 ${a.uri}`
+  const ga = findGitRoot(a.value, options.resources)
+  const gb = findGitRoot(b.value, options.resources)
+  if (ga && gb && ga.root === gb.root) {
+    if (ga.worktree && gb.worktree && ga.top !== gb.top) return undefined
+    return `两票都在同一个 git 仓库 ${ga.root} 里写（${a.uri} / ${b.uri}）`
+  }
   if (under(a.value, b.value)) return `git 路径 ${b.uri} 包含 ${a.uri}，两票都在写`
   if (under(b.value, a.value)) return `git 路径 ${a.uri} 包含 ${b.uri}，两票都在写`
   return undefined
@@ -86,13 +139,13 @@ function dirGitHit(dir: Resource, git: Resource): string | undefined {
 }
 
 /** 两边都写：强冲突的那几条。`undefined` 表示这一对不构成强冲突。 */
-function strongHit(a: Resource, b: Resource): string | undefined {
+function strongHit(a: Resource, b: Resource, options: ConflictOptions): string | undefined {
   if (a.kind === b.kind) {
     switch (a.kind) {
       case 'file':
         return a.value === b.value ? `两票都写同一个文件 ${a.uri}` : undefined
       case 'git':
-        return gitGitHit(a, b)
+        return gitGitHit(a, b, options)
       case 'svc':
         return a.value === b.value ? `两票都写同一个服务 ${a.uri}` : undefined
       case 'port':
@@ -116,8 +169,17 @@ function strongHit(a: Resource, b: Resource): string | undefined {
   return undefined
 }
 
-/** 两边都写、又没到强冲突：同 dir 下不同 file 算弱。 */
-function weakHit(a: Resource, b: Resource): string | undefined {
+/** 两边都写、又没到强冲突：同 dir 下不同 file、同仓库不同 worktree 算弱。 */
+function weakHit(a: Resource, b: Resource, options: ConflictOptions): string | undefined {
+  if (a.kind === 'git' && b.kind === 'git') {
+    if (a.value === b.value) return undefined
+    const ga = findGitRoot(a.value, options.resources)
+    const gb = findGitRoot(b.value, options.resources)
+    if (ga && gb && ga.root === gb.root && ga.worktree && gb.worktree && ga.top !== gb.top) {
+      return `同一个 git 仓库 ${ga.root} 的两个 worktree（${a.uri} / ${b.uri}），按文件级并行`
+    }
+    return undefined
+  }
   if (a.kind !== 'file' || b.kind !== 'file') return undefined
   if (a.value === b.value) return undefined
   const parent = dirname(a.value)
@@ -126,8 +188,8 @@ function weakHit(a: Resource, b: Resource): string | undefined {
 }
 
 /** 一边只读、一边写：资源相同或包含就算弱冲突。 */
-function readonlyHit(read: Resource, write: Resource): string | undefined {
-  if (!sameOrContains(read, write)) return undefined
+function readonlyHit(read: Resource, write: Resource, options: ConflictOptions): string | undefined {
+  if (!sameOrContains(read, write, options)) return undefined
   return `一票只读 ${read.uri}，另一票会写 ${write.uri}`
 }
 
@@ -135,9 +197,25 @@ function readonlyHit(read: Resource, write: Resource): string | undefined {
  * 判两票的冲突。`a` / `b` 的 `writes` / `reads` 会先归一化；同一对资源只记一次
  * 理由，撞上的资源串按首次出现顺序去重。
  */
-export function judgeConflict(a: ConflictSide, b: ConflictSide): ConflictVerdict {
-  const writesA = toResources(a.writes)
-  const writesB = toResources(b.writes)
+export function judgeConflict(a: ConflictSide, b: ConflictSide, options: ConflictOptions = {}): ConflictVerdict {
+  const scanWritesA = toResources(a.writes, options)
+  const scanWritesB = toResources(b.writes, options)
+  const scanReadsA = toResources(a.reads, options)
+  const scanReadsB = toResources(b.reads, options)
+  const writesA = scanWritesA.resources
+  const writesB = scanWritesB.resources
+  const invalid: InvalidConflictResource[] = [
+    ...scanWritesA.invalid.map((item) => ({ ...item, side: 'a' as const })),
+    ...scanReadsA.invalid.map((item) => ({ ...item, side: 'a' as const })),
+    ...scanWritesB.invalid.map((item) => ({ ...item, side: 'b' as const })),
+    ...scanReadsB.invalid.map((item) => ({ ...item, side: 'b' as const })),
+  ]
+  const unknownOnlyA =
+    invalid.some((item) => item.side === 'a') && writesA.length === 0 && scanReadsA.resources.length === 0
+  const unknownOnlyB =
+    invalid.some((item) => item.side === 'b') && writesB.length === 0 && scanReadsB.resources.length === 0
+  const withInvalid = (verdict: ConflictVerdict): ConflictVerdict =>
+    invalid.length > 0 ? { ...verdict, invalid } : verdict
   const reasons: string[] = []
   const resources: string[] = []
   const seenReason = new Set<string>()
@@ -156,35 +234,43 @@ export function judgeConflict(a: ConflictSide, b: ConflictSide): ConflictVerdict
 
   for (const wa of writesA) {
     for (const wb of writesB) {
-      const hit = strongHit(wa, wb)
+      const hit = strongHit(wa, wb, options)
       if (hit) note(hit, [wa, wb])
     }
   }
-  if (reasons.length > 0) return { level: 'strong', reasons, resources }
+  if (reasons.length > 0) return withInvalid({ level: 'strong', reasons, resources })
 
   for (const wa of writesA) {
     for (const wb of writesB) {
-      const hit = weakHit(wa, wb)
+      const hit = weakHit(wa, wb, options)
       if (hit) note(hit, [wa, wb])
     }
   }
-  const readsA = toResources(a.reads)
-  const readsB = toResources(b.reads)
+  const readsA = scanReadsA.resources
+  const readsB = scanReadsB.resources
   for (const read of readsA) {
     for (const write of writesB) {
-      const hit = readonlyHit(read, write)
+      const hit = readonlyHit(read, write, options)
       if (hit) note(hit, [read, write])
     }
   }
   for (const read of readsB) {
     for (const write of writesA) {
-      const hit = readonlyHit(read, write)
+      const hit = readonlyHit(read, write, options)
       if (hit) note(hit, [read, write])
     }
   }
-  if (reasons.length > 0) return { level: 'weak', reasons, resources }
+  if (reasons.length > 0) return withInvalid({ level: 'weak', reasons, resources })
 
-  return { level: 'none', reasons: [], resources: [] }
+  // 一边的声明里一条都认不出来：没法证明不冲突，按保守判弱放行，但要说清楚。
+  if (unknownOnlyA || unknownOnlyB) {
+    return withInvalid({
+      level: 'weak',
+      reasons: ['声明的资源串无法识别，按保守判弱处理'],
+      resources: [],
+    })
+  }
+  return withInvalid({ level: 'none', reasons: [], resources: [] })
 }
 
 /**
@@ -217,7 +303,7 @@ function covers(write: Resource, item: Resource): boolean {
 /**
  * 越界对账（P4）：`touched` 里没有被票上声明的 `writes` 覆盖的项。
  *
- * 入参两边都先过 `normalizeResources`，跟冲突判定读同一个写法；输出是归一化后
+ * 入参两边都先过 `scanResources`，跟冲突判定读同一个写法；输出是归一化后
  * 的资源串，按 touched 的首次出现顺序。没有声明 writes 就没有边界可比，返回
  * 空数组——快路径的票不该因为没写声明就满屏越界。
  */
@@ -225,10 +311,10 @@ export function outOfScopePaths(
   touched: readonly string[] | undefined,
   writes: readonly string[] | undefined,
 ): string[] {
-  const declared = toResources(writes)
+  const declared = toPlainResources(writes)
   if (declared.length === 0) return []
   const outside: string[] = []
-  for (const item of toResources(touched)) {
+  for (const item of toPlainResources(touched)) {
     if (declared.some((write) => covers(write, item))) continue
     outside.push(item.uri)
   }

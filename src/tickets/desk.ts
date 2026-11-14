@@ -36,7 +36,7 @@ import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
 import { judgeConflict, outOfScopePaths } from './conflict'
 import type { ConflictLevel, ConflictSide } from './conflict'
-import { normalizeResources } from './resources'
+import { normalizeResources, scanResources } from './resources'
 import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
 import type { ProbePort, ProbeRegistry } from './probe'
 import type { WorkerToolPort } from './worker-tools'
@@ -336,6 +336,8 @@ export class TicketDesk {
    * 来第二个 idle 事件，靠它就等于靠一个已经发生过、不会重来的信号。
    */
   private readonly idleSeen = new Set<string>()
+  /** 已经 warn 过的坏资源串（票号+原串），别每次巡检都重复喊。 */
+  private readonly invalidWarned = new Set<string>()
   /** 上一轮撤回审计的时刻；`undefined` = 还没跑过。 */
   private lastAuditAt: number | undefined = undefined
   /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
@@ -1463,6 +1465,14 @@ export class TicketDesk {
   } {
     const all = this.log.list()
     const mine = this.conflictSide(ticket)
+    // 脏声明不该把判定整锅端了：认不出来的串先喊一声（带票号与原文），判定继续。
+    const scan = scanResources([...(mine.writes ?? []), ...(mine.reads ?? [])])
+    for (const bad of scan.invalid) {
+      const key = `${ticket.id}:${bad.raw}`
+      if (this.invalidWarned.has(key)) continue
+      this.invalidWarned.add(key)
+      this.warn(`[dispatcher] 票 ${ticket.id} 的资源串不合法：${bad.raw}（${bad.reason}），按不认识处理继续判`)
+    }
     const waitOn: ConflictWait[] = []
     const weak: string[] = []
     let strong = false
@@ -1470,7 +1480,17 @@ export class TicketDesk {
       if (other.id === ticket.id || !isOpen(other.status)) continue
       // 排在自己后面的票不挡自己：FIFO 只看前面还欠着谁的账。
       if (byClaimOrder(other, ticket) >= 0) continue
-      const verdict = judgeConflict(mine, this.conflictSide(other))
+      let verdict
+      try {
+        verdict = judgeConflict(mine, this.conflictSide(other))
+      } catch (error) {
+        // 判定本身出了意料外的岔子：按 weak 放行并留痕，别让一张脏票打断整轮。
+        this.warn(
+          `[dispatcher] 票 ${ticket.id} 与 ${other.id} 冲突判定失败，按 weak 兜底：${messageOf(error)}`,
+        )
+        weak.push(other.id)
+        continue
+      }
       if (verdict.level === 'none') continue
       if (verdict.level === 'strong') {
         strong = true
