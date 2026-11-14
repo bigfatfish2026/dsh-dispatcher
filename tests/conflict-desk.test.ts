@@ -470,21 +470,6 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
 })
 
 
-describe('脏资源串在票台上只 warn 不打断', () => {
-  it('票声明里有 cmd:：warn 带票号与原文，合法资源照常判强、票照常排队', async () => {
-    const h = desk()
-    const blocker = await openProbe(h, '占目录', [DIR])
-    const bad = await openProbe(h, '脏声明', [DIR, 'cmd:dsh --dump-config'])
-    await idle(h, h.log.get(bad)!.workerId!)
-
-    expect(h.warnings.join('\n')).toContain(`票 ${bad} 的资源串不合法`)
-    expect(h.warnings.join('\n')).toContain('cmd:dsh --dump-config')
-    expect(h.log.get(bad)!.phase).toBe('queued')
-    expect(h.log.get(bad)!.waitOn?.[0]?.ticketId).toBe(blocker)
-  })
-})
-
-
 /**
  * A2 漏唤醒兜底：巡检每拍看一遍排队的票，前票不在了/已终态/被重启掐死都当场
  * 放行，不等 close 事件。三条票都是用真事件预置的冷日志，开一只新 desk 接上，
@@ -657,5 +642,29 @@ describe('A6 一个词只许一个意思', () => {
     const held = h.log.get(first)!
     expect(held.status).toBe('blocked')
     expect(held.phase).toBe('planned')
+  })
+})
+
+describe('脏资源串在票台上只 warn 不打断', () => {
+  it('历史票声明里有 cmd:：warn 带票号与原文，合法资源照常判强、票照常排队', async () => {
+    // 新声明已经在 declare 入口拒掉了，这里用冷日志模拟历史脏票（append-only 不改）。
+    const NOW = new Date('2026-11-14T12:00:00.000Z')
+    const at = (m: number): string => new Date(NOW.getTime() - m * 60_000).toISOString()
+    const backend = new MemoryBackend()
+    const base = (id: string, minutes: number, writes: string[]): Array<Record<string, unknown>> => [
+      { kind: 'published', id, at: at(minutes), goal: id, brief: id, publisher: 'session-main', preset: 't1', presetSource: 'fallback' },
+      { kind: 'spawned', id, at: at(minutes), cause: 'tool', workerId: `worker-${id}`, preset: 't1' },
+      { kind: 'declared', id, at: at(minutes), cause: 'tool', plan: { summary: id }, intent: { writes }, workerId: `worker-${id}` },
+    ]
+    for (const event of [...base('t-block', 6, [DIR]), ...base('t-bad', 5, [DIR, 'cmd:dsh --dump-config'])]) {
+      backend.append(event as never)
+    }
+    const h = makeDesk({ now: NOW, backend, config: { defaultPreset: 't1', sweepMs: 0 }, probe: fakeProbe() })
+    await h.desk.maintain()
+
+    expect(h.warnings.join('\n')).toContain('票 t-bad 的资源串不合法')
+    expect(h.warnings.join('\n')).toContain('cmd:dsh --dump-config')
+    expect(h.log.get('t-bad')!.phase).toBe('queued')
+    expect(h.log.get('t-bad')!.waitOn?.[0]?.ticketId).toBe('t-block')
   })
 })

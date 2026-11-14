@@ -167,6 +167,78 @@ describe('dispatch_declare', () => {
     expect(snapshot.intent).toEqual({ reversibility: 'manual', impact: { services: ['dsh-example'] } })
   })
 
+  it('intent 的可选栏都收下：impact 三栏、reversibility、dryRun、undo', async () => {
+    const file = probeTicket()
+    const { host, call } = mount(file)
+    await call(
+      'dispatch_declare',
+      {
+        plan,
+        intent: {
+          writes: ['file:/tmp/a.ts'],
+          reads: ['dir:/tmp'],
+          impact: { paths: ['/tmp/a.ts'], services: ['dsh-example'], remotes: ['origin'] },
+          reversibility: 'manual',
+          dryRun: { ok: false, detail: '预演没过' },
+          undo: { kind: 'file', ref: '/tmp/a.ts.bak', howto: 'cp /tmp/a.ts.bak /tmp/a.ts' },
+        },
+      },
+      { agent: worker(host, 'worker-probe-1') },
+    )
+    const snapshot = new TicketStore(file).get('t-probe')!
+    expect(snapshot.intent).toEqual({
+      writes: ['file:/tmp/a.ts'],
+      reads: ['dir:/tmp'],
+      impact: { paths: ['/tmp/a.ts'], services: ['dsh-example'], remotes: ['origin'] },
+      reversibility: 'manual',
+      dryRun: { ok: false, detail: '预演没过' },
+      undo: { kind: 'file', ref: '/tmp/a.ts.bak', howto: 'cp /tmp/a.ts.bak /tmp/a.ts' },
+    })
+  })
+
+  it('intent 只给 reads、dryRun 不带 detail、undo 不带 ref：可选项缺省不报错', async () => {
+    const file = probeTicket()
+    const { host, call } = mount(file)
+    await call(
+      'dispatch_declare',
+      {
+        plan: { summary: '只读一份', files: [{ path: '/tmp/a.ts' }] },
+        intent: { reads: ['dir:/tmp'], dryRun: { ok: true }, undo: { kind: 'git', howto: 'git revert abc1234' } },
+      },
+      { agent: worker(host, 'worker-probe-1') },
+    )
+    const snapshot = new TicketStore(file).get('t-probe')!
+    expect(snapshot.intent).toEqual({
+      reads: ['dir:/tmp'],
+      dryRun: { ok: true },
+      undo: { kind: 'git', howto: 'git revert abc1234' },
+    })
+    expect(snapshot.plan).toEqual({ summary: '只读一份', files: [{ path: '/tmp/a.ts' }] })
+  })
+
+  it('资源串不合法：拒收，回执说清怎么改，库里一行不多', async () => {
+    const file = probeTicket()
+    const { host, call } = mount(file)
+    const before = rows(file).length
+
+    await expect(
+      call(
+        'dispatch_declare',
+        {
+          plan,
+          intent: {
+            writes: ['cmd:ls', 'http:docs.deepseek.com', 'port:192.0.2.10:8080 (gw)'],
+            reads: [],
+            reversibility: 'auto',
+          },
+        },
+        { agent: worker(host, 'worker-probe-1') },
+      ),
+    ).rejects.toThrow(/资源串不合法.*cmd:ls.*http:docs\.deepseek\.com.*命令写进 plan\.summary/s)
+    expect(rows(file)).toHaveLength(before)
+    expect(new TicketStore(file).get('t-probe')!.plan).toBeUndefined()
+  })
+
   it('plan 与 intent 都空：不写一条没内容的声明', async () => {
     const file = probeTicket()
     const { host, call } = mount(file)

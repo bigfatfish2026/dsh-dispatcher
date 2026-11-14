@@ -51,7 +51,7 @@ import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
 import { outOfScopePaths } from './conflict'
-import { normalizeResources } from './resources'
+import { normalizeResources, scanResources } from './resources'
 import { TicketHandle, ticketsOfWork } from './handle'
 import { ConflictArbiter, byClaimOrder } from './arbiter'
 import { WorkerRegistry } from './registry'
@@ -701,6 +701,17 @@ export class TicketDesk {
       }
       if (Object.keys(nextIntent).length === 0) {
         throw new Error('declare 必须给 intent：writes / reads 用六个前缀写，再给 reversibility')
+      }
+      // 新声明先过一遍资源扫描：cmd:/http:/带说明的端口这类串判定层虽然能兜，
+      // 但它们不是资源，收进来只会让冲突判定永远按「不认识」处理。历史票不回溯，
+      // 这里只拦新的声明。
+      const scan = scanResources([...(nextIntent.writes ?? []), ...(nextIntent.reads ?? [])])
+      if (scan.invalid.length > 0) {
+        const bad = scan.invalid.map((item) => `${item.raw}（${item.reason}）`).join('；')
+        throw new Error(
+          `声明里的资源串不合法：${bad}。资源只认 file:/…、dir:/…、git:/…、svc:…、port:1-65535、dev:… 六种前缀；` +
+            '命令写进 plan.summary，网址写进报告，不要当资源',
+        )
       }
 
       this.commit({
