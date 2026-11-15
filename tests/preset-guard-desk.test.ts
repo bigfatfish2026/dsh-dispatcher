@@ -128,3 +128,63 @@ describe('开票：选档驳回', () => {
     expect(h.backend.kinds()).toContain('published')
   })
 })
+
+describe('开票：命令判定先判一次，结论透传给守卫', () => {
+  const judgeYes = async () => ({ needsCommand: true, source: 'llm' as const })
+  const judgeNo = async () => ({ needsCommand: false, source: 'llm' as const })
+
+  it('judge 判 yes：只读档驳回，票一条都不落', async () => {
+    const h = makeDesk({
+      presets: fakePresets(PRESETS, 't1', TOOLS),
+      classify: fakeClassifier('t2'),
+      judgeCommand: judgeYes,
+      config: { defaultPreset: 't1', allowedPresets: ['t0', 't1', 't2'] },
+    })
+    await expect(
+      h.desk.open({ ...INTENT, requestId: 'req-judge-yes', goal: '读一遍这三个文件，比一比哪份新' }, h.main),
+    ).rejects.toThrow(/任务要执行命令，但 t2（只读）档没有 bash/)
+    expect(h.backend.events_).toHaveLength(0)
+    expect(h.subagents.spawned).toHaveLength(0)
+  })
+
+  it('judge 判 no、任务书里没有命令词：只读档照开', async () => {
+    const h = makeDesk({
+      presets: fakePresets(PRESETS, 't1', TOOLS),
+      classify: fakeClassifier('t2'),
+      judgeCommand: judgeNo,
+      config: { defaultPreset: 't1', allowedPresets: ['t0', 't1', 't2'] },
+    })
+    const receipt = await h.desk.open({ ...INTENT, requestId: 'req-judge-no', goal: '读一遍这三个文件' }, h.main)
+    expect(receipt.preset).toBe('t2')
+    expect(h.subagents.spawned).toHaveLength(1)
+  })
+
+  it('judge 抛错：warn 一行后交回关键词表，任务书明写要命令仍驳回', async () => {
+    const h = makeDesk({
+      presets: fakePresets(PRESETS, 't1', TOOLS),
+      classify: fakeClassifier('t2'),
+      judgeCommand: async () => {
+        throw new Error('judge 挂了')
+      },
+      config: { defaultPreset: 't1', allowedPresets: ['t0', 't1', 't2'] },
+    })
+    await expect(h.desk.open({ ...INTENT, requestId: 'req-judge-boom', goal: COMMAND_GOAL }, h.main)).rejects.toThrow(
+      /没有 bash/,
+    )
+    expect(h.warnings.join('\n')).toContain('命令判定没给结论')
+    expect(h.warnings.join('\n')).toContain('judge 挂了')
+  })
+
+  it('judge 判 no 但任务书出现 git：守卫按矛盾驳回（强信号优先）', async () => {
+    const h = makeDesk({
+      presets: fakePresets(PRESETS, 't1', TOOLS),
+      classify: fakeClassifier('t2'),
+      judgeCommand: judgeNo,
+      config: { defaultPreset: 't1', allowedPresets: ['t0', 't1', 't2'] },
+    })
+    await expect(
+      h.desk.open({ ...INTENT, requestId: 'req-judge-git', goal: '用 git 看看这仓库，纯只读' }, h.main),
+    ).rejects.toThrow(/任务书里出现命令类词「git」/)
+    expect(h.warnings.join('\n')).toMatch(/选档驳回 rule=needs-command-no-bash/)
+  })
+})

@@ -11,9 +11,11 @@ import type { Config } from '../config'
 import { legacySweepWarning, resolveSweepMs } from '../config'
 import type { TicketLog } from '../store/log'
 import { createDesk } from '../tickets/desk'
-import type { Serialize } from '../tickets/desk'
+import type { CommandJudge, Serialize } from '../tickets/desk'
 import { createLlmClassifier } from '../tickets/classify'
 import type { LlmService } from '../tickets/classify'
+import { classifyNeedsCommand } from '../tickets/classify-command'
+import type { NeedsCommandInput } from '../tickets/classify-command'
 import { createNotifier } from '../tickets/notify'
 import { createSweepFacts } from '../tickets/sweep-facts'
 import type { SweepFacts } from '../tickets/sweep-facts'
@@ -221,6 +223,25 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
   })
 
   /**
+   * 命令判定：一次 flash 档小模型调用，问「这活要不要真跑命令」。
+   *
+   * `static` 策略是「不花那次调用选档」，这里也一并不花：守卫退回关键词表
+   * （`commandKeywords`），行为跟改造前一致。`llm` 策略才接。
+   */
+  const judgeCommand: CommandJudge | undefined =
+    config.presetStrategy === 'static'
+      ? undefined
+      : (input: NeedsCommandInput) =>
+          classifyNeedsCommand(input, {
+            llm: llmOf,
+            model: config.commandHintModel,
+            effort: config.commandHintEffort,
+            timeoutMs: config.commandHintTimeoutMs,
+            keywords: config.commandKeywords,
+            warn,
+          })
+
+  /**
    * 提醒落在哪个会话上。
    *
    * 有 `to`（被挡/放行那张票的开票方）就先指名送它——这台机器上挂两个主会话
@@ -278,6 +299,7 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
     },
     presets,
     classify: config.presetStrategy === 'static' ? undefined : classifier,
+    ...(judgeCommand ? { judgeCommand } : {}),
     routerPreset,
     notifier: createNotifier({ wake, facts: sweepFacts, quiet: false, warn }),
     watch: workerWatch,
@@ -293,6 +315,9 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
       defaultPreset: config.defaultPreset,
       presetStrategy: config.presetStrategy,
       classifyTimeoutMs: config.classifyTimeoutMs,
+      commandHintModel: config.commandHintModel,
+      commandHintEffort: config.commandHintEffort,
+      commandHintTimeoutMs: config.commandHintTimeoutMs,
       allowedPresets: config.allowedPresets,
       commandKeywords: config.commandKeywords,
       rejectOnMismatch: config.rejectOnMismatch,

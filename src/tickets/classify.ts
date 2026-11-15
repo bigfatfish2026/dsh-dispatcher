@@ -54,7 +54,7 @@ const CLASSIFY_TIMEOUT_CODE = 'DISPATCHER_CLASSIFY_TIMEOUT'
 const DEFAULT_MAX_OUTPUT_TOKENS = 200
 
 /** 时限内没回话就 abort：这个 promise 已经没用了，别把开票卡住。 */
-class TimeoutReason extends Error {
+export class TimeoutReason extends Error {
   readonly code = CLASSIFY_TIMEOUT_CODE
   readonly timeoutMs: number
   constructor(timeoutMs: number) {
@@ -69,7 +69,7 @@ class TimeoutReason extends Error {
  * 一个信号，dispose 清定时器。抄进来是因为本包不依赖它（依赖面只有 cordis /
  * schemastery / dsh-tools），而行为就这三行，抄比多一个运行时依赖便宜。
  */
-function deadline(
+export function deadline(
   upstream: AbortSignal | undefined,
   timeoutMs: number,
   makeReason: () => Error,

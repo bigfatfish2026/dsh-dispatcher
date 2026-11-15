@@ -52,6 +52,16 @@ export const REPEAT_WINDOW_MINUTES = 10
 export const SWEEP_MS = 10_000
 export const CLASSIFY_TIMEOUT_MS = 8_000
 
+/**
+ * 命令判定的短超时与默认模型。
+ *
+ * 这个判定只为一句话 yes/no，比选档更不该等：晚到 4 秒还没回话，按关键词表先
+ * 派出去更划算。模型跟选档同一个 flash 档，不另开重模型的钱。
+ */
+export const COMMAND_HINT_TIMEOUT_MS = 4_000
+export const COMMAND_HINT_MODEL = 'deepseek/deepseek-flash'
+export const COMMAND_HINT_EFFORT = 'off'
+
 /** 撤回审计：往回扫 3 天，两次审计最小间隔 1 小时。 */
 export const REVERT_AUDIT_DAYS = 3
 export const REVERT_AUDIT_MS = 60 * 60 * 1000

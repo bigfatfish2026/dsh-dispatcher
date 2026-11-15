@@ -12,6 +12,7 @@
 import { briefIsBlank, truncateColumns } from '../store'
 import type { PresetSource, TicketEvent, TicketOrigin, TicketStatus } from '../store'
 import type { PresetTools } from './preset-guard'
+import type { NeedsCommandInput, NeedsCommandVerdict } from './classify-command'
 import type { Clock } from './clock'
 import type { WorkerPool, WorkerRegistration } from './workers'
 import type { ProbeRegistry } from './probe'
@@ -65,13 +66,28 @@ export interface PresetDecision {
   preset: string
   source: PresetSource
   why?: string
-  /** 分类器声明的「要跑命令」；没给就 undefined，交给关键词兜底。 */
+  /** 这轮要不要执行命令。判定器给了就是它，没接判定器就沿用分类器第三行。 */
   needsCommand?: boolean
+  /** 这个布尔值是谁给的（强信号 / 模型 / 关键词兜底），进日志用。 */
+  commandVerdict?: NeedsCommandVerdict
 }
+
+/**
+ * 命令判定器：`classifyNeedsCommand` 的接线形态（`classify-command.ts`）。
+ *
+ * 实现自己兜底、不抛；这里仍兜一层超时和 try/catch，判定慢不该把开票卡住。
+ * 返回 undefined = 没结论，守卫退回关键词表。
+ */
+export type CommandJudge = (input: NeedsCommandInput) => Promise<NeedsCommandVerdict | undefined>
 
 export interface DecideInput {
   presets: PresetCatalog
   classify?: Classifier
+  /**
+   * 「这活要不要真跑命令」的异步判定。不接就沿用分类器的 `needsCommand`，
+   * 守卫仍然有关键词兜底。
+   */
+  judgeCommand?: CommandJudge
   strategy: 'llm' | 'static'
   /** 配置里的默认档。空串 = 没配，退到注册表的 defaultId。 */
   defaultPreset?: string
@@ -120,6 +136,35 @@ function withTimeout<T>(work: Promise<T>, ms: number, clock: Clock): Promise<T> 
   })
 }
 
+/**
+ * 定完档再问一次「这活要不要真跑命令」，把结论挂到 decision 上。
+ *
+ * 一次开票只判一次：守卫（`checkPresetChoice`）拿到的是这个布尔值，不自己再算
+ * 关键词，两处口径不会分叉。判定器没接、没结论、抛错，都退回「不碰这个字段」，
+ * 交给守卫的关键词兜底——fail-closed 那一层始终在。
+ */
+async function judgeNeedsCommand(decision: PresetDecision, input: DecideInput): Promise<PresetDecision> {
+  if (!input.judgeCommand) return decision
+  const warn = input.warn ?? (() => {})
+  const wanted: NeedsCommandInput = {
+    goal: input.goal,
+    brief: input.brief,
+    ...(input.dir ? { dir: input.dir } : {}),
+  }
+  try {
+    const verdict = await withTimeout(
+      Promise.resolve(input.judgeCommand(wanted)),
+      input.classifyTimeoutMs,
+      input.clock,
+    )
+    if (!verdict) return decision
+    return { ...decision, needsCommand: verdict.needsCommand, commandVerdict: verdict }
+  } catch (error) {
+    warn(`[dispatcher] 命令判定没给结论，交回关键词兜底：${messageOf(error)}`)
+    return decision
+  }
+}
+
 export async function decidePreset(input: DecideInput): Promise<PresetDecision> {
   const warn = input.warn ?? (() => {})
   const catalog = await input.presets.list()
@@ -135,54 +180,63 @@ export async function decidePreset(input: DecideInput): Promise<PresetDecision> 
     return { preset: id, source, ...(why ? { why } : {}) }
   }
 
-  if (input.requestPreset) return named(input.requestPreset, 'router', '主会话点名的档')
+  /** 分类器那条路：失败、给错名字、给空，都落回 fallback，不自己猜。 */
+  const pickByLlm = async (fallback: PresetDecision): Promise<PresetDecision> => {
+    let choice: ClassifyChoice | string | undefined
+    try {
+      choice = await withTimeout(
+        input.classify!.classify({
+          goal: input.goal,
+          brief: input.brief,
+          ...(input.dir ? { dir: input.dir } : {}),
+          presets: catalog,
+          ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        }),
+        input.classifyTimeoutMs,
+        input.clock,
+      )
+    } catch (error) {
+      warn(`分类器没给出结论，用默认档 ${fallback.preset}：${messageOf(error)}`)
+      return fallback
+    }
 
-  const fallbackId = input.defaultPreset?.trim() || input.presets.defaultId?.() || ''
-  if (!fallbackId) throw new Error('没有可用档位：配置里没写 defaultPreset，注册表也没给默认档')
-  // 默认档配错是配置事故，早点炸比每张票静默乱派强。
-  const fallback = named(fallbackId, 'fallback', '配置的默认档')
-
-  if (input.strategy !== 'llm' || !input.classify) return fallback
-
-  // 主会话挂的档优先于分类器：它自己说了算。
-  if (input.routerPreset && known.has(input.routerPreset)) {
-    return { preset: input.routerPreset, source: 'router', why: '主会话当前挂的档' }
+    const picked = typeof choice === 'string' ? choice : choice?.preset
+    const why = typeof choice === 'string' ? undefined : choice?.why
+    if (!picked) return fallback
+    if (!known.has(picked)) {
+      // 分类器不是人：它写错名字不该让开票失败，但也不能就这么信。
+      warn(`分类器给了不存在的档 ${picked}，用默认档 ${fallback.preset}`)
+      return { ...fallback, why: `分类器给了不存在的档 ${picked}` }
+    }
+    return {
+      preset: picked,
+      source: 'llm',
+      ...(why ? { why } : {}),
+      ...(typeof choice === 'object' && choice?.needsCommand !== undefined
+        ? { needsCommand: choice.needsCommand }
+        : {}),
+    }
   }
 
-  let choice: ClassifyChoice | string | undefined
-  try {
-    choice = await withTimeout(
-      input.classify.classify({
-        goal: input.goal,
-        brief: input.brief,
-        ...(input.dir ? { dir: input.dir } : {}),
-        presets: catalog,
-        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      }),
-      input.classifyTimeoutMs,
-      input.clock,
-    )
-  } catch (error) {
-    warn(`分类器没给出结论，用默认档 ${fallback.preset}：${messageOf(error)}`)
-    return fallback
+  let decision: PresetDecision
+  if (input.requestPreset) {
+    decision = named(input.requestPreset, 'router', '主会话点名的档')
+  } else {
+    const fallbackId = input.defaultPreset?.trim() || input.presets.defaultId?.() || ''
+    if (!fallbackId) throw new Error('没有可用档位：配置里没写 defaultPreset，注册表也没给默认档')
+    // 默认档配错是配置事故，早点炸比每张票静默乱派强。
+    const fallback = named(fallbackId, 'fallback', '配置的默认档')
+    decision = fallback
+    if (input.strategy === 'llm' && input.classify) {
+      // 主会话挂的档优先于分类器：它自己说了算。
+      decision =
+        input.routerPreset && known.has(input.routerPreset)
+          ? { preset: input.routerPreset, source: 'router', why: '主会话当前挂的档' }
+          : await pickByLlm(fallback)
+    }
   }
 
-  const picked = typeof choice === 'string' ? choice : choice?.preset
-  const why = typeof choice === 'string' ? undefined : choice?.why
-  if (!picked) return fallback
-  if (!known.has(picked)) {
-    // 分类器不是人：它写错名字不该让开票失败，但也不能就这么信。
-    warn(`分类器给了不存在的档 ${picked}，用默认档 ${fallback.preset}`)
-    return { ...fallback, why: `分类器给了不存在的档 ${picked}` }
-  }
-  return {
-    preset: picked,
-    source: 'llm',
-    ...(why ? { why } : {}),
-    ...(typeof choice === 'object' && choice?.needsCommand !== undefined
-      ? { needsCommand: choice.needsCommand }
-      : {}),
-  }
+  return judgeNeedsCommand(decision, input)
 }
 
 /** 一行摘要：空的不许进日志，长了按当前上限截。 */

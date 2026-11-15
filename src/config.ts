@@ -5,6 +5,9 @@ import {
   BLOCKED_MINUTES,
   BRIEF_MAX_COLUMNS,
   CLASSIFY_TIMEOUT_MS,
+  COMMAND_HINT_EFFORT,
+  COMMAND_HINT_MODEL,
+  COMMAND_HINT_TIMEOUT_MS,
   DEFAULT_STATE_FILE,
   DEFAULT_STORE_BACKEND,
   DEFAULT_STORE_FILE,
@@ -157,6 +160,15 @@ export interface Config {
   /** 选档最多等多久，毫秒。到点就回落默认档，不阻塞开票。 */
   classifyTimeoutMs: number
   /**
+   * 「这活要不要真跑命令」的判定模型，写成 `provider/model`。一次一句话 yes/no，
+   * 用 flash 档就够。调用失败/超时/解析不了时退回 `commandKeywords` 词表。
+   */
+  commandHintModel: string
+  /** 命令判定的推理档 id；空串 = 路由默认。判一行 yes/no，给 off。 */
+  commandHintEffort: string
+  /** 命令判定最多等多久，毫秒。比选档更短：晚到就按词表先派。 */
+  commandHintTimeoutMs: number
+  /**
    * 允许档位镜像。选出来的档不在这里就驳回。空数组 = 不校验（给不想开这道
    * 门的人留的后路）；正常部署抄 profile 里 tool-subagent 的 allowedAgentPresets。
    */
@@ -299,6 +311,21 @@ export const Config: Schema<Config> = Schema.object({
     .default(CLASSIFY_TIMEOUT_MS)
     .description(
       'How long one classification may take, in milliseconds. On timeout the classifier is abandoned and the ticket opens on defaultPreset: a slow model must never block dispatch_open.',
+    ),
+  commandHintModel: Schema.string()
+    .default(COMMAND_HINT_MODEL)
+    .description(
+      'Model for the one-line "does this ticket need to run commands?" judgement, written provider/model. A flash-tier model is enough: one sentence in, yes/no out. On any failure the keyword table (commandKeywords) decides instead.',
+    ),
+  commandHintEffort: Schema.string()
+    .default(COMMAND_HINT_EFFORT)
+    .description(
+      'Reasoning effort for the command judgement. Empty means the model default. off/none is right: one yes/no line, thinking only adds latency.',
+    ),
+  commandHintTimeoutMs: Schema.natural()
+    .default(COMMAND_HINT_TIMEOUT_MS)
+    .description(
+      'How long the command judgement may take, in milliseconds. Shorter than classifyTimeoutMs on purpose: a late answer is worth less than dispatching on the keyword table.',
     ),
   allowedPresets: Schema.array(Schema.string())
     .default([])

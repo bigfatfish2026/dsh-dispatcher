@@ -212,6 +212,8 @@ export function makeDesk(
     serialize?: Serialize
     presets?: PresetCatalog
     classify?: Classifier
+    /** 命令判定器：给个假的，看「判 yes/no/失败」怎么影响守卫。 */
+    judgeCommand?: DeskDeps['judgeCommand']
     now?: Date
     agents?: ReturnType<typeof fakeAgents>
     notifier?: DeskDeps['notifier']
@@ -254,6 +256,7 @@ export function makeDesk(
     agents: () => agents,
     presets: options.presets ?? fakePresets(),
     classify: options.classify,
+    ...(options.judgeCommand ? { judgeCommand: options.judgeCommand } : {}),
     ...(options.routerPreset ? { routerPreset: () => options.routerPreset } : {}),
     ...(options.probe ? { probe: options.probe } : {}),
     ...(options.workerTools ? { workerTools: options.workerTools } : {}),

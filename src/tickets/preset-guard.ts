@@ -5,7 +5,10 @@
  * 「要真的用 bash 跑命令」。2026-11-04 那两张 git 勘察票就是这么派空的：一张
  * 白跑，一张补跑。这一层不看模型怎么措辞，只对两件事实：
  *
- *   1. 任务要不要执行命令（模型声明的 `needsCommand`；false 也查关键词，命中即矛盾）；
+ *   1. 任务要不要执行命令（接线层已经判过一次：`classify-command.ts` 的
+ *      `classifyNeedsCommand` 回一个布尔值，这里只收结论，不自己再算一遍口径。
+ *      收的是 false 时仍查一遍关键词，命中即矛盾——那是「任务书写明要命令」的
+ *      强信号守门，不是第二个判定器）；
  *   2. 这个档的工具面里有没有能执行命令的工具（从档位声明的 YAML 读 allow/deny）。
  *
  * 三条规则按顺序判，第一条中就不往下走：
@@ -235,7 +238,11 @@ export interface PresetCheckInput {
   preset: string
   /** 档的中文名，写进驳回文本（t2（只读））。 */
   label?: string
-  /** 分类器声明的三态：true 必查、false 也查关键词（命中即矛盾）、undefined 只走关键词兜底。 */
+  /**
+   * 命令判定给的三态：true 必查、false 也查关键词（命中即矛盾）、undefined 只走
+   * 关键词兜底。值是 `classifyNeedsCommand`（或分类器第三行）的结果，守卫不自己
+   * 再调一次模型。
+   */
   needsCommand?: boolean
   goal: string
   /** 允许档位镜像；空数组 = 不校验 rule1。 */

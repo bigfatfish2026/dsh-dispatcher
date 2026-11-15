@@ -36,6 +36,9 @@ import {
   LONG_WAIT_MINUTES,
   BRIEF_MAX_COLUMNS,
   CLASSIFY_TIMEOUT_MS,
+  COMMAND_HINT_EFFORT,
+  COMMAND_HINT_MODEL,
+  COMMAND_HINT_TIMEOUT_MS,
   FRESH_MINUTES,
   MAX_EXEC,
   MAX_QUEUED,
@@ -58,7 +61,7 @@ import { WorkerRegistry } from './registry'
 import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
 import type { ProbePort, ProbeRegistry } from './probe'
 import type { WorkerToolPort } from './worker-tools'
-import type { Classifier, PresetCatalog, PresetDecision, TicketIntent, TicketReceipt } from './publish'
+import type { Classifier, CommandJudge, PresetCatalog, PresetDecision, TicketIntent, TicketReceipt } from './publish'
 import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from './preset-guard'
 import type { PresetRejection } from './preset-guard'
 import { auditClosedTickets, normalizeUndo } from './revert'
@@ -71,6 +74,7 @@ import type { TicketView } from './view'
 export type {
   Classifier,
   ClassifyInput,
+  CommandJudge,
   PresetCatalog,
   PresetDecision,
   PresetInfo,
@@ -90,6 +94,10 @@ export interface DeskConfig {
   defaultPreset: string
   presetStrategy: 'llm' | 'static'
   classifyTimeoutMs: number
+  /** 命令判定的模型 / 推理档 / 短超时（`classify-command.ts` 那一层用）。 */
+  commandHintModel: string
+  commandHintEffort: string
+  commandHintTimeoutMs: number
   /** 允许档位镜像；空数组 = 不校验「档在不在允许清单里」。 */
   allowedPresets: readonly string[]
   /** 「要跑命令」的关键词兜底表。 */
@@ -141,6 +149,9 @@ export interface DeskConfig {
 export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   presetStrategy: 'llm',
   classifyTimeoutMs: CLASSIFY_TIMEOUT_MS,
+  commandHintModel: COMMAND_HINT_MODEL,
+  commandHintEffort: COMMAND_HINT_EFFORT,
+  commandHintTimeoutMs: COMMAND_HINT_TIMEOUT_MS,
   allowedPresets: [],
   commandKeywords: DEFAULT_COMMAND_KEYWORDS,
   rejectOnMismatch: true,
@@ -188,6 +199,12 @@ export interface DeskDeps {
   agents?: () => AgentLookup | undefined
   presets: PresetCatalog
   classify?: Classifier
+  /**
+   * 「这活要不要真跑命令」的异步判定（`classify-command.ts` 的
+   * `classifyNeedsCommand`）。两处开票都先判一次，结论透传给守卫，守卫不再
+   * 自己算关键词；不接就退回分类器第三行 + 关键词兜底。
+   */
+  judgeCommand?: CommandJudge
   /** 主会话当前挂的档（可选探测）；没有就不问。 */
   routerPreset?: () => string | undefined
   notifier?: OwnerNotifier
@@ -544,6 +561,7 @@ export class TicketDesk {
         ...(dir ? { dir } : {}),
         sessionId: actor.sessionId,
         classifyTimeoutMs: this.config.classifyTimeoutMs,
+        ...(this.deps.judgeCommand ? { judgeCommand: this.deps.judgeCommand } : {}),
         clock: this.clock,
         warn: this.warn,
       })
@@ -1624,6 +1642,7 @@ export class TicketDesk {
         ...(ticket.dir ? { dir: ticket.dir } : {}),
         ...(ticket.publisher ? { sessionId: ticket.publisher } : {}),
         classifyTimeoutMs: this.config.classifyTimeoutMs,
+        ...(this.deps.judgeCommand ? { judgeCommand: this.deps.judgeCommand } : {}),
         clock: this.clock,
         warn: this.warn,
       })
