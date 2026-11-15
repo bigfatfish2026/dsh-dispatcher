@@ -302,9 +302,9 @@ export interface PromptInput {
  * 交活只走 `dispatch_report`；票的状态不归 worker 管；卡住 = 说清卡点然后停，
  * 等主会话 `dispatch_send` 送话进来（子会话报告是单向的，问了没人当场答）。
  *
- * 按轮次分三套：探路轮讲清「只读、交声明」；执行轮只多一行声明过的资源，
- * 末尾提醒别越界；降级轮先认一句探路超时、再让人直接干。三套都带票号和
- * 目标原文——原任务一个字不许截。
+ * 按轮次分三套：探路轮讲清「只读、交声明」；执行轮开头先明确解钳（上一轮那句
+ * 「用不了」已经失效），再念一行声明过的资源，末尾提醒别越界；降级轮先认一句
+ * 探路超时、再让人直接干。三套都带票号和目标原文——原任务一个字不许截。
  */
 export function buildPrompt(input: PromptInput): string {
   const round = input.round ?? 'task'
@@ -323,6 +323,9 @@ export function buildPrompt(input: PromptInput): string {
       '干完记得补一份 dispatch_declare：plan 和 intent 照实写，写完再交活。',
     )
   } else {
+    // 执行轮跟探路轮在同一个会话里，上一轮那句「这轮用不了」还留在上下文里；
+    // 不说一句钳子已经松了，子会话会自己判「没有 bash」，手里有工具也不用。
+    lines.push('探路轮已结束：本轮 bash / write / edit 都可用，上一轮说的「这轮用不了」已失效，直接动手。')
     lines.push(declaredLine(input.declared))
   }
   lines.push(`目标：${input.goal}`)

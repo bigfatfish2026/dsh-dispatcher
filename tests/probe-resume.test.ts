@@ -71,6 +71,13 @@ describe('巡检兜底续派：先拆探路窗口', () => {
     expect(h.subagents.spawned).toHaveLength(1)
     expect(h.subagents.sent).toHaveLength(1)
     expect(h.subagents.sent[0]!.target).toBe('worker-1')
+    // 任务书得自己说一句钳子已经松了：上一轮那句「这轮用不了」还在同一个上下文里，
+    // 不说清楚，子会话会照旧判「没有 bash」，手里有工具也不用。
+    const text = h.subagents.sent[0]!.text
+    expect(text).toContain('探路轮已结束')
+    expect(text).toContain('bash / write / edit')
+    expect(text).toContain('已失效')
+    expect(text).not.toContain('这一轮是只读轮')
     expect(h.log.get(id)!.epoch).toBe(2)
     expect(h.log.get(id)!.phase).toBe('running')
     expect(h.warnings.join('\n')).toContain(`巡检兜底放行票 ${id}`)
@@ -98,5 +105,28 @@ describe('巡检兜底续派：先拆探路窗口', () => {
     expect(probe.has('worker-1')).toBe(true)
     expect(spy.released).toBe(0)
     expect(h.subagents.sent).toHaveLength(0)
+  })
+
+  it('planning 里 send：投递前窗口已经拆了', async () => {
+    const probe = new ProbeWindows()
+    const spy = spyWindow('worker-1')
+    const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe })
+    const { id } = await h.desk.open({ ...INTENT }, h.main)
+
+    probe.adopt(spy.agent, (ticketId) => h.log.get(ticketId))
+    expect(probe.has('worker-1')).toBe(true)
+    // 票还在探路轮：主会话这时候补一句，队列投递也得先把只读钳子松掉，
+    // 否则这句投进去等于让子会话在只会 readonly 的手上接着干。
+    expect(h.log.get(id)!.phase).toBe('planning')
+
+    const receipt = await h.desk.send(id, '补一句：目录在 tests 下', h.main)
+
+    expect(receipt.delivered).toBe(true)
+    expect(h.log.get(id)!.phase).toBe('planning')
+    expect(probe.has('worker-1')).toBe(false)
+    expect(spy.released).toBe(1)
+    expect(h.subagents.sent).toHaveLength(1)
+    expect(h.subagents.sent[0]!.target).toBe('worker-1')
+    expect(h.warnings.join('\n')).not.toContain('[probe] 窗口没拆到')
   })
 })

@@ -1314,6 +1314,9 @@ export class TicketDesk {
         this.warn(`票 ${id} 的发布会话不在活表（${ticket.publisher ?? '空'}），投不了，先留在队列里`)
         return delivered
       }
+      // 投递前先拆探路窗口，跟 idle / 巡检兜底两条路一个口径：票还在 planning
+      // 时队列里这一句也可能是叫它接着干的通知，别让只读钳子把执行轮卡住。
+      this.closeProbe(ticket, ticket.workerId)
       // 只有「真有一轮活在跑」才算 running；waiting/blocked 投递前先记一轮新的。
       const running = ticket.status === 'running' && ticket.workerAlive !== false
       const alive = this.registry.alive(ticket.workerId)
@@ -1504,6 +1507,9 @@ export class TicketDesk {
     const stopReason = typeof info.stopReason === 'string' && info.stopReason ? info.stopReason : 'end'
     for (const ticket of this.registry.ticketsOf(workerId)) {
       if (!isOpen(ticket.status) || !ticket.workerId) continue
+      // 这一轮到此为止：探路窗口不管拆没拆过都先放掉，别让 ended 之后还挂着
+      // 只读钳子（同型入口，跟 idle / 投递前那两处一个口径）。
+      this.closeProbe(ticket, workerId)
       const epochReports = ticket.epochReports
       this.commit({
         kind: 'ended',
@@ -1789,11 +1795,16 @@ export class TicketDesk {
    * 纯释放：不补声明、不推 phase。以前这里会给「idle 了但没交声明」的票补一条
    * 空 `declared`，那条就是「不探路也能进执行」的后门——现在声明只能由子会话
    * 自己用 `dispatch_declare` 交，没交就留在 planning，等补声明或巡检超时降级。
+   *
+   * 窗口本该在而拆不到（票还停在 planning）时喊一行：这是「执行轮手里没工具」
+   * 最可能的静默源头。普通执行轮本来就没窗口，不在这里添噪声。
    */
   private closeProbe(ticket: TicketSnapshot, sessionId: string): void {
     const probe = this.deps.probe
     if (!probe) return
-    probe.release(ticket.workerId ?? sessionId)
+    if (probe.release(ticket.workerId ?? sessionId)) return
+    if (ticket.phase !== 'planning') return
+    this.warn(`[probe] 窗口没拆到 id=${ticket.id}`)
   }
 
   /**
@@ -1910,6 +1921,8 @@ export class TicketDesk {
     for (const ticket of this.registry.ticketsOf(sessionId)) {
       if (!isOpen(ticket.status) || !ticket.workerId) continue
       if (minutesSince(ticket.updatedAt, this.clock.now()) < this.config.freshMinutes) continue
+      // 真回收了：窗口先放掉，别留一把装在已死会话上的只读钳子。
+      this.closeProbe(ticket, sessionId)
       this.commit({
         kind: 'ended',
         id: ticket.id,
