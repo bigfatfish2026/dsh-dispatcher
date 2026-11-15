@@ -20,7 +20,7 @@ The figure is one call chain: the main session calls `dispatch_open` once, the d
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-2.0.0.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-2.2.1.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
@@ -34,7 +34,8 @@ To use SQLite, set `store.backend: sqlite` (optionally `store.file`; without it 
   name: dsh-dispatcher
   config:
     defaultPreset: t1            # required; must exist in the preset registry
-    maxOpen: 4
+    maxExec: 8                   # tickets actually executing at once
+    maxQueued: 4                 # tickets waiting in the conflict queue
     allowedPresets: [t0, t1, t2] # mirror used by the preset guard; [] disables the check
 ```
 
@@ -51,10 +52,14 @@ The full key list, defaults, and the event model live in [docs/internals.en.md](
 | `dispatch_block` | main session | Park a ticket while a person decides something |
 | `dispatch_close` | main session | Finish it: `done` when the work landed, `dropped` when abandoned; queued messages are voided and the fish is stopped |
 | `dispatch_report` | fish | Hand back a report; append-only, it cannot change status |
+| `dispatch_declare` | fish | Declare `plan` and `intent` in the probe round; no ticket id — the desk finds the ticket this worker owns, and nothing but an append happens |
+| `dispatch_touch` | fish | Report the files actually touched this round, reconciled when the ticket closes; merged by path, still scoped to the caller's own ticket |
 | `dispatch_log_action` | main session, fish | Log one side-effecting step and how to undo it; append-only, never touches status |
 | `progress_note` | manual | Push one line of progress to the phone without waking a session or touching disk |
 
-`dispatch_open` takes optional `origin` (who opened it). It takes neither `intent` (paths/services/remotes touched, reversibility, dry-run result) nor `probe`: every ticket starts with a probe round, and there is no path that skips it. The first 子会话 has no `write` / `edit` / `bash`, reads the code and hands `plan` plus `intent` back with `dispatch_declare` before the desk lets it run. Shape and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
+`dispatch_open` takes optional `origin` (who opened it). It takes neither `intent` (paths/services/remotes touched, reversibility, dry-run result) nor `probe`: every ticket starts with a probe round, and there is no path that skips it. The first fish has no `write` / `edit` / `bash`, reads the code and hands `plan` plus `intent` back with `dispatch_declare` before the desk lets it run. Shape and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
+
+The probe window is 2 minutes: if no declaration arrives by then the ticket degrades — it moves to `planned`, is marked `degraded`, and gets one "just do it, declare afterwards" task brief instead of sitting in the probe round forever. A declaration is never wasted: the plan summary (200 characters) and the first 8 files (one line each) go into the execution-round brief, so the working fish does not have to rediscover its own boundaries.
 
 ### Filling in `goal` and `brief`
 
@@ -66,7 +71,9 @@ Write `goal` in full, in the requester's own words. The fish cannot see the main
 
 ![One ticket's whole life (English)](docs/dispatcher-seq-lifecycle.en.png)
 
-Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open and occupy `maxOpen`. `waiting` only means the fish's session stopped, not that work was delivered — delivery is measured by reports on the ticket.
+Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open and occupy `maxExec`. `waiting` only means the fish's session stopped, not that work was delivered — delivery is measured by reports on the ticket.
+
+Besides status there is a phase: `planning` is the read-only probe round, `planned` means the declaration is in and the ticket is waiting to be released, `queued` means it is waiting on a resource, and `running` is normal work. `queued` and `blocked` look alike but differ: `blocked` only means a person has to decide and is written by the main session alone, while `queued` means waiting on a resource and is written by the desk. Queueing has two bands: past 15 minutes it is a long wait — the original fish is released and a fresh one is started on release with the previous `plan` in its brief; under 15 minutes it is a short wait and the fish is kept, saving a cold start.
 
 ## Things to watch out for
 
@@ -74,7 +81,7 @@ Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The fi
 
 **A fish cannot write memory.** The seven memory-write tools are stripped from its schema (`memory_save`, `memory_archive`, `memory_merge`, and friends); recall stays. It has no `dispatch_block` either — when blocked it says so in a report and waits.
 
-**The sweep only reminds; it never edits tickets.** Once every 10 seconds by default (`sweepMs`): unread reports, finished rounds, and long-running tickets are just a line of state in front of the main session, withdrawn once that ticket has been looked at; only a ticket stuck in `blocked` for 60 minutes actually calls you. It does not collect reports and does not close anything. `maxOpen` defaults to 8, and `done` / `dropped` do not count.
+**The sweep only reminds; it never edits tickets.** Once every 10 seconds by default (`sweepMs`): unread reports, finished rounds, and long-running tickets are just a line of state in front of the main session, withdrawn once that ticket has been looked at; only a ticket stuck in `blocked` for 60 minutes actually calls you. It does not collect reports and does not close anything. `maxExec` defaults to 8 and `maxQueued` to 4, counted as two separate books; `done` / `dropped` do not count.
 
 **MCP tools must be named one by one.** The main session keeps only the whitelist, MCP tools are not in it, and there is no wildcard: add each registered name to `extraRouterTools`. A typo costs a warning line, not the whitelist.
 
@@ -87,6 +94,7 @@ Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The fi
 ```sh
 pnpm install
 pnpm test       # vitest
+pnpm coverage   # vitest run --coverage, v8 provider
 pnpm run typecheck
 pnpm run build  # tsdown → lib/
 ```

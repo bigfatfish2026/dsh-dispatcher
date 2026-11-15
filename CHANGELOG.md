@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.2.1 - 2026-11-15
+
+### Added
+
+2026-11-15 — 探路声明成了票上意图的唯一入口：`dispatch_open` 不再收 `intent` / `probe`，每张票一律先起只读探路子会话，它用新工具 `dispatch_declare` 交 `plan`（摘要 + 文件清单）和 `intent`（writes / reads / impact / reversibility / dryRun / undo），票号不给、按调用者反查自己名下那张票，只追加不碰状态；收尾用新工具 `dispatch_touch` 报这一轮实际动过的文件，按路径合并，关票时对账。资源串认 `file:` / `dir:` / `git:` / `svc:` / `port:` / `dev:` 六个前缀，`git` 自动补仓库根；脏串（`cmd:`、`http:`、带说明的端口）只降级并 warn，不打断判定。探路窗口 2 分钟，到点没声明就转 `planned` 并标 `degraded`，投一轮「直接干、干完补声明」的任务书；交过的 `plan` 摘要（200 字）与前 8 个文件（每个一句）写进执行轮任务书，执行子会话不用重新摸边界。
+
+冲突判定落在 `src/tickets/conflict.ts`：同一资源强冲突，`dir` 祖孙与 `svc` / `port` / `dev` 同类判 weak，同 repo 不同 worktree 按 git 两模式判（都没声明 worktree 算强冲突、各声明不同 worktree 降回文件级）；撞资源的票进 `phase=queued` 排队，由票台按 FIFO 放行，`status=blocked` 从此只表示「等人拍板」。
+
+### Changed
+
+2026-11-15 — 生命周期收口：巡检每拍补一次漏唤醒兜底（对手票终态 / 不在日志 / worker 不在活表就放行）、排队超过 15 分钟放掉原 worker 并在放行时新起一只、越界除回执外经 notifier 推一句、删掉 189 行无调用者的 `src/zombie.ts` 与 21 条测试。`apply()` 拆成五个安装器（Prompt / Store / Restrict / Tools / Desk），1420 行收到 171 行；协议常量与配置默认值单点化到 `src/protocol.ts` / `src/defaults.ts`，工具名、状态与相位、写类工具名单、`34/20/60` 和名额默认值不再各写一份。接入 v8 覆盖率（`pnpm coverage`），cli 的兜底告警跟着走默认值。这 18 条里 apply 拆分与大纲同步那 6 条落在 `v2.2.1` tag 之后，一并记在本条目，下次发版不再重复记。
+
+### Fixed
+
+2026-11-15 — 三个审计点：`delivered` 在 `phase=planning` 时不再把票推成 `running`（否则 idle 不落 `idled`、不派执行轮，只能等探路降级兜底）；`dispatch_report` 改成和 `declare` / `touch` 同一套归属反查，别人的票写不进来；planned 的票补兜底放行，探路轮 idle 不再静默。等待守卫改从 `tools` 服务取，不再吃不到工具面。
+
+### Docs
+
+2026-11-15 — `docs/revert-ledger.md` 落地（intent 入口从 `dispatch_open` 挪到 `dispatch_declare`）；README 中英两版同步探路窗口、`phase` 与长短等、`maxExec` / `maxQueued` 两本账和 `pnpm coverage`；`docs/sequences.py` 重画四张时序图，open 图补「探路 → declare → 放行」，lifecycle 图补「`queued` 排队」。
+
+Tests: 69 个文件 745 条全绿，`tsc --noEmit` 干净，`pnpm run build` 通过。
+
+## 2.2.0 - 2026-11-09
+
+### Added
+
+2026-11-09 — 票事件写入走 dsh-events，直写路径保留作退化：`TicketLog` 在 commit 时惰性探测 `events` 服务，拿到就用、拿不到回直写，探测结果只缓存服务对象、不缓存「暂时没有」；publish 带上票号，`foldTicket` 不再翻 payload 兜底。
+
+巡检换驱动源：`dispatcher.sweep.tick` 定义并订阅，`schedule` 服务在时注册规则，注册成功才停自己的 `setInterval`；schedule 不在、注册被拒、tick 断流三条路各自回落并留一行日志。另挂 `internal/service` 监听，schedule 就绪当场 reconcile，监听器整只包 try/catch（dsh-events 的 emit 不兜错，抛出来会弄挂 timer 的 apply）。
+
+### Fixed
+
+2026-11-09 — `clock.setInterval` 改成 unref；schedule 缺席时日志按情况分开写，watchdog 在监听挂着却一次事件没收到时从 3 个周期收紧到 10 分钟，并顺手用 `schedule.list()` 核一遍规则还在不在。
+
+### Changed
+
+2026-11-09 — 许可证统一为 MIT，版权人改为蓝色大肥鱼。
+
+Tests: 全量 `pnpm test` 与 `tsc --noEmit` 全绿；当时条数未单独记账，2.2.1 收在 69 个文件 745 条。
+
 ## 2.1.1 - 2026-11-09
 
 ### Changed

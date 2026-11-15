@@ -20,7 +20,7 @@
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-2.0.0.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-2.2.1.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 
@@ -52,10 +52,14 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 | `dispatch_block` | 主会话 | 等人拍板时把票挂起，写清在等什么 |
 | `dispatch_close` | 主会话 | 收工：`done` 交活、`dropped` 不干了；排队消息作废、子会话停掉 |
 | `dispatch_report` | 子会话 | 交一份报告，只追加一行，改不了票的状态 |
+| `dispatch_declare` | 子会话 | 探路轮交 `plan` 和 `intent`；票号不用给，按调用者反查自己名下那张票，只追加不碰状态 |
+| `dispatch_touch` | 子会话 | 报这一轮实际动过的文件，关票时对账；按路径合并，同样不能写到别人的票上 |
 | `dispatch_log_action` | 主会话、子会话 | 记一步动作账：干了什么、怎么撤；只追加，不碰状态 |
 | `progress_note` | 手工 | 一行进度直接推到手机，不叫醒会话、不写盘 |
 
-开票只带 `origin`（谁提的）。`intent`（会碰哪些路径/服务/远端、能不能撤、预演过没过）和 `probe` 都不收：每张票一律先探路，没有不探路的快路径。第一轮子会话只有只读工具（没有 `write` / `edit` / `bash`），读完代码自己用 `dispatch_declare` 交 `plan` 和 `intent`，票台才放行执行。形状和审计细节在 [docs/revert-ledger.md](docs/revert-ledger.md)。
+开票只带 `origin`（谁提的）。`intent`（会碰哪些路径/服务/远端、能不能撤、预演过没过）和 `probe` 都不收：每张票一律先探路，没有不探路的快路径。第一轮子会话只有只读工具（没有 `write` / `edit` / `bash`），读完代码自己用 `dispatch_declare` 交 `plan` 和 `intent`，票台才放行执行。
+
+探路窗口默认 2 分钟：到点还没等到声明就降级——票转 `planned`、标 `degraded`，投一轮「直接干、干完补一份声明」的任务书，不把票卡死在探路里。交上来的 `plan` 不会白交：摘要（200 字）和前 8 个文件（每个一句说明）写进执行轮任务书，执行子会话照着边界干，不用重新摸一遍。形状和审计细节在 [docs/revert-ledger.md](docs/revert-ledger.md)。
 
 ### 怎么填 `goal` 和 `brief`
 
@@ -68,6 +72,8 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ![一张票的完整生命周期（中文版）](docs/dispatcher-seq-lifecycle.zh.png)
 
 六个状态：`open`、`running`、`waiting`、`blocked`、`done`、`dropped`。前四个算还开着；`waiting` 只是子会话那个会话停了，不代表交活——交没交活看票里有没有报告。
+
+状态之外还有相位 `phase`：`planning` 是只读探路轮、`planned` 是声明交了等放行、`queued` 是撞了资源在排队、`running` 是正常干。`queued` 和 `blocked` 长得像，语义不一样：`blocked` 只表示等人拍板，只由主会话写；`queued` 表示在等资源，由票台自己写。排队分长短两档：超过 15 分钟算长等，把原来的子会话放掉，放行时新起一只、任务书带着上一轮的 `plan`；15 分钟以内算短等，子会话留着不动，省一次冷启动。
 
 ## 注意事项
 
@@ -88,6 +94,7 @@ dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```sh
 pnpm install
 pnpm test       # vitest
+pnpm coverage   # vitest run --coverage，v8 provider
 pnpm run typecheck
 pnpm run build  # tsdown → lib/
 ```

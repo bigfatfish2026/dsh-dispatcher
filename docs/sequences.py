@@ -224,8 +224,8 @@ def _legend(ax, x, y, w, items, note, head):
 # ---------------------------------------------------------------- 文案（zh / en）
 LANG = {
     "zh": {
-        "open_title": "dsh-dispatcher 2.0 一次派活：router 只递一句话，选档、建票、spawn 全在票台里",
-        "open_sub": "从左到右是一条调用链：M 只调一个工具，票台负责校验、选档、记账，日志只追加；下面 15 步是这条链上的实际顺序",
+        "open_title": "dsh-dispatcher 2.2 一次派活：router 只递一句话，选档、建票、spawn 全在票台里",
+        "open_sub": "从左到右是一条调用链：M 只调一个工具，票台负责校验、选档、记账，日志只追加；下面 20 步是这条链上的实际顺序（12-17 是探路、declare 与放行）",
         "open_lanes": [
             ("router agent", "主会话 M", BLUE_FC, BLUE),
             ("dispatch_open", "工具壳（唯一入口）", VIOLET_FC, VIOLET),
@@ -248,19 +248,26 @@ LANG = {
             (9, "S", "D", "sync", "childId + messageId", "同步 · 首条 prompt 已进 inbox，原子"),
             (10, "D", "LG", "async", "commit(spawned, running, workerId)", "异步"),
             (11, "D", "R", "sync", "回执：票号 + status + openCount", "同步 · 没有 workerId"),
-            (12, "S", "W", "async", "worker 开始跑（首条 prompt）", "异步 · 不阻塞回执"),
-            (13, "L", "D", "fail", "超时 / 报错 / 返回空 / 名单外的档", "回落 config.defaultPreset，presetSource='fallback'，照走"),
-            (14, "C", "D", "fail", "resolve 失败：档名不在 config.presets", "不报错，同样回落默认档，建票继续"),
-            (15, "S", "D", "fail", "reject（容量 / 深度 / 取消）", "commit(spawn-failed)，票停在 open，工具把原文抛给模型"),
+            (12, "S", "W", "async", "worker 跑探路轮（只读，无写工具）", "异步 · 不阻塞回执"),
+            (13, "W", "T", "sync", "dispatch_declare(plan, intent)", "同步 · 票号不给，按会话反查自己那张票"),
+            (14, "T", "D", "sync", "append(declared) + 冲突判定", "同步 · 只追加，不碰 status"),
+            (15, "D", "LG", "async", "commit(declared → planned / queued)", "异步 · 一直没声明就 2 分钟后降级"),
+            (16, "D", "S", "sync", "startTask：plan 摘要 + intent 进执行轮任务书", "同步 · 这一步就是放行"),
+            (17, "D", "LG", "async", "commit(resumed → running)", "异步 · 同一张票，号不变"),
+            (18, "L", "D", "fail", "超时 / 报错 / 返回空 / 名单外的档", "回落 config.defaultPreset，presetSource='fallback'，照走"),
+            (19, "C", "D", "fail", "resolve 失败：档名不在 config.presets", "不报错，同样回落默认档，建票继续"),
+            (20, "S", "D", "fail", "reject（容量 / 深度 / 取消）", "commit(spawn-failed)，票停在 open，工具把原文抛给模型"),
         ],
         "open_notes": [
             "票是先落盘、再 spawn：7 的 published(open) 一定早于 8 的 startActivation，所以不存在「spawn 了但票里没它」的窗口。",
+            "探路窗口默认 2 分钟：13 步一直没来就降级——票转 planned 并标 degraded，直接投一轮「干完补声明」，不静默放行。",
+            "13 步交的 plan 在 16 步进任务书：摘要前 200 字、前 8 个文件各一句，执行子会话看得见边界，越界对账才有依据。",
             "选档失败只是一次降级——4/5 挂了照样往 7 走；只有 8 的 seam reject 才让票停在 open（可重试、可关，不删票）。",
             "参数里没有 preset：router 想指定也只是建议，判定结果和来源（llm / static / fallback）写进票里，router 从 dispatch_list 看得到。",
         ],
         "open_boundary": "router 只看 ticket，worker 对它透明：回执里没有 workerId",
-        "life_title": "dsh-dispatcher 2.0 一张票的完整生命周期：票号从头到尾不变，只有 dispatch_close 能收工",
-        "life_sub": "同一张票 t-xxxx 上先后发生的所有事：交活 → 读报告 → 再派活 → 卡住/解封 → 巡检提醒 → 收工；22 步，最后一步是收工后再派活被拒",
+        "life_title": "dsh-dispatcher 2.2 一张票的完整生命周期：票号从头到尾不变，只有 dispatch_close 能收工",
+        "life_sub": "同一张票 t-xxxx 上先后发生的所有事：交活 → 读报告 → 再派活 → 排队/放行 → 卡住/解封 → 巡检提醒 → 收工；24 步，最后一步是收工后再派活被拒",
         "life_lanes": [
             ("router agent", "主会话 M", BLUE_FC, BLUE),
             ("dispatch_* 工具", "send / read / block / close / list", VIOLET_FC, VIOLET),
@@ -284,22 +291,25 @@ LANG = {
             (11, "R", "T", "sync", "dispatch_send(id, text)", "同步"),
             (12, "T", "D", "sync", "投递（活 agent 直接投，死了冷启动）", "同步 · 走 ctx.subagents.sendMessage"),
             (13, "D", "LG", "async", "commit(resumed, epoch+1) + delivered → running", "异步 · 票号不变、epochReports 归零"),
-            (14, "R", "T", "sync", "dispatch_block(id, reason)", "同步 · reason 非空"),
-            (15, "D", "LG", "async", "commit(blocked)", "异步 · workerAlive 原样保留"),
-            (16, "R", "T", "sync", "dispatch_send(id, text)：解封", "同步"),
-            (17, "D", "LG", "async", "投递成功 → commit(resumed) → running", "异步 · 投不进去就留在 blocked"),
-            (18, "D", "N", "async", "每 10 秒巡一遍：四类事实", "异步 · 报告到了 / 干完没交报告 / waiting / running，只读不改票"),
-            (19, "N", "R", "async", "只有 blocked 超过阈值才发一条带 [sweep] 的提醒", "异步 · 其余事实只进动态上下文，不打扰人"),
-            (20, "R", "T", "sync", "dispatch_close(id, 'done')", "同步 · 唯一终态入口"),
-            (21, "D", "LG", "async", "commit(closed(done))，作废未投递消息", "异步 · 活着的 child 一并 dispose"),
-            (22, "R", "T", "fail", "done 票上再 dispatch_send", "拒绝、一行不写，回「票已收工，需要继续请开新票」"),
+            (14, "D", "LG", "async", "commit(queued)：撞资源排队，status 不动", "异步 · 8+4 两本账，排队单独数"),
+            (15, "D", "S", "async", "前票收工 → 按 FIFO 放行，投或新起执行轮", "异步 · 排超过 15 分钟先放掉原 worker"),
+            (16, "R", "T", "sync", "dispatch_block(id, reason)", "同步 · reason 非空"),
+            (17, "D", "LG", "async", "commit(blocked)", "异步 · workerAlive 原样保留"),
+            (18, "R", "T", "sync", "dispatch_send(id, text)：解封", "同步"),
+            (19, "D", "LG", "async", "投递成功 → commit(resumed) → running", "异步 · 投不进去就留在 blocked"),
+            (20, "D", "N", "async", "每 10 秒巡一遍：四类事实", "异步 · 报告到了 / 干完没交报告 / waiting / running，只读不改票"),
+            (21, "N", "R", "async", "只有 blocked 超过阈值才发一条带 [sweep] 的提醒", "异步 · 其余事实只进动态上下文，不打扰人"),
+            (22, "R", "T", "sync", "dispatch_close(id, 'done')", "同步 · 唯一终态入口"),
+            (23, "D", "LG", "async", "commit(closed(done))，作废未投递消息", "异步 · 活着的 child 一并 dispose"),
+            (24, "R", "T", "fail", "done 票上再 dispatch_send", "拒绝、一行不写，回「票已收工，需要继续请开新票」"),
         ],
         "life_notes": [
             "整张图都是同一张票 t-xxxx：进 waiting 不前、进 blocked 不再开票、解封回 running 也不换号——只有 dispatch_close 能把它写成 done / dropped。",
             "waiting 是静息态不是终态：workerAlive=true 表示叫得醒，=false 表示人已经结束（send 走冷启动），但票还是同一张。",
-            "巡检（18-19）和 dispatch_report（1-2）都不改 status：每 10 秒只把四类事实读出来写进动态上下文，只有 blocked 过阈值才发一条 [sweep] 提醒。",
-            "22 号是唯一被拒的动作：done / dropped 上 dispatch_send 一律拒绝、一行不写；「重开」这条边在 2.0 里不存在。",
-            "票状态一路走过：open → running → waiting → running → blocked → running → done；没有重开，因为收工就是收工。",
+            "14-15 的 queued 只写相位：撞资源的票 status 还是 running，名额单独记在 maxQueued 那本账上；排队超过 15 分钟算长等，放行时新起一只。",
+            "巡检（20-21）和 dispatch_report（1-2）都不改 status：每 10 秒只把四类事实读出来写进动态上下文，只有 blocked 过阈值才发一条 [sweep] 提醒。",
+            "24 号是唯一被拒的动作：done / dropped 上 dispatch_send 一律拒绝、一行不写；「重开」这条边在 2.2 里不存在。",
+            "票状态一路走过：open → running → waiting → running → queued → running → blocked → running → done；没有重开，因为收工就是收工。",
         ],
         "legend_head": "怎么读这张图",
         "legend_items": [
@@ -309,8 +319,8 @@ LANG = {
         ],
     },
     "en": {
-        "open_title": "dsh-dispatcher 2.0 · one dispatch: the router sends a sentence, the desk picks the preset, opens the ticket and spawns",
-        "open_sub": "Left to right is one call chain: M calls a single tool, the desk validates, picks the preset and records; the log is append-only. The 15 steps below are the real order",
+        "open_title": "dsh-dispatcher 2.2 · one dispatch: the router sends a sentence, the desk picks the preset, opens the ticket and spawns",
+        "open_sub": "Left to right is one call chain: M calls a single tool, the desk validates, picks the preset and records; the log is append-only. The 20 steps below are the real order (12-17 are the probe, declare and release)",
         "open_lanes": [
             ("router agent", "main session M", BLUE_FC, BLUE),
             ("dispatch_open", "tool shell (only entry)", VIOLET_FC, VIOLET),
@@ -333,19 +343,26 @@ LANG = {
             (9, "S", "D", "sync", "childId + messageId", "sync · first prompt already in the inbox"),
             (10, "D", "LG", "async", "commit(spawned, running, workerId)", "async"),
             (11, "D", "R", "sync", "reply: ticket id + status + openCount", "sync · no workerId"),
-            (12, "S", "W", "async", "the worker starts (first prompt)", "async · does not block the reply"),
-            (13, "L", "D", "fail", "timeout / error / empty / unknown preset", "fall back to config.defaultPreset, presetSource='fallback'"),
-            (14, "C", "D", "fail", "resolve fails: preset not in config.presets", "no error — same fallback, the ticket still opens"),
-            (15, "S", "D", "fail", "reject (capacity / depth / cancelled)", "commit(spawn-failed), ticket stays open, the error text goes to the model"),
+            (12, "S", "W", "async", "worker starts the probe round (read-only)", "async · does not block the reply"),
+            (13, "W", "T", "sync", "dispatch_declare(plan, intent)", "sync · no ticket id — the desk finds this worker's ticket"),
+            (14, "T", "D", "sync", "append(declared) + conflict judgement", "sync · append only, status untouched"),
+            (15, "D", "LG", "async", "commit(declared → planned / queued)", "async · no declaration in 2 minutes and the ticket degrades"),
+            (16, "D", "S", "sync", "startTask: plan summary + intent into the task brief", "sync · this is the release"),
+            (17, "D", "LG", "async", "commit(resumed → running)", "async · same ticket, same id"),
+            (18, "L", "D", "fail", "timeout / error / empty / unknown preset", "fall back to config.defaultPreset, presetSource='fallback'"),
+            (19, "C", "D", "fail", "resolve fails: preset not in config.presets", "no error — same fallback, the ticket still opens"),
+            (20, "S", "D", "fail", "reject (capacity / depth / cancelled)", "commit(spawn-failed), ticket stays open, the error text goes to the model"),
         ],
         "open_notes": [
             "The ticket is written before the spawn: step 7's published(open) always precedes step 8's startActivation, so there is no window with a worker but no ticket.",
+            "The probe window is 2 minutes: if step 13 never arrives the ticket degrades — it moves to planned, is marked degraded, and gets one \"just do it, declare afterwards\" round instead of a silent release.",
+            "The plan from step 13 goes into the brief at step 16: the 200-character summary and the first 8 files, one line each, so the working fish can see its own boundary.",
             "A preset failure is only a downgrade — steps 4/5 can fail and step 7 still runs; only a seam reject at step 8 leaves the ticket in open (retryable, closable, never deleted).",
             "No preset argument: the router may suggest one, but the decision and its source (llm / static / fallback) are stored on the ticket and visible via dispatch_list.",
         ],
         "open_boundary": "the router only sees the ticket; the worker is invisible to it — the reply has no workerId",
-        "life_title": "dsh-dispatcher 2.0 · one ticket's whole life: the id never changes, and only dispatch_close can close it",
-        "life_sub": "Everything that happens to the same ticket t-xxxx: hand off → read reports → hand off again → block / unblock → sweep reminders → close. 22 steps, the last one rejected",
+        "life_title": "dsh-dispatcher 2.2 · one ticket's whole life: the id never changes, and only dispatch_close can close it",
+        "life_sub": "Everything that happens to the same ticket t-xxxx: hand off → read reports → hand off again → queue / release → block / unblock → sweep reminders → close. 24 steps, the last one rejected",
         "life_lanes": [
             ("router agent", "main session M", BLUE_FC, BLUE),
             ("dispatch_* tools", "send / read / block / close / list", VIOLET_FC, VIOLET),
@@ -369,22 +386,25 @@ LANG = {
             (11, "R", "T", "sync", "dispatch_send(id, text)", "sync"),
             (12, "T", "D", "sync", "deliver (live agent) or cold-start (dead one)", "sync · via ctx.subagents.sendMessage"),
             (13, "D", "LG", "async", "commit(resumed, epoch+1) + delivered → running", "async · same id, epochReports reset"),
-            (14, "R", "T", "sync", "dispatch_block(id, reason)", "sync · reason required"),
-            (15, "D", "LG", "async", "commit(blocked)", "async · workerAlive untouched"),
-            (16, "R", "T", "sync", "dispatch_send(id, text) → unblock", "sync"),
-            (17, "D", "LG", "async", "delivered → commit(resumed) → running", "async · stays blocked if delivery fails"),
-            (18, "D", "N", "async", "sweep every 10 s: four kinds of facts", "async · new report / no report yet / waiting / running — reads only"),
-            (19, "N", "R", "async", "only when blocked is past its threshold: one ping tagged [sweep]", "async · every other fact just lands in the dynamic context"),
-            (20, "R", "T", "sync", "dispatch_close(id, 'done')", "sync · the only way into a final state"),
-            (21, "D", "LG", "async", "commit(closed(done)), pending messages dropped", "async · a live child is disposed too"),
-            (22, "R", "T", "fail", "dispatch_send on a done ticket", "refused, nothing written: open a new one"),
+            (14, "D", "LG", "async", "commit(queued): waiting on a resource, status untouched", "async · exec and queue are two separate books"),
+            (15, "D", "S", "async", "previous ticket closes → FIFO release", "async · past 15 minutes the old worker is released first"),
+            (16, "R", "T", "sync", "dispatch_block(id, reason)", "sync · reason required"),
+            (17, "D", "LG", "async", "commit(blocked)", "async · workerAlive untouched"),
+            (18, "R", "T", "sync", "dispatch_send(id, text) → unblock", "sync"),
+            (19, "D", "LG", "async", "delivered → commit(resumed) → running", "async · stays blocked if delivery fails"),
+            (20, "D", "N", "async", "sweep every 10 s: four kinds of facts", "async · new report / no report yet / waiting / running — reads only"),
+            (21, "N", "R", "async", "only when blocked is past its threshold: one ping tagged [sweep]", "async · every other fact just lands in the dynamic context"),
+            (22, "R", "T", "sync", "dispatch_close(id, 'done')", "sync · the only way into a final state"),
+            (23, "D", "LG", "async", "commit(closed(done)), pending messages dropped", "async · a live child is disposed too"),
+            (24, "R", "T", "fail", "dispatch_send on a done ticket", "refused, nothing written: open a new one"),
         ],
         "life_notes": [
             "Every lane is the same ticket t-xxxx: waiting does not move it forward, blocked does not open a second one, unblocking returns to running without a new id — only dispatch_close writes done / dropped.",
             "waiting is a rest state, not a final one: workerAlive=true means it can be woken, =false means the worker ended (send cold-starts it), but it is still the same ticket.",
-            "Neither the sweep (18-19) nor dispatch_report (1-2) changes status: every 10 s the sweep only reads four facts into the dynamic context, and only blocked past its threshold sends a [sweep] ping.",
-            "22 is the only refused call: on done / dropped, dispatch_send always refuses and writes nothing; there is no reopen edge in 2.0.",
-            "Statuses on the way: open → running → waiting → running → blocked → running → done. No reopen, because closed is closed.",
+            "14-15 are queued: a ticket waiting on a resource keeps status running, and the quota is counted on the separate maxQueued book; past 15 minutes it becomes a long wait and a fresh worker is started on release.",
+            "Neither the sweep (20-21) nor dispatch_report (1-2) changes status: every 10 s the sweep only reads four facts into the dynamic context, and only blocked past its threshold sends a [sweep] ping.",
+            "24 is the only refused call: on done / dropped, dispatch_send always refuses and writes nothing; there is no reopen edge in 2.2.",
+            "Statuses on the way: open → running → waiting → running → queued → running → blocked → running → done. No reopen, because closed is closed.",
         ],
         "legend_head": "How to read this",
         "legend_items": [
@@ -399,8 +419,8 @@ LANG = {
 # ---------------------------------------------------------------- 图一：一次派活
 def draw_seq_open(lang):
     t = LANG[lang]
-    W, H = 2600, 1900
-    fig, ax = canvas(W, H, (26, 19.0))
+    W, H = 2600, 2340
+    fig, ax = canvas(W, H, (26, 23.4))
 
     txt(ax, 48, H - 36, t["open_title"], fs=19, weight="bold")
     txt(ax, 48, H - 66, t["open_sub"], fs=10.0, color=MUTED)
@@ -411,18 +431,18 @@ def draw_seq_open(lang):
     pitch = (W - 120 - bw) / (n - 1)
     xs = [60 + bw / 2 + i * pitch for i in range(n)]
     for (name, sub, fc, ec), x in zip(lanes, xs):
-        _lane(ax, x, bw, name, sub, fc, ec, 1808, 300)
+        _lane(ax, x, bw, name, sub, fc, ec, H - 92, 300)
 
     pos = dict(zip(("R", "T", "D", "C", "L", "S", "W", "LG"), xs))
 
     # router / 票台之间的边界
     bx = xs[0] + 92
-    path(ax, [(bx, 1740), (bx, 420)], color="#9aa7b3", lw=1.5, ls=(0, (6, 4)))
-    txt(ax, bx + 12, 404, t["open_boundary"], fs=8.4, color=MUTED, max_w=900)
+    path(ax, [(bx, H - 160), (bx, 470)], color="#9aa7b3", lw=1.5, ls=(0, (6, 4)))
+    txt(ax, bx + 12, 454, t["open_boundary"], fs=8.4, color=MUTED, max_w=900)
 
-    y = 1700
+    y = H - 200
     for num, a, b, kind, l1, l2 in t["open_rows"]:
-        if num == 13:
+        if num == 18:
             y -= 30
         _msg(ax, num, pos[a], pos[b], y, l1, l2, kind)
         y -= 86
@@ -439,8 +459,8 @@ def draw_seq_open(lang):
 # ---------------------------------------------------------------- 图二：一张票的生命周期
 def draw_seq_life(lang):
     t = LANG[lang]
-    W, H = 2600, 2320
-    fig, ax = canvas(W, H, (26, 23.2))
+    W, H = 2600, 2490
+    fig, ax = canvas(W, H, (26, 24.9))
 
     txt(ax, 48, H - 36, t["life_title"], fs=19, weight="bold")
     txt(ax, 48, H - 66, t["life_sub"], fs=10.0, color=MUTED)
@@ -451,13 +471,13 @@ def draw_seq_life(lang):
     pitch = (W - 120 - bw) / (n - 1)
     xs = [60 + bw / 2 + i * pitch for i in range(n)]
     for (name, sub, fc, ec), x in zip(lanes, xs):
-        _lane(ax, x, bw, name, sub, fc, ec, 2228, 320)
+        _lane(ax, x, bw, name, sub, fc, ec, H - 92, 320)
 
     pos = dict(zip(("R", "T", "D", "S", "W", "LG", "N"), xs))
 
-    y = 2110
+    y = H - 210
     for num, a, b, kind, l1, l2 in t["life_rows"]:
-        if num == 18:
+        if num == 20:
             y -= 30
         _msg(ax, num, pos[a], pos[b], y, l1, l2, kind)
         y -= 82
