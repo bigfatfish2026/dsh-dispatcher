@@ -6,10 +6,10 @@
  *
  * | 前缀  | 例子                               | 含义                          |
  * | ----- | ---------------------------------- | ----------------------------- |
- * | file: | file:/home/user/fatfish/a.md      | 单个文件的写                  |
- * | dir:  | dir:/home/user/fatfish/tmp        | 整目录操作（rm/mv/tar/rsync） |
- * | git:  | git:/home/user/dev/dsh-dispatcher | 一个 git 工作树（不是 remote）|
- * | svc:  | svc:dsh-example                      | systemd 单元                  |
+ * | file: | file:/srv/app/data/a.md             | 单个文件的写                  |
+ * | dir:  | dir:/srv/app/tmp                   | 整目录操作（rm/mv/tar/rsync） |
+ * | git:  | git:/srv/app/dsh-dispatcher        | 一个 git 工作树（不是 remote）|
+ * | svc:  | svc:example-service                | systemd 单元                  |
  * | port: | port:61208                         | 监听/占用端口                 |
  * | dev:  | dev:/dev/fb1                       | 屏幕、串口这类设备节点        |
  *
@@ -126,7 +126,7 @@ function messageOf(value: string): string {
  * 拆前缀。前缀大小写不敏感，值原样返回（`file:` 后面可能带相对路径）。
  *
  * 没有前缀、前缀不认识、值为空都抛错：资源串是要落进票里的东西，宁可当场拒绝，
- * 也别把一个 `a/b` 当成 file: 存进去——求交时它和 `file:/home/x/a/b` 不相等。
+ * 也别把一个 `a/b` 当成 file: 存进去——求交时它和 `file:/srv/app/a/b` 不相等。
  */
 export function parseResource(raw: string): ParsedResource {
   if (typeof raw !== 'string') throw new Error('资源串必须是字符串')
@@ -271,7 +271,7 @@ export function normalizeResource(raw: string, options: ResourceOptions = {}): s
  * 宽容版归一化：认不出来的资源串记下来继续扫，不抛。
  *
  * 判定路径用它——历史票里出现过 `cmd:dsh --profile…`、`http:docs.deepseek.com`、
- * `port:192.0.2.10:8080 (example-gateway gateway)` 这类写法；一张脏票不该让整轮判定挂掉。
+ * `port:192.0.2.10:8080 (with a note)` 这类写法；一张脏票不该让整轮判定挂掉。
  * 写入口（declare/touch）仍用严格的 `normalizeResources`，新数据先拒掉。
  */
 export function scanResources(raw: readonly string[], options: ResourceOptions = {}): ResourceScan {

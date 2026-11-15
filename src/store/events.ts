@@ -4,7 +4,7 @@
  * 这一层只有类型、类型守卫和「一行是哪一类事件」的判定；不认识时间、
  * 不认识 IO，也不认识 TicketDesk。折叠在 `reducer.ts`，落盘与投影在 `log.ts`。
  *
- * 2026-11-04 起事件是带 `kind` 的判别联合（设计文档 §2/§3.1）。2026-11-04 之前
+ * 此前事件是带 `kind` 的判别联合（设计文档 §2/§3.1）。早期版本
  * 写的行没有 `kind`：它们仍是合法事件，由 `legacyKindOf` 归类、由 reducer 里
  * 那条原封不动的老折叠路径读。两种行共存是常态，不是过渡期的脏数据。
  */
@@ -150,7 +150,7 @@ export interface TicketSnapshot {
   /**
    * One-line summary of the goal, for the little screen's second line: at most
    * `BRIEF_MAX_COLUMNS` character columns. Optional because tickets written before
-   * 2026-11-02 have no such field — readers fall back to `briefOf()`, which
+   * earlier versions have no such field — readers fall back to `briefOf()`, which
    * derives the same thing from `goal`.
    */
   brief?: string
@@ -159,7 +159,7 @@ export interface TicketSnapshot {
   note?: string
   /**
    * Human label for the worker (what the little screen shows). 老票里是
-   * `t4 查qqbot PR`；新票不再要求调用方写它，由 desk 按档名 + goal 生成。
+   * `t4 查 example PR`；新票不再要求调用方写它，由 desk 按档名 + goal 生成。
    */
   owner?: string
   /**
@@ -173,7 +173,7 @@ export interface TicketSnapshot {
    * 的两张票 createdAt 一模一样，靠它将 FIFO 定死（老代码在这儿退化成按 id
    * 字典序）。
    *
-   * 2026-11-13 之前的老票没有这一栏，读起来是 undefined；排序退回 createdAt
+   * 早期版本的老票没有这一栏，读起来是 undefined；排序退回 createdAt
    * 升序、再按 id 兜底，448 张线上票照常能读能排。
    *
    * 跟 `store/sqlite.ts` 里 `events.seq`（事件在日志里的行号）是两码事：那个
@@ -325,7 +325,7 @@ export interface Published extends EventBase {
    * 现有最大 seq + 1」，写进事件也就是写进日志——重启后重放能拿回同一个值，
    * 新开的票接着最大值往下数，不会从 1 重来。
    *
-   * 2026-11-13 之前的建票行没有这一栏；折叠出来的老票 seq 就是 undefined。
+   * 早期版本的建票行没有这一栏；折叠出来的老票 seq 就是 undefined。
    */
   seq?: number
   dir?: string
@@ -341,7 +341,7 @@ export interface Published extends EventBase {
    */
   origin?: TicketOrigin
   /**
-   * 开票意图。2026-11-14 起 `dispatch_open` 不再收 intent，这个键只出现在
+   * 开票意图。此前 `dispatch_open` 不再收 intent，这个键只出现在
    * 老日志里；新票的意图走 `declared` 事件，reducer 折叠时照样认这一栏。
    */
   intent?: IntentSpec
@@ -450,7 +450,7 @@ export interface Planning extends EventBase {
   kind: 'planning'
   /** 探路子会话的档名（只读档），审计用。 */
   preset?: string
-  /** 探路那只子会话的 sessionId；回收探路轮时认它。 */
+  /** 探路那个子会话的 sessionId；回收探路轮时认它。 */
   workerId?: string
 }
 
@@ -525,7 +525,7 @@ export interface LegacyStatus extends EventBase {
 }
 
 /**
- * 2026-11-04 之前的一行：没有 `kind`，状态、排队、报告、已读全塞在同一形状里。
+ * 早期版本的一行：没有 `kind`，状态、排队、报告、已读全塞在同一形状里。
  * 字段一个不改，原样回放；`legacyKindOf` 负责把它归到今天的广播类别。
  */
 export interface LegacyTicketEvent {
@@ -611,7 +611,7 @@ export function isTicketEvent(value: unknown): value is TicketEvent {
   return event.kind === undefined || typeof event.kind === 'string'
 }
 
-/** 这条事件是带 kind 的新事件，还是 2026-11-04 之前的老行。 */
+/** 这条事件是带 kind 的新事件，还是 早期版本的老行。 */
 export function isKindedEvent(event: TicketEvent): event is KindedTicketEvent {
   return typeof (event as { kind?: unknown }).kind === 'string'
 }
@@ -620,7 +620,7 @@ export function isKindedEvent(event: TicketEvent): event is KindedTicketEvent {
  * 老行是哪一类事件：状态行、排队、报告、已读、建票。
  *
  * 名字带 legacy 是有意的：新事件由 `kindOf` 直接读 `kind`，这个函数只负责把
- * 没有 `kind` 的行推成今天的广播类别，行为必须和 2026-11-04 之前完全一样。
+ * 没有 `kind` 的行推成今天的广播类别，行为必须和 早期版本完全一样。
  */
 export function legacyKindOf(event: LegacyTicketEvent): TicketEventKind {
   if (event.delivered) return 'delivered'
@@ -635,14 +635,14 @@ export function legacyKindOf(event: LegacyTicketEvent): TicketEventKind {
 /**
  * 任意一行事件在总线上的类别。
  *
- * 2026-11-04 的新事件刻意折回老的五个类别（published→open，其余状态类→status，
+ * 新事件刻意折回老的五个类别（published→open，其余状态类→status，
  * queued→input，reported→report，delivered→delivered）：广播形状不变，现有
  * 监听器一条分支都不用改。
  *
  * `action-logged` 归 `report`：它和报告一样只追加数组、不动状态，监听器按
  * 「有新内容了」处理就够；`gated` 归 `status`，因为它确实换了状态。
  *
- * 2026-11-12 的三个探路 / 对账事件：`declared` 与 `touch-reported` 都只追加
+ * 三个探路 / 对账事件：`declared` 与 `touch-reported` 都只追加
  * 内容、不动状态，归 `report`；`planning` 同理不动状态，但它标的是「探路轮
  * 开始」这一件事，落到类别上只能是 `status`（广播类别只有五种，不为它扩）。
  */

@@ -25,7 +25,7 @@ import { SqliteTicketStore } from './sqlite'
  */
 export interface TicketBackend {
   /**
-   * 这份日志的身份，给日志行和诊断用：`/home/user/.dsh/dispatcher/tickets.jsonl`
+   * 这份日志的身份，给日志行和诊断用：`$DSH_HOME/dispatcher/tickets.jsonl`
    * 或者 `redis://127.0.0.1:6379/3`。人看得懂就行。
    */
   readonly location: string

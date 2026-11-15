@@ -4,7 +4,7 @@ import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
 
 /**
  * 巡检事实的出口是 `system-prompt/assemble` 上挂的一段动态上下文：宿主把它渲染成
- * runtime-context 快照，主会话看见的是「环境近况」，不是维护者发来的消息。所以
+ * runtime-context 快照，主会话看见的是「环境近况」，不是使用方发来的消息。所以
  * 这里查两件事——主会话一条 followup 都没收到；快照里有票号，读过之后又没了。
  */
 
@@ -132,13 +132,13 @@ describe('巡检事实走快照，不走消息', () => {
     const host = mountPlugin()
     const id = await openTicket(host)
 
-    await host.call('dispatch_block', { id, reason: '等维护者定 go/no-go' })
+    await host.call('dispatch_block', { id, reason: '等使用方定 go/no-go' })
     await host.settled()
 
     expect(host.agents[0]!.messages).toHaveLength(0)
     const text = await sweepText(host)
     expect(text).toContain(id)
-    expect(text).toContain('等维护者定 go/no-go')
+    expect(text).toContain('等使用方定 go/no-go')
     expect(text).toContain('挂起')
     // 主会话看到的是人话，不是内部枚举名。
     expect(text).not.toContain('blocked')

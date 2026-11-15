@@ -74,7 +74,7 @@ function declaredTicket(): string {
         files: [{ path: 'src/tickets/resources.ts', what: '归一化函数' }],
       },
       intent: {
-        impact: { paths: ['file:/home/user/dev/dsh-dispatcher/src/tickets/resources.ts'] },
+        impact: { paths: ['file:/srv/work/dsh-dispatcher/src/tickets/resources.ts'] },
         reversibility: 'auto',
         undo: { kind: 'git', howto: 'git checkout -- src/tickets/resources.ts' },
       },
@@ -101,7 +101,7 @@ describe('intent / plan 从工具里读得回来', () => {
     const row = output.tickets.find((ticket) => ticket.id === 't-plan')!
     expect(row.plan?.summary).toBe('新增 resources.ts 并补测试')
     expect(row.plan?.files?.map((file) => file.path)).toEqual(['src/tickets/resources.ts'])
-    expect(row.intent?.impact?.paths).toEqual(['file:/home/user/dev/dsh-dispatcher/src/tickets/resources.ts'])
+    expect(row.intent?.impact?.paths).toEqual(['file:/srv/work/dsh-dispatcher/src/tickets/resources.ts'])
     expect(row.intent?.reversibility).toBe('auto')
     expect(row.intent?.undo?.kind).toBe('git')
     // 状态仍只由主会话的动作写：planning / declared / touch-reported 都不改它。
@@ -116,7 +116,7 @@ describe('intent / plan 从工具里读得回来', () => {
     const text = renderOf(host, 'dispatch_list', output)
     expect(text).toContain('open（待放行）：资源串归一化')
     expect(text).toContain('plan：新增 resources.ts 并补测试（src/tickets/resources.ts）')
-    expect(text).toContain('intent：paths file:/home/user/dev/dsh-dispatcher/src/tickets/resources.ts')
+    expect(text).toContain('intent：paths file:/srv/work/dsh-dispatcher/src/tickets/resources.ts')
     expect(text).toContain('reversibility auto')
   })
 

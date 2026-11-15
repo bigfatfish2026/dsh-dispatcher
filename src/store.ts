@@ -9,14 +9,13 @@ import type {
   TicketEntry,
   TicketSnapshot,
   TicketStatus,
-  TouchReported,
 } from './store/events'
 
 // 后端在这一层之后：门面只认 TicketBackend 那四个原语（load / changed / append /
 // location），jsonl 的文件细节（O_APPEND、补换行、坏行跳过）全在
 // `store/jsonl.ts`。换 redis/sqlite 时这个文件一行不用改。
 //
-// 2026-11-04 拆成三层：事件类型在 `store/events.ts`，纯 fold 在
+// 事件模型拆成三层：事件类型在 `store/events.ts`，纯 fold 在
 // `store/reducer.ts`，读写与投影在 `store/log.ts`。这个文件只剩「门面 + 与票
 // 无关的小工具」（brief 宽度、时间换算、待投递过滤）。TicketStore 的方法一个
 // 没少——删 `update({status})` 是第三期的事。
@@ -69,7 +68,7 @@ export type { EntryKind } from './store/events'
 export { fold, foldEvents } from './store/reducer'
 
 // brief 宽度的默认值在 `defaults.ts`（可配置默认值的唯一来源）：34 列 = 17 个
-// 汉字，依据 2026-11-02 小屏实测（第二行 10px 字号、可用宽 172px）。这里只 import
+// 汉字，依据 小屏实测（第二行 10px 字号、可用宽 172px）。这里只 import
 // 给 truncateColumns / deriveBrief 的默认参数用，不再另开一份导出。
 
 /** The ellipsis is wide (U+2026), so it costs 2 columns of the budget. */
@@ -127,8 +126,7 @@ const NO_WORDS = /^[\s\p{P}\p{S}]*$/u
 
 /**
  * Whether a brief says nothing: not a string, empty, whitespace-only, or made
- * only of punctuation and symbols. `dispatch_open` rejects all of these — since
- * 2026-11-03 the field is required, and a "。" line is as blank as "".
+ * only of punctuation and symbols. `dispatch_open` rejects all of these — the field is required, and a "。" line is as blank as "".
  */
 export function briefIsBlank(brief: unknown): boolean {
   if (typeof brief !== 'string') return true
@@ -140,7 +138,7 @@ export function briefIsBlank(brief: unknown): boolean {
  * Derive a short summary from a goal: first sentence, no edge punctuation,
  * whitespace collapsed, truncated to the column cap.
  *
- * Since 2026-11-03 `dispatch_open` requires an explicit brief, so this has one
+ * `dispatch_open` requires an explicit brief, so this has one
  * caller left: readers of tickets written before the field existed (`briefOf`).
  * A goal that starts with punctuation ("！… ") would split to an empty first
  * sentence, so the cleaned whole goal is the fallback — an empty string would

@@ -110,7 +110,7 @@ describe('重启接着数', () => {
 describe('老票没有 seq', () => {
   it('仍按 createdAt 升序、同一时刻按 id 兜底', () => {
     const backend = new MemoryBackend()
-    // 2026-11-04 之前的老行：没有 kind，也没有 seq。
+    // 早期版本的老行：没有 kind，也没有 seq。
     const legacy: TicketEvent[] = [
       { id: 't-b', at: '2026-10-01T00:00:00.000Z', goal: '乙', status: 'open' },
       { id: 't-0', at: '2026-09-30T00:00:00.000Z', goal: '更早', status: 'open' },

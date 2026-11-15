@@ -32,9 +32,9 @@ describe('拆资源串', () => {
   it('六种前缀都认，值原样取出来', () => {
     expect(parseResource('file:/a/b.md')).toEqual({ kind: 'file', value: '/a/b.md' })
     expect(parseResource('dir:/a/b')).toEqual({ kind: 'dir', value: '/a/b' })
-    expect(parseResource('git:/home/user/dev/dsh-dispatcher')).toEqual({
+    expect(parseResource('git:/srv/work/dsh-dispatcher')).toEqual({
       kind: 'git',
-      value: '/home/user/dev/dsh-dispatcher',
+      value: '/srv/work/dsh-dispatcher',
     })
     expect(parseResource('svc:dsh-example')).toEqual({ kind: 'svc', value: 'dsh-example' })
     expect(parseResource('port:61208')).toEqual({ kind: 'port', value: '61208' })
@@ -187,9 +187,9 @@ describe('git 根探测与自动补全（A5，假 fs）', () => {
 
 describe('脏资源串：宽容扫描不抛（历史票兜底）', () => {
   const SHAPES = [
-    ['cmd:dsh --profile qqbot --dump-config', '命令不是资源'],
+    ['cmd:dsh --profile example --dump-config', '命令不是资源'],
     ['http:docs.deepseek.com', 'http 不是资源前缀'],
-    ['port:192.0.2.10:8080 (example-gateway gateway, group/ds)', '端口写法不合法'],
+    ['port:192.0.2.10:8080 (with a note)', '端口写法不合法'],
     ['', '空串'],
   ] as const
 

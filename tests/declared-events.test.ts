@@ -42,7 +42,7 @@ const declared: Declared = {
     ],
   },
   intent: {
-    impact: { paths: ['file:/home/user/dev/dsh-dispatcher/src/tickets/resources.ts'] },
+    impact: { paths: ['file:/srv/work/dsh-dispatcher/src/tickets/resources.ts'] },
     reversibility: 'auto',
   },
 }

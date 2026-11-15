@@ -8,34 +8,14 @@
  *
  * 也没有第二条队列：`serialize` 就是这个文件里那条 `ticketQueue`，desk 拿着它跑。
  */
-import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { Config, DEFAULT_HANDOFF_POLICY, legacySweepWarning, resolveSweepMs, routerAllowList } from './config'
+import { Config, DEFAULT_HANDOFF_POLICY } from './config'
 import type { Config as ConfigShape } from './config'
-import { truncateColumns } from './store'
-import type { Actor, ConflictWait, IntentSpec, TicketOrigin, TicketPlan, TicketStatus } from './store'
 import type { WorkerTicketTools } from './tickets/worker-tools'
-import { createDesk } from './tickets/desk'
-import type { Serialize, TicketView } from './tickets/desk'
-import { createLlmClassifier } from './tickets/classify'
-import type { LlmService } from './tickets/classify'
-import { createNotifier } from './tickets/notify'
-import { createSweepFacts } from './tickets/sweep-facts'
-import { attachServiceWatch, createSweepDriver } from './tickets/sweep-driver'
-import type { SweepDriver, SweepEventsService, SweepScheduleService } from './tickets/sweep-driver'
-import { realClock } from './tickets/clock'
-import type { PresetCatalog } from './tickets/publish'
-import { parseToolsetDocument } from './tickets/preset-guard'
-import type { PresetTools } from './tickets/preset-guard'
-import type { SubagentSeam } from './tickets/workers'
-import { bindRouter } from './router'
-import type { RouterAgent, RouterBinding } from './router'
-import { isWorkerSession } from './no-wait'
+import type { SweepDriver } from './tickets/sweep-driver'
 import { installTools } from './installers/tools'
 import { installDesk } from './installers/desk'
 import { installStore } from './installers/store'
-import { createWorkerPlane } from './installers/workplane'
 import { installRestrict } from './installers/restrict'
 import { installPromptGuard } from './installers/prompt'
 
@@ -98,36 +78,6 @@ function probed<T>(ctx: Context, name: string): T | undefined {
   }
 }
 
-interface AgentLike {
-  session?: { id?: string; header?: { origin?: string } }
-  status?: string
-  followup?: (message: unknown) => Promise<unknown>
-}
-
-interface AgentsService {
-  list(): AgentLike[]
-  get?: (id: string) => AgentLike | undefined
-}
-
-interface PresetRow {
-  id?: string
-  name?: string
-  description?: string
-}
-
-interface PresetRegistry {
-  list?: () => Promise<PresetRow[]>
-  /** 注册表自己认的默认档。 */
-  defaultId?: string
-  composedPreset?: (ctx: unknown) => string | undefined
-  /** 一个档的声明（plugins 的 YAML 文本）。选档守卫拿它读 allow/deny。 */
-  readDocument?: (id: string) => Promise<{ content?: string }>
-}
-
-interface AgentHeader {
-  origin?: string
-}
-
 export { intentPlanLines } from './tools-shared'
 
 export function apply(ctx: Context, config: ConfigShape): void {
@@ -139,7 +89,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
     logger?.info?.(message)
   }
 
-  const { log, readout, serialize } = installStore(ctx, config, {
+  const { log, serialize } = installStore(ctx, config, {
     warn,
     info,
     service,

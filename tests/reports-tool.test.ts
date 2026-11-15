@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { TicketStore, foldEvents, pending } from '../src/store'
+import { TicketStore, pending } from '../src/store'
 import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
 import type { FakePluginHost } from './helpers/plugin-harness'
 
@@ -224,7 +224,7 @@ describe('dispatch_read', () => {
   })
 
   it('超长正文截到 4000 字并标 truncated', async () => {
-    const long = '鱼'.repeat(4001)
+    const long = 'x'.repeat(4001)
     const file = logFile([
       { id: 't-long', at: T(0), goal: '长报告', status: 'open' },
       { id: 't-long', at: T(1), report: { id: 'l-1', text: long } },

@@ -1,17 +1,17 @@
 /**
- * 巡检提醒：票台有动静时告诉主会话，但**不再冒充维护者说话**。
+ * 巡检提醒：票台有动静时告诉主会话，但**不再冒充使用方说话**。
  *
  * 三条路：
  *
  * - 有未读报告、一轮干完没交报告、票干完/跑太久没收工 —— 记成巡检事实，走
  *   `ctx.systemPrompt.context()` 的动态上下文。宿主把它渲染成 runtime-context
- *   快照，模型看见的是环境状态，不会当成维护者发的指令回话。
+ *   快照，模型看见的是环境状态，不会当成使用方发的指令回话。
  * - 冲突排队（`blocked` 带上 `wake`）—— 记事实之外再推开票方一句；主会话不在
  *   活表里就只剩事实，下一轮 runtime context 照样看得见。人工挂起不 wake。
- * - 票挂起超过阈值（等维护者决定）—— 才真的 `followup` 一条，开头 `[sweep] `，
- *   第二句明说不是维护者在说话。这种「叫醒」只能走 user 消息，所以话得自己说清。
+ * - 票挂起超过阈值（等使用方决定）—— 才真的 `followup` 一条，开头 `[sweep] `，
+ *   第二句明说不是使用方在说话。这种「叫醒」只能走 user 消息，所以话得自己说清。
  * - 宿主没有动态上下文这一口 —— 退回唤醒，同样带 `[sweep] ` 前缀，至少不让
- *   模型把提醒当成维护者的命令。
+ *   模型把提醒当成使用方的命令。
  *
  * 所有方法都不抛：提醒失败不该让交报告、巡检这些正经事跟着失败。
  */
@@ -33,7 +33,7 @@ export interface NotifierDeps {
   /** 巡检事实表：有它就走动态上下文，没有就退回唤醒。 */
   facts?: SweepFacts
   clock?: Clock
-  /** 把话送到维护者那儿（活着的会话）。没配就是「不提醒」。 */
+  /** 把话送到使用方那儿（活着的会话）。没配就是「不提醒」。 */
   wake?: OwnerWake
   /** 巡检提醒总开关。报告到达不受它管——那是人的事，不是定时器的噪音。 */
   quiet?: boolean
@@ -139,7 +139,7 @@ export function idleText(input: IdleInput): string {
     case 'waiting-20m':
       return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」干完 ${input.sinceMinutes} 分钟了还没收工。`
     case 'blocked-60m':
-      return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」挂了 ${input.sinceMinutes} 分钟，在等维护者决定。这是巡检提醒，不是维护者在说话，看情况处理，不用回我。`
+      return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」挂了 ${input.sinceMinutes} 分钟，在等使用方决定。这是巡检提醒，不是使用方在说话，看情况处理，不用回我。`
     case 'running-90m':
       return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」跑了 ${input.sinceMinutes} 分钟还没停。`
     default:
@@ -161,13 +161,13 @@ export function conflictText(input: BlockedInput): string {
   const waits = input.waitOn ?? []
   const resources = [...new Set(waits.flatMap((wait) => wait.resources))].join('、')
   const why = resources ? `，冲突在 ${resources}` : ''
-  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」被 ${waiters(waits)} 挡住${why}，已排队等它收工后自动放行。这是票台通知，不是维护者在说话。`
+  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」被 ${waiters(waits)} 挡住${why}，已排队等它收工后自动放行。这是票台通知，不是使用方在说话。`
 }
 
 /** 放行推给开票方的那一句。 */
 export function releasedText(input: ReleasedInput): string {
   const by = input.releasedBy?.length ? `（${input.releasedBy.join('、')} 已收工）` : ''
-  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」已放行${by}，执行轮派出去了。这是票台通知，不是维护者在说话。`
+  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」已放行${by}，执行轮派出去了。这是票台通知，不是使用方在说话。`
 }
 
 export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
@@ -208,7 +208,7 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
       )
     },
     idle(input) {
-      // 只有「等维护者决定」才值得打断：其余都是主会话下一轮抬头就能看到的状态。
+      // 只有「等使用方决定」才值得打断：其余都是主会话下一轮抬头就能看到的状态。
       if (input.reason === 'blocked-60m') return send(idleText(input), true)
       return record(
         {

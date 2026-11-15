@@ -17,7 +17,7 @@ const PRESETS: PresetInfo[] = [
 const INPUT: ClassifyInput = {
   goal: '修掉登录页的闪退',
   brief: '登录页闪退',
-  dir: '/home/user/app',
+  dir: '/srv/app',
   presets: PRESETS,
 }
 
@@ -67,7 +67,7 @@ describe('prompt 拼装', () => {
     const text = buildClassifyInput(INPUT)
     expect(text).toContain('目标：修掉登录页的闪退')
     expect(text).toContain('摘要：登录页闪退')
-    expect(text).toContain('工作目录：/home/user/app')
+    expect(text).toContain('工作目录：/srv/app')
     expect(text).not.toContain('t1')
   })
 

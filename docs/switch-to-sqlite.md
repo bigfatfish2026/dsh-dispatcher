@@ -1,15 +1,16 @@
 # 切到 SQLite：操作 runbook
 
-> 目标：把 `dsh-dispatcher` 的票日志从 `tickets.jsonl` 切到 `tickets.db`，切完 CLI、指令、桌宠快照读的都是同一份 sqlite。默认值仍然是 `jsonl`——这次只改 `~/.dsh/profiles/qqbot/cordis.patch.yml`，不改代码默认值、不合并 main、不 push。
+> 目标：把 `dsh-dispatcher` 的票日志从 `tickets.jsonl` 切到 `tickets.db`，切完 CLI、指令、桌宠快照读的都是同一份 sqlite。默认值仍然是 `jsonl`——本 runbook 只改目标 profile 的覆盖配置，不改代码默认值。
 >
 > 红线：下面所有命令都是**先备份、后动手**；`tickets.jsonl` 全程只读，迁移脚本不会写它。真正改配置和重启只在 e/f 两步，由主会话点火。
 
 先设两个变量，后面都按它们走：
 
 ```bash
-REPO=/home/user/dev/dsh-dispatcher
+REPO=${REPO:-$(pwd)}
 export DSH_HOME=${DSH_HOME:-$HOME/.dsh}
-export DSH_PROFILE=${DSH_PROFILE:-qqbot}
+export DSH_PROFILE=${DSH_PROFILE:-example}
+SVC=dsh-$DSH_PROFILE
 export DSH_PROFILE_DIR=${DSH_PROFILE_DIR:-$DSH_HOME/profiles/$DSH_PROFILE}
 TS=$(date +%Y%m%d-%H%M%S)
 B="$DSH_HOME/backups/sqlite-switch-$TS"
@@ -85,13 +86,13 @@ echo "migrate rc=$?"          # 必须是 0
 
 ## e) 改配置 `store.backend: sqlite`（先备份配置）
 
-先备份 profile 配置，再停服务、装库、改配置：
+先备份 profile 配置，再停服务、装库、改配置（`$SVC` 按上面的变量）：
 
 ```bash
-cp -a "$DSH_HOME/profiles/qqbot/cordis.patch.yml" "$B/cordis.patch.yml.before"
+cp -a "$DSH_HOME/profiles/$DSH_PROFILE/cordis.patch.yml" "$B/cordis.patch.yml.before"
 
 # 由主会话点火：不要在正在跑的 agent turn 里直接 stop 自己。
-systemctl --user stop dsh-example
+systemctl --user stop "$SVC"
 
 # 装库；目标已有旧库先备份，并清掉旧 WAL/SHM（服务已停，安全）
 if [ -f "$DSH_HOME/dispatcher/tickets.db" ]; then
@@ -102,7 +103,7 @@ install -m 600 "$STAGE/tickets.db" "$DSH_HOME/dispatcher/tickets.db"
 ls -l "$DSH_HOME/dispatcher/tickets.db"
 ```
 
-然后编辑 `$DSH_HOME/profiles/qqbot/cordis.patch.yml`，在 `- id: dsh-dispatcher` 的 `config:` 下**追加**（别删原有键，patch 是整行替换不是深合并）：
+然后编辑 `$DSH_HOME/profiles/$DSH_PROFILE/cordis.patch.yml`，在 `- id: dsh-dispatcher` 的 `config:` 下**追加**（别删原有键，patch 是整行替换不是深合并）：
 
 ```yaml
     store:
@@ -112,12 +113,12 @@ ls -l "$DSH_HOME/dispatcher/tickets.db"
 
 `file` 相对路径按 `DSH_HOME` 解析；不写就按 `stateFile` 把 `.jsonl` 换成 `.db`，结果一样。代码里 `config.ts` 的默认值仍是 `jsonl`，这里只是 profile 覆盖。
 
-## f) 重启 dsh-example（由主会话点火）
+## f) 重启服务（由主会话点火）
 
 ```bash
-systemctl --user start dsh-example
+systemctl --user start "$SVC"
 # 如果前面没停过，用 restart：
-# systemctl --user restart dsh-example
+# systemctl --user restart "$SVC"
 ```
 
 改 patch 会触发 DSH 配置热重载。票台已经清零，最坏只打断当前这一轮；要稳就按上面先 stop 再改、再 start。
@@ -144,7 +145,7 @@ scripts/verify-after-switch.sh \
    能看到 `status: done`（或 `dropped`）就算通。
 2. 看日志没有 sqlite 报错：
    ```bash
-   journalctl --user -u dsh-example --since "$(systemctl --user show dsh-example -p ActiveEnterTimestamp --value)" --no-pager \
+   journalctl --user -u "$SVC" --since "$(systemctl --user show "$SVC" -p ActiveEnterTimestamp --value)" --no-pager \
      | grep -Ei 'sqlite.*(error|fail|报错|失败)|SQLITE_|database is locked|no such table'
    ```
    没有输出就是干净。
@@ -154,27 +155,14 @@ scripts/verify-after-switch.sh \
 配置改回 jsonl，库留着不动，`tickets.jsonl` 全程只读未动：
 
 ```bash
-systemctl --user stop dsh-example
-cp -a "$B/cordis.patch.yml.before" "$DSH_HOME/profiles/qqbot/cordis.patch.yml"
-systemctl --user start dsh-example
+systemctl --user stop "$SVC"
+cp -a "$B/cordis.patch.yml.before" "$DSH_HOME/profiles/$DSH_PROFILE/cordis.patch.yml"
+systemctl --user start "$SVC"
 ```
 
 起来后 `node bin/tickets.mjs tickets --json` 应回到 jsonl 的读数。注意：**切换后新开的票只在 `tickets.db` 里**，回滚到 jsonl 会把它们藏起来；要保留就先导回 jsonl（当前没有反向迁移脚本，需要另做）。库文件不要删，留着还能再切回去。
 
-## i) 抬重启验收基线
+## i) 重启后验收基线
 
-`/home/user/pending_after_restart.sh`（切换当晚写的那份一次性验收脚本）把「切换那一刻的读数」写死成基线，重启后跑它比自己比、比库是否回退。**每次切换前后动过数据就得重算这几行**，否则要么误报 FAIL，要么放过真正的回退：
+切换会改变数据形态，任何写死的「切换那一刻读数」都要在每次切换前后重算，否则要么误报 FAIL，要么放过真正的回退。基线用 `scripts/verify-after-switch.sh` 现场生成，不把某次切换的数字写进脚本头。
 
-| 常量 | 从哪读 |
-| --- | --- |
-| `BASE_SEQ` | `SELECT max(seq) FROM events` |
-| `JSONL_SIZE` / `JSONL_MTIME` | `stat -c '%s %Y' "$DSH_HOME/dispatcher/tickets.jsonl"`（冻结后这两个值不许再变） |
-| `MEMBASE_ROWS` | `node scripts/memory-query.mjs --list --json \| jq length`（在 dsh-memory 目录里跑） |
-| `MEMJSONL_SIZE` / `MEMJSONL_MTIME` | `stat -c '%s %Y' ~/fatfish/memory/memories.jsonl` |
-
-```bash
-node -e "const{DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(process.env.HOME+'/.dsh/dispatcher/tickets.db',{readOnly:true});console.log(d.prepare('select max(seq) seq,count(*) n from events').get())"
-stat -c '%s %Y' "$DSH_HOME/dispatcher/tickets.jsonl"
-```
-
-改完 `pending_after_restart.sh` 的 mtime 会挪到当下，脚本里 b 项（进程启动晚于脚本 mtime）在下次真重启前必然 FAIL，属预期——要连基线一起验就等重启之后再跑。基线和「为什么是这个数」的原因写进脚本头注释，别只留数字。

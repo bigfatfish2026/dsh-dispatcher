@@ -10,7 +10,7 @@ import { DEFAULT_COMMAND_KEYWORDS } from '../src/tickets/preset-guard'
 const BASE = {
   goal: '翻一遍仓库的历史，看看半年前那次改动',
   brief: '查仓库历史',
-  dir: '/home/user/fatfish',
+  dir: '/srv/app',
 }
 
 interface Recorded {

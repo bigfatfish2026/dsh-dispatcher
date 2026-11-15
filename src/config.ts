@@ -14,7 +14,6 @@ import {
   FRESH_MINUTES,
   MAX_EXEC,
   MAX_QUEUED,
-  LONG_WAIT_MINUTES,
   REPEAT_WINDOW_MINUTES,
   RUNNING_REMINDER_MINUTES,
   SWEEP_MS,
@@ -34,7 +33,7 @@ import type { TicketBackendName } from './store/backend'
  * on an unknown name, so the plugin checks this list against the registry when
  * it installs the filter and drops (with a warning) anything it cannot find.
  *
- * 2026-11-04 起主会话不再自己 spawn 子会话：`dispatch_open` 一步就把档、子会话、
+ * 此前主会话不再自己 spawn 子会话：`dispatch_open` 一步就把档、子会话、
  * 票都办了，所以 `subagent` / `subagent_fork` 从这里摘掉。票面七个名字（六个
  * 票工具 + 动作账本），报告正文走 dispatch_read，打点归子会话（progress_note
  * 不在任何名单里）。
@@ -69,12 +68,12 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
   // Talking to the person.
   'yuyu_face',
   'yuyu_face_list',
-  // 维护者常发图，看不见就聊不动。纯只读，不写盘。
+  // 使用方常发图，看不见就聊不动。纯只读，不写盘。
   'read_image',
   // Machine health, read-only.
   'host_status',
   'host_alerts',
-  // 宿主注册的只读文件工具。grep 2026-11-01 摘掉：输出体积不可控，一句没收住
+  // 宿主注册的只读文件工具。grep 早先摘掉：输出体积不可控，一句没收住
   // 的搜索等于按整段日志付钱；要搜内容让子会话去搜，把结果压成几行带回来。
   'read',
   'glob',
@@ -83,7 +82,7 @@ export const DEFAULT_ROUTER_TOOLS: readonly string[] = [
 /**
  * Tool names a worker subagent must not see.
  *
- * Background: since 2026-11-01 the operator's rule is that only the main session
+ * Background: the operator's rule is that only the main session
  * writes memory — a worker may `memory_recall`, never `memory_save` or anything
  * that rewrites what is remembered. `dsh-memory` enforces that at execute time
  * (its own guard, 0.3.3), so this list is a second layer of the same rule, not a
@@ -106,15 +105,15 @@ export const DEFAULT_WORKER_DENY_TOOLS: readonly string[] = [
  * text is meant to be rewritten in cordis.yml without a rebuild, and the schema
  * default has to be the same string the operator gets when they say nothing.
  *
- * 2026-11-04 重写：开票和派活合成一步（没有「先 spawn 再记票」了），交活靠票台
+ * 早先的重写把开票和派活合成一步（没有「先 spawn 再记票」了），交活靠票台
  * 自动推摘要（子会话不再 send_message 喊人），终态票不收消息。
  */
 export const DEFAULT_HANDOFF_POLICY = `【派活规矩 · dispatcher】主会话的活是及时回话，长活交给子会话。
-下面任一条成立就 dispatch_open 派出去，别自己耗着：要等三十秒以上（编译、下载、批处理）、要跑好几轮才收（全量测试、多轮调研、翻资料比对）、维护者正等着而活一时半会儿完不了。
+下面任一条成立就 dispatch_open 派出去，别自己耗着：要等三十秒以上（编译、下载、批处理）、要跑好几轮才收（全量测试、多轮调研、翻资料比对）、使用方正等着而活一时半会儿完不了。
 都不成立就自己干：改一两处、查一眼状态、只有我能拍板的。
 dispatch_open 一步到位：它自己挑档、自己起子会话、自己记票，回执给票号。别自己 spawn 子会话——主会话手上已经没有那个工具了。
-对子会话的称呼就是「子会话」。跟维护者说话时提到执行任务的子会话，一律写「子会话」，不许用「她」「它」「那只」「agent」这些第三人称；同时有多只在跑就写「几只子会话」。这是硬规则，不是建议。
-票号写进任务里让子会话用 dispatch_report 交活；维护者中途追加的话用 dispatch_send 进票，别转述丢了。
+对子会话的称呼就是「子会话」。跟使用方说话时提到执行任务的子会话，一律写「子会话」，不许用「她」「它」「那只」「agent」这些第三人称；同时有多只在跑就写「几个子会话」。这是硬规则，不是建议。
+票号写进任务里让子会话用 dispatch_report 交活；使用方中途追加的话用 dispatch_send 进票，别转述丢了。
 交活是自动的：报告一到就会有一句摘要推过来，要看正文用 dispatch_read。
 票成了 done 或 dropped 就是收工了，不许再拿 dispatch_send 往里塞话——要接着干就开新票。
 子会话卡住会在报告里说清卡点，票挂在 waiting / blocked 上等你：决定下一步用 dispatch_block 挂起、dispatch_send 回话、dispatch_close 收工。
@@ -178,7 +177,7 @@ export interface Config {
    * 先剔掉（「不许跑命令」不算）。表可改，命中词会写进日志。
    */
   commandKeywords: string[]
-  /** 选档一致性校验的总开关。默认开；关掉就回到 2026-11-04 之前的裸选。 */
+  /** 选档一致性校验的总开关。默认开；关掉就回到早先的裸选。 */
   rejectOnMismatch: boolean
   /** 传给 `startActivation` 的 provider 名。 */
   provider: string
@@ -340,7 +339,7 @@ export const Config: Schema<Config> = Schema.object({
   rejectOnMismatch: Schema.boolean()
     .default(true)
     .description(
-      'Master switch for the preset consistency guard. true: reject a ticket whose preset cannot do the work (missing bash while the task needs commands, or a preset outside allowedPresets). false: no check, no rejection — the pre-2026-11-04 behaviour.',
+      'Master switch for the preset consistency guard. true: reject a ticket whose preset cannot do the work (missing bash while the task needs commands, or a preset outside allowedPresets). false: no check, no rejection — the pre-guard behaviour.',
     ),
   provider: Schema.string()
     .default('spawn')
@@ -363,11 +362,11 @@ export const Config: Schema<Config> = Schema.object({
     .description(
       'Deprecated: the quota is split into maxExec and maxQueued. Kept so older profiles still load; it no longer limits anything, execution falls back to the maxExec default of 8.',
     ),
-  // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（2026-11-02 小屏实测）。
+  // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（小屏实测）。
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)
     .description(
-      'Longest ticket brief, measured in character columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字, measured 2026-11-02. dispatch_open requires a brief and rejects a blank one.',
+      'Longest ticket brief, measured in character columns: a CJK character counts 2, a half-width one 1. The default (34) is 17 汉字, measured on a small screen. dispatch_open requires a brief and rejects a blank one.',
     ),
   sweepMs: Schema.number()
     .min(500)
@@ -458,8 +457,8 @@ export const Config: Schema<Config> = Schema.object({
       'Drop every tool-guidance section (tool:*, mcp:*, mcp-resource-servers) from a worker subagent system prompt. A worker tool set comes from its preset, so a static section can never match it. Main sessions are untouched, and the escape file still turns it off.',
     ),
   notifyScript: Schema.string()
-    .default('/home/user/fatfish/notify.sh')
-    .description('Script used by progress_note to push one line to the person on QQ; it owns the openid.'),
+    .default(process.env.DSH_NOTIFY_SCRIPT ?? '')
+    .description('Script used by progress_note to push one line to the recipient on QQ; it owns the openid. Empty means pushes are disabled; set it explicitly or via DSH_NOTIFY_SCRIPT.'),
   notifyTimeoutMs: Schema.natural()
     .default(5000)
     .description('Hard cap on one progress push in milliseconds; the child is killed and the tool returns sent=false.'),

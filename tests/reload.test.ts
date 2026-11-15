@@ -214,7 +214,7 @@ function fakeHost() {
 }
 
 describe('plugin reload', () => {
-  // The 2026-11-01 incident: a reload replaced the plugin fiber but the old
+  // An earlier incident: a reload replaced the plugin fiber but the old
   // restrict/guard/prompt hooks stayed on the agent scopes, the new whitelist
   // intersected with the old one, and changing the config did nothing.
   it('lifts every restriction it put on an agent scope when the plugin goes away', () => {

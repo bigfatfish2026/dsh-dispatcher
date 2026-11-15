@@ -420,7 +420,7 @@ export interface StartWorkerInput {
 }
 
 /**
- * 派一只子会话并把 `spawned` 落盘。开票和放行重投共用这一份，失败路径跟
+ * 派一个子会话并把 `spawned` 落盘。开票和放行重投共用这一份，失败路径跟
  * `publishTicket` 原来那段一字不差：先落 `spawn-failed` 让票面留原因，再抛；
  * 派出去却记账失败就 abort 那只 worker 再抛——没有事务，只有补偿。
  */

@@ -7,7 +7,7 @@ import { TicketStore } from '../src/store'
 import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
 import type { FakePluginHost } from './helpers/plugin-harness'
 
-const BASE = '/home/user/dev/dsh-dispatcher'
+const BASE = '/srv/work/dsh-dispatcher'
 const SRC = `${BASE}/src/index.ts`
 const REDUCER = `${BASE}/src/store/reducer.ts`
 const EVENTS = `${BASE}/src/store/events.ts`

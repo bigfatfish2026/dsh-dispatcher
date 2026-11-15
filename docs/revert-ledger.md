@@ -2,16 +2,16 @@
 
 路线 3 的落地说明：说清「这一票会碰什么、能不能撤、撤不回来怎么退」，干活时每一步都记一笔，结票后按天巡检缺口。目标是让主会话派活前有得看、出事时有得查，而不是事后凭记忆。
 
-2026-11-14 起，intent 不再由主会话在 `dispatch_open` 里填，也没有 `probe` 开关：每张票一律先探路，子会话用 `dispatch_declare` 交 plan 和 intent，没交声明就不进执行轮。这个文件描述的字段形状不变，变的只是入口。
+当前，intent 不由主会话在 `dispatch_open` 里填，也没有 `probe` 开关：每张票一律先探路，子会话用 `dispatch_declare` 交 plan 和 intent，没交声明就不进执行轮。这个文件描述的字段形状不变，变的只是入口。
 
-设计原文在 `/home/user/fatfish/docs/dispatcher-revert-design.md`，这里是它在 dsh-dispatcher 里的样子。
+实现散在 `src/tickets/resources.ts`、`src/tickets/revert.ts` 与 `src/tickets/desk.ts`。
 
 ## 票上的 origin 与 intent
 
 `origin` 由开票写进 `published`；`intent` 由探路子会话写进 `declared`。两个都是可以缺省的字段：老票不写这两个键，读出来和以前一模一样。
 
 - `origin`：`dispatch_open` 的 `origin` 参数，缺省按 `main`。
-- `intent`：`dispatch_declare` 的 `intent` 参数；2026-11-14 之前也从 `dispatch_open` 收，老日志里那些 `published.intent` 仍然照常折叠、照常可读，只是不再新写。
+- `intent`：`dispatch_declare` 的 `intent` 参数；早期版本也从 `dispatch_open` 收，老日志里那些 `published.intent` 仍然照常折叠、照常可读，只是不再新写。
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -57,7 +57,7 @@
 合格的样子：
 
 ```
-cp /home/user/dev/dsh-dispatcher/cordis.patch.yml.bak /home/user/dev/dsh-dispatcher/cordis.patch.yml
+cp /srv/work/dsh-dispatcher/cordis.patch.yml.bak /srv/work/dsh-dispatcher/cordis.patch.yml
 git revert abc1234
 systemctl --user restart dsh-example
 ```
@@ -66,7 +66,7 @@ systemctl --user restart dsh-example
 
 ## 开票不再有闸
 
-`dispatch_open` 以前在写任何字节之前跑 `checkRevertIntent`：ego 提 `none` 拒、`manual` 没合格指南拒、`dryRun.ok === false` 降级成 `waiting`。2026-11-14 起 open 不收 intent，这道闸随参数一起删了——没有 intent 可判，也没有「开票时降级」这条路。
+`dispatch_open` 以前在写任何字节之前跑 `checkRevertIntent`：ego 提 `none` 拒、`manual` 没合格指南拒、`dryRun.ok === false` 降级成 `waiting`。现在 open 不收 intent，这道闸随参数一起删了——没有 intent 可判，也没有「开票时降级」这条路。
 
 现在不可撤的动作是「记账 + 事后审计」：子会话在 `dispatch_declare` 里写 `reversibility: none`，主会话在 `dispatch_list` 的 `intent` 行里看见；结票后审计把 `none`、缺指南、指南是空话的票列出来。拦在开票前变成看在那里，不是不管。
 

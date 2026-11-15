@@ -69,7 +69,7 @@ describe('CLI 在 jsonl / sqlite 两后端上输出一致', () => {
     ['--json', '--open-only'],
     ['--json', '--recent', '5'],
     ['--json', '--recent', '0'],
-    ['--json', '--id', 't-mvxeoo0z-i5ab'],
+    ['--json', '--id', 't-fix00001-0001'],
     ['--json', '--id', 't-does-not-exist'],
     ['--open-only'],
     ['--recent', '3'],

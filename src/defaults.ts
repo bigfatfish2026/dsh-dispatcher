@@ -13,13 +13,13 @@
 /** 票日志默认位置；相对路径按 DSH_HOME 解析。 */
 export const DEFAULT_STATE_FILE = 'dispatcher/tickets.jsonl'
 
-/** 默认后端。2026-11-04 这轮仍保持 jsonl，切换由 profile 配置决定。 */
+/** 默认后端。当前仍保持 jsonl，切换由 profile 配置决定。 */
 export const DEFAULT_STORE_BACKEND = 'jsonl'
 
 /** `store.file` 默认空串 = 跟着 stateFile 换后缀（tickets.jsonl → tickets.db）。 */
 export const DEFAULT_STORE_FILE = ''
 
-/** 票面 brief 的默认列宽：一个汉字占两列，34 列 = 17 个汉字（2026-11-02 小屏实测）。 */
+/** 票面 brief 的默认列宽：一个汉字占两列，34 列 = 17 个汉字（小屏实测）。 */
 export const BRIEF_MAX_COLUMNS = 34
 
 /** 巡检三档：waiting 20 分钟、blocked 60 分钟提醒一次；running 默认不催。 */
@@ -32,7 +32,7 @@ export const PROBE_TIMEOUT_MINUTES = 2
 /**
  * 排队长短等的分界：超过这么多分钟就放掉原 worker，放行时新起一只。
  *
- * 取值依据 2026-11-14 的历史票实测：票自身耗时 P50 6.4 分钟、P90 16.7 分钟；
+ * 取值依据 历史票实测：票自身耗时 P50 6.4 分钟、P90 16.7 分钟；
  * 5 分钟会把 59/68 的等待票一进队就判长等，短等保留上下文那条就废了。
  */
 export const LONG_WAIT_MINUTES = 15

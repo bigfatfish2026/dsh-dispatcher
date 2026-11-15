@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process'
  * The script owns the openid and the token exchange; the plugin keeps no second
  * copy of either.
  */
-export const DEFAULT_NOTIFY_SCRIPT = '/home/user/fatfish/notify.sh'
+export const DEFAULT_NOTIFY_SCRIPT = process.env.DSH_NOTIFY_SCRIPT ?? ''
 
 /** A push must never hold a turn: the child is killed at this point. */
 export const DEFAULT_TIMEOUT_MS = 5000
@@ -52,6 +52,7 @@ export function sendProgress(text: string, options: ProgressOptions = {}): Promi
   if (!message) return Promise.resolve({ sent: false })
 
   const script = options.script ?? DEFAULT_NOTIFY_SCRIPT
+  if (!script) return Promise.resolve({ sent: false })
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   return new Promise<ProgressResult>((resolve) => {

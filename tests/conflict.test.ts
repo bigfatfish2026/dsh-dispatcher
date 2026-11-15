@@ -14,11 +14,11 @@ describe('强冲突：两边都写同一个资源', () => {
 
   it('同一个 git 路径', () => {
     const verdict = judgeConflict(
-      side(['git:/home/user/dev/dsh-dispatcher']),
-      side(['git:/home/user/dev/dsh-dispatcher']),
+      side(['git:/srv/work/dsh-dispatcher']),
+      side(['git:/srv/work/dsh-dispatcher']),
     )
     expect(verdict.level).toBe('strong')
-    expect(verdict.resources).toEqual(['git:/home/user/dev/dsh-dispatcher'])
+    expect(verdict.resources).toEqual(['git:/srv/work/dsh-dispatcher'])
   })
 
   it('git 路径互为祖先后代，两个方向都判强', () => {

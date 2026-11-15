@@ -51,7 +51,7 @@
   },
   "packageManager": "pnpm@11.7.0",
   "license": "MIT",
-  "author": "蓝色大肥鱼 <bigfatfish2026@163.com>",
+  "author": "bigfatfish2026",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -61,7 +61,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/bigfatfish2026/dsh-dispatcher.git"
+    "url": "git+https://github.com/bigfatfish2026/dsh-dispatcher.git"
   },
   "homepage": "https://github.com/bigfatfish2026/dsh-dispatcher#readme",
   "bugs": {

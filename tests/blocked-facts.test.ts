@@ -1,6 +1,6 @@
 /**
  * 挂起那一刻要留一条事实：主会话下一回合在 runtime context 里就该看见，
- * 不是等鱼来报，也不能靠 `progress_note` / `followup` 往会话里塞消息。
+ * 不是等子会话来报，也不能靠 `progress_note` / `followup` 往会话里塞消息。
  *
  * 这里查三件事——挂起当场有；收工以后没了；冲突排队被放行后也没了。
  */
@@ -50,10 +50,10 @@ describe('挂起留一条事实', () => {
     const { h, facts } = setup()
     const { id } = await h.desk.open(INTENT, h.main)
 
-    await h.desk.block(id, '等维护者拍板')
+    await h.desk.block(id, '等使用方拍板')
     const text = facts.text()
     expect(text).toContain(`票 ${id}`)
-    expect(text).toContain('等维护者拍板')
+    expect(text).toContain('等使用方拍板')
     expect(text).toContain('挂起')
     // 中文一行，别把内部枚举名漏给主会话。
     expect(text).not.toContain('blocked')

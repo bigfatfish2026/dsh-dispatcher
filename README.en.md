@@ -6,13 +6,13 @@ A dispatch plugin for DeepSeek Harness: the main session stays in the conversati
 
 ## The idea
 
-The scarcest thing the main session has is a fast reply. The moment it buries itself in a task, whoever is waiting on the other end just waits. This plugin moves long work out of the session and onto a **ticket**: the main session says "open a ticket", the plugin picks a preset, starts a **fish** (a subagent session), records the ticket in the log, and hands control straight back — the conversation continues while the work happens in another session.
+The scarcest thing the main session has is a fast reply. The moment it buries itself in a task, whoever is waiting on the other end just waits. This plugin moves long work out of the session and onto a **ticket**: the main session says "open a ticket", the plugin picks a preset, starts a **worker subagent**, records the ticket in the log, and hands control straight back — the conversation continues while the work happens in another session.
 
-The ticket is the single source of truth: who is working, how far along, whether anything was delivered. You read it instead of scrolling back through chat. A fish can only append reports to a ticket; it cannot change status. Status is written by the main session, or by host events when the fish's session ends. So "someone is still waiting" is never decided by a session that no longer exists.
+The ticket is the single source of truth: who is working, how far along, whether anything was delivered. You read it instead of scrolling back through chat. A worker can only append reports to a ticket; it cannot change status. Status is written by the main session, or by host events when the worker's session ends. So "someone is still waiting" is never decided by a session that no longer exists.
 
 ![A single dispatch, step by step (English)](docs/dispatcher-seq-open.en.png)
 
-The figure is one call chain: the main session calls `dispatch_open` once, the desk picks a preset, validates, opens the ticket and spawns the fish, then hands back the ticket id and status — the reply carries no workerId, so the main session reads the ticket, not the fish.
+The figure is one call chain: the main session calls `dispatch_open` once, the desk picks a preset, validates, opens the ticket and spawns the worker, then hands back the ticket id and status — the reply carries no workerId, so the main session reads the ticket, not the worker.
 
 ## Using it
 
@@ -45,41 +45,41 @@ The full key list, defaults, and the event model live in [docs/internals.en.md](
 
 | Tool | Who calls it | What it does |
 |---|---|---|
-| `dispatch_open` | main session | Open a ticket in one step: pick a preset, start a fish, write the ticket; returns its id and the open count |
-| `dispatch_send` | main session | Append a message for the fish; delivered now if it is idle, queued otherwise |
-| `dispatch_read` | main session | Read reports the fish left behind and mark them read; omit `id` for every ticket with unread reports |
+| `dispatch_open` | main session | Open a ticket in one step: pick a preset, start a worker, write the ticket; returns its id and the open count |
+| `dispatch_send` | main session | Append a message for the worker; delivered now if it is idle, queued otherwise |
+| `dispatch_read` | main session | Read reports the worker left behind and mark them read; omit `id` for every ticket with unread reports |
 | `dispatch_list` | main session | List tickets: `!` gone quiet, `»n` messages not yet received, `«n` reports not yet read |
 | `dispatch_block` | main session | Park a ticket while a person decides something |
-| `dispatch_close` | main session | Finish it: `done` when the work landed, `dropped` when abandoned; queued messages are voided and the fish is stopped |
-| `dispatch_report` | fish | Hand back a report; append-only, it cannot change status |
-| `dispatch_declare` | fish | Declare `plan` and `intent` in the probe round; no ticket id — the desk finds the ticket this worker owns, and nothing but an append happens |
-| `dispatch_touch` | fish | Report the files actually touched this round, reconciled when the ticket closes; merged by path, still scoped to the caller's own ticket |
-| `dispatch_log_action` | main session, fish | Log one side-effecting step and how to undo it; append-only, never touches status |
+| `dispatch_close` | main session | Finish it: `done` when the work landed, `dropped` when abandoned; queued messages are voided and the worker is stopped |
+| `dispatch_report` | worker | Hand back a report; append-only, it cannot change status |
+| `dispatch_declare` | worker | Declare `plan` and `intent` in the probe round; no ticket id — the desk finds the ticket this worker owns, and nothing but an append happens |
+| `dispatch_touch` | worker | Report the files actually touched this round, reconciled when the ticket closes; merged by path, still scoped to the caller's own ticket |
+| `dispatch_log_action` | main session, worker | Log one side-effecting step and how to undo it; append-only, never touches status |
 | `progress_note` | manual | Push one line of progress to the phone without waking a session or touching disk |
 
-`dispatch_open` takes optional `origin` (who opened it). It takes neither `intent` (paths/services/remotes touched, reversibility, dry-run result) nor `probe`: every ticket starts with a probe round, and there is no path that skips it. The first fish has no `write` / `edit` / `bash`, reads the code and hands `plan` plus `intent` back with `dispatch_declare` before the desk lets it run. Shape and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
+`dispatch_open` takes optional `origin` (who opened it). It takes neither `intent` (paths/services/remotes touched, reversibility, dry-run result) nor `probe`: every ticket starts with a probe round, and there is no path that skips it. The first worker has no `write` / `edit` / `bash`, reads the code and hands `plan` plus `intent` back with `dispatch_declare` before the desk lets it run. Shape and audit details live in [docs/revert-ledger.md](docs/revert-ledger.md).
 
-The probe window is 2 minutes: if no declaration arrives by then the ticket degrades — it moves to `planned`, is marked `degraded`, and gets one "just do it, declare afterwards" task brief instead of sitting in the probe round forever. A declaration is never wasted: the plan summary (200 characters) and the first 8 files (one line each) go into the execution-round brief, so the working fish does not have to rediscover its own boundaries.
+The probe window is 2 minutes: if no declaration arrives by then the ticket degrades — it moves to `planned`, is marked `degraded`, and gets one "just do it, declare afterwards" task brief instead of sitting in the probe round forever. A declaration is never wasted: the plan summary (200 characters) and the first 8 files (one line each) go into the execution-round brief, so the worker does not have to rediscover its own boundaries.
 
 ### Filling in `goal` and `brief`
 
-Write `goal` in full, in the requester's own words. The fish cannot see the main session's context or what the person just said. Put the ticket id in there (it needs it for `dispatch_report`), along with any progress-reporting or delivery requirement.
+Write `goal` in full, in the requester's own words. The worker cannot see the main session's context or what the person just said. Put the ticket id in there (it needs it for `dispatch_report`), along with any progress-reporting or delivery requirement.
 
-`brief` is the one line the little screen shows under the ticket title. It is **required**, capped at 34 character columns by default (a 汉字 counts as 2, so about 17 of them), truncated with `…` when too long, and rejected if empty, whitespace-only, or punctuation-only. Write something like "qqbot PR status" — not a full sentence.
+`brief` is the one line the little screen shows under the ticket title. It is **required**, capped at 34 character columns by default (a 汉字 counts as 2, so about 17 of them), truncated with `…` when too long, and rejected if empty, whitespace-only, or punctuation-only. Write something like "example PR status" — not a full sentence.
 
 ### Ticket status
 
 ![One ticket's whole life (English)](docs/dispatcher-seq-lifecycle.en.png)
 
-Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open and occupy `maxExec`. `waiting` only means the fish's session stopped, not that work was delivered — delivery is measured by reports on the ticket.
+Six statuses: `open`, `running`, `waiting`, `blocked`, `done`, `dropped`. The first four are open and occupy `maxExec`. `waiting` only means the worker's session stopped, not that work was delivered — delivery is measured by reports on the ticket.
 
-Besides status there is a phase: `planning` is the read-only probe round, `planned` means the declaration is in and the ticket is waiting to be released, `queued` means it is waiting on a resource, and `running` is normal work. `queued` and `blocked` look alike but differ: `blocked` only means a person has to decide and is written by the main session alone, while `queued` means waiting on a resource and is written by the desk. Queueing has two bands: past 15 minutes it is a long wait — the original fish is released and a fresh one is started on release with the previous `plan` in its brief; under 15 minutes it is a short wait and the fish is kept, saving a cold start.
+Besides status there is a phase: `planning` is the read-only probe round, `planned` means the declaration is in and the ticket is waiting to be released, `queued` means it is waiting on a resource, and `running` is normal work. `queued` and `blocked` look alike but differ: `blocked` only means a person has to decide and is written by the main session alone, while `queued` means waiting on a resource and is written by the desk. Queueing has two bands: past 15 minutes it is a long wait — the original worker is released and a fresh one is started on release with the previous `plan` in its brief; under 15 minutes it is a short wait and the worker is kept, saving a cold start.
 
 ## Things to watch out for
 
 **Preset choices get rejected.** If the picked preset cannot do the work, no ticket is created: `dispatch_open` fails with an actionable error naming a replacement. Three rules, in order: the preset exists and its toolset loads, it appears in `allowedPresets`, and a task that needs commands gets a preset that actually has a command tool. The classifier also answers whether this round needs commands, with a keyword fallback when it stays quiet (negated clauses such as "do not run commands" are skipped). `rejectOnMismatch: false` turns the whole guard off.
 
-**A fish cannot write memory.** The seven memory-write tools are stripped from its schema (`memory_save`, `memory_archive`, `memory_merge`, and friends); recall stays. It has no `dispatch_block` either — when blocked it says so in a report and waits.
+**A worker cannot write memory.** The seven memory-write tools are stripped from its schema (`memory_save`, `memory_archive`, `memory_merge`, and friends); recall stays. It has no `dispatch_block` either — when blocked it says so in a report and waits.
 
 **The sweep only reminds; it never edits tickets.** Once every 10 seconds by default (`sweepMs`): unread reports, finished rounds, and long-running tickets are just a line of state in front of the main session, withdrawn once that ticket has been looked at; only a ticket stuck in `blocked` for 60 minutes actually calls you. It does not collect reports and does not close anything. `maxExec` defaults to 8 and `maxQueued` to 4, counted as two separate books; `done` / `dropped` do not count.
 
@@ -101,4 +101,4 @@ pnpm run build  # tsdown → lib/
 
 ## License
 
-[MIT License](LICENSE) © 2026 蓝色大肥鱼.
+[MIT License](LICENSE) © 2026 bigfatfish2026.

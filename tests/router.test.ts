@@ -157,7 +157,7 @@ describe('installRouter', () => {
   })
 
   it('installs nothing when every name is wrong', () => {
-    const { agent, filters, messages, log } = fakeAgent({ registered: [] })
+    const { agent, filters, log } = fakeAgent({ registered: [] })
     const outcome = installRouter(
       agent,
       { allow: ['ghost_tool'], escapeFile: join(tempDir(), 'no-restrict'), log },
@@ -298,7 +298,7 @@ describe('bindRouter', () => {
     expect(filters).toHaveLength(1)
   })
 
-  // The 2026-11-01 incident. A pass ran while dsh-memory's tools were
+  // An earlier incident. A pass ran while dsh-memory's tools were
   // momentarily unregistered (plugin reload ordering), judged those names
   // missing and installed a short whitelist. From then on the agent's own view
   // could not see them either — the restriction *we* had just installed hid
@@ -575,7 +575,7 @@ describe('worker prompt prune', () => {
       tools: [{ name: 'bash' }, { name: 'browser_navigate' }, { name: 'read_mcp_resource' }],
       sections: [
         { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.' },
-        { name: 'deployment:persona-prefix', text: '你是蓝色大肥鱼。' },
+        { name: 'deployment:persona-prefix', text: '你是测试助手。' },
         { name: 'dispatcher:handoff', text: '【派活规矩 · dispatcher】' },
         { name: 'tool:browser', text: 'Use browser_navigate to open a page.' },
         { name: 'tool:bash', text: 'Check the exit code on every bash result.' },

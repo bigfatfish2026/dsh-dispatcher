@@ -62,8 +62,8 @@ describe('存储后端选择', () => {
   })
 
   it('库文件路径推导：.jsonl → .db，别的名字追加 .db，不拿日志文件当库', () => {
-    expect(resolveDbFile('/home/user/.dsh/dispatcher/tickets.jsonl')).toBe(
-      '/home/user/.dsh/dispatcher/tickets.db',
+    expect(resolveDbFile('/srv/home/.dsh/dispatcher/tickets.jsonl')).toBe(
+      '/srv/home/.dsh/dispatcher/tickets.db',
     )
     expect(resolveDbFile('/tmp/tickets.log')).toBe('/tmp/tickets.log.db')
     expect(resolveDbFile('/tmp/tickets.db')).toBe('/tmp/tickets.db')

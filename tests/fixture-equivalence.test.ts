@@ -14,9 +14,9 @@ import type {
 } from '../src/store'
 
 /**
- * 等价性护栏，分两层——这是 2026-11-04 拆事件模型时定的口径。
+ * 等价性护栏，分两层——这是拆事件模型时定的口径。
  *
- * **第一层：老字段零容忍。** fixture 是 2026-11-04 线上日志的原样拷贝（3015 行
+ * **第一层：老字段零容忍。** fixture 是历史日志的合成样本（行数 / 票数与原样本一致）（3015 行
  * / 448 张票）。对照组是 `fixtures/legacy-fold-8fd5ea0.ts`：冻结在拆分前那一刻
  * 的 applyEvent（逐字抄自 HEAD 8fd5ea0）。拆分之后 TicketStore 自己也走新
  * reducer，拿它跟 reducer 比就成了自己比自己，所以必须有这份不动的副本。
@@ -79,7 +79,7 @@ const NEW_FIELDS = [
   'touched',
   'outOfScope',
   'actions',
-  // 2026-11-13：排队序号。老日志上的建票行没有它，折出来就是 undefined。
+  // 排队序号。老日志上的建票行没有它，折出来就是 undefined。
   'seq',
 ] as const
 
@@ -239,7 +239,7 @@ describe('等价性护栏 · 第二层：新字段在老日志上的默认值', 
       expect(ticket.touched, `${where}.touched`).toBeUndefined()
       expect(ticket.outOfScope, `${where}.outOfScope`).toBeUndefined()
       expect(ticket.actions, `${where}.actions`).toEqual([])
-      // 排队序号是 2026-11-13 才写进建票行的；老票没有，排序退回 createdAt。
+      // 排队序号是后来才写进建票行的；老票没有，排序退回 createdAt。
       expect(ticket.seq, `${where}.seq`).toBeUndefined()
     }
   })

@@ -1,7 +1,15 @@
 node_modules/
 lib/
+dist/
+coverage/
 *.tgz
 *.log
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 .env
+data/
 __pycache__/
-coverage/

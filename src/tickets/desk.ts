@@ -15,7 +15,6 @@
  * - **写盘失败和 reconcile 失败不是一回事。** `commit` 同步、会抛；抛了就让调用
  *   方看见（工具报错），不许吞掉——票和现实不一致时，人得知道。
  */
-import { dirname } from 'node:path'
 import { briefOf, isOpen, minutesSince, pending } from '../store'
 import type {
   Actor,
@@ -27,7 +26,7 @@ import type {
   TicketSnapshot,
   TicketStatus,
 } from '../store'
-import { byQueueOrder, newEntryId, newTicketId } from '../store/log'
+import { newEntryId, newTicketId } from '../store/log'
 import type { TicketLog } from '../store/log'
 import type { Clock } from './clock'
 import { realClock } from './clock'
@@ -55,7 +54,7 @@ import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
 import { outOfScopePaths } from './conflict'
 import { normalizeResources, scanResources } from './resources'
-import { TicketHandle, ticketsOfWork } from './handle'
+import { TicketHandle } from './handle'
 import { ConflictArbiter, byClaimOrder } from './arbiter'
 import { WorkerRegistry } from './registry'
 import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
@@ -66,8 +65,8 @@ import { checkPresetChoice, DEFAULT_COMMAND_KEYWORDS, PresetRejectedError } from
 import type { PresetRejection } from './preset-guard'
 import { auditClosedTickets, normalizeUndo } from './revert'
 import type { RevertAuditReport } from './revert'
-import { agentIdOf, createWorkerPool, isSameWorker, workerIdOf } from './workers'
-import type { AgentLookup, SubagentSeam, WorkerPool } from './workers'
+import { agentIdOf, createWorkerPool, workerIdOf } from './workers'
+import type { AgentLookup, SubagentSeam } from './workers'
 import { ticketView } from './view'
 import type { TicketView } from './view'
 
@@ -373,7 +372,6 @@ export class TicketDesk {
    * idle 过的那条路（t-mwgc7327-kc8h 拆掉兜底之后的真死锁），集合里有它也不会再
    * 来第二个 idle 事件，靠它就等于靠一个已经发生过、不会重来的信号。
    */
-  private readonly idleSeen = new Set<string>()
   /** 上一轮撤回审计的时刻；`undefined` = 还没跑过。 */
   private lastAuditAt: number | undefined = undefined
   /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
@@ -669,7 +667,7 @@ export class TicketDesk {
   }
 
   /**
-   * 热重载/重启后补订阅：活表里已经有这只子会话，但这一份 desk 还没按票给它挂过
+   * 热重载/重启后补订阅：活表里已经有这个子会话，但这一份 desk 还没按票给它挂过
    * 订阅。`agent/created` 那一刀会调它，找不到名下的活票就什么也不做。
    */
   adoptWorker(workerId: string | undefined): boolean {
@@ -1195,7 +1193,7 @@ export class TicketDesk {
   }
 
   /**
-   * 收工前先给这只子会话一句结束通知，再收会话。
+   * 收工前先给这个子会话一句结束通知，再收会话。
    *
    * 顺序不能反：`pool.abort` 会把会话收掉，abort 之后再推就没人接了。通知本身
    * 不抛（`watch.closed` 内部兜住），所以这里等它一下不会拖住票台的判定。
@@ -1349,7 +1347,7 @@ export class TicketDesk {
     }
   }
 
-  /** 交报告：append-only，不动状态；`worker` 来源才提醒维护者。 */
+  /** 交报告：append-only，不动状态；`worker` 来源才提醒使用方。 */
   private appendReport(ticketId: string, text: string, source: 'worker' | 'auto'): void {
     const ticket = this.log.get(ticketId)
     if (!ticket) throw new Error(`没有票 ${ticketId}`)
@@ -1463,7 +1461,7 @@ export class TicketDesk {
   private notifyReleased(ticket: TicketSnapshot): void {
     const releasedBy = (ticket.waitOn ?? []).map((wait) => wait.ticketId)
     this.forgetBlocked(ticket.id)
-    // 给被按住的那只子会话一句「已放行」：任务书已经在 `startTask` 里送出去了，
+    // 给被按住的那个子会话一句「已放行」：任务书已经在 `startTask` 里送出去了，
     // 这句排在它后面，被 steer 接在下一个 step 边界，不另起一轮。
     void this.deps.watch
       ?.released({
@@ -1562,7 +1560,7 @@ export class TicketDesk {
   }
 
   /**
-   * 派执行轮：探路票收工（或降级）之后，原任务得真的落到一只子会话手上。
+   * 派执行轮：探路票收工（或降级）之后，原任务得真的落到一个子会话手上。
    *
    * 原 worker 还在就把这一轮任务书投回**同一个会话**，不再 spawn：`agent/status
    * idle` 只说明这一轮说完了，会话还在活表里；探路那只已经把任务书、目录、声明
@@ -1874,8 +1872,8 @@ export class TicketDesk {
     const record = (payload ?? {}) as { status?: unknown; agent?: unknown }
     const sessionId = agentIdOf(record.agent)
     if (record.status !== 'idle' || !sessionId) return
-    // 记一笔「这只空下来了」，只给兜底的日志和排查用；放行与否不看它（见
-    // `idleSeen` 的注释：降级前已经 idle 过的那条路不会再有第二个事件）。
+    // 记一笔「这只空下来了」，只给兜底的日志和排查用；放行与否不看它——
+    // 降级前已经 idle 过的那条路不会再有第二个事件。
     this.registry.markIdle(sessionId)
     for (const ticket of this.registry.ticketsOf(sessionId)) {
       if (ticket.status !== 'running') continue
@@ -1896,7 +1894,7 @@ export class TicketDesk {
         if (delivered > 0) continue
         // 投不出去：票还是 running，但没有真活在跑。落 waiting 但标记人还在。
       }
-      // 这行 continue 不能删（2026-11-14 A7 复查）：没有它就会继续落到下面的
+      // 这行 continue 不能删（A7 复查）：没有它就会继续落到下面的
       // `idled`，票变成 status=waiting + phase=planning；而 maintain 的探路降级
       // 只认 status=running && phase=planning，这张票会永久卡住、再没人管。
       if (current.phase === 'planning') continue

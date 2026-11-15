@@ -59,14 +59,14 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | `workerToolDeny` | boolean | `true` | Strip `workerDenyTools` from every worker's tool schema |
 | `workerDenyTools` | string[] | 7 names | Memory-write tools a worker cannot see; see `DEFAULT_WORKER_DENY_TOOLS` |
 | `workerPromptPrune` | boolean | `true` | Drop every `tool:*` / `mcp:*` section from worker prompts |
-| `notifyScript` | string | `notify.sh` from the install | Push script used by `progress_note` |
+| `notifyScript` | string | empty (push disabled) | Push script used by `progress_note`; `DSH_NOTIFY_SCRIPT` supplies the default |
 | `notifyTimeoutMs` | number | `5000` | Hard cap on one push |
 
 ## Storage and events
 
 A ticket is a stream of JSONL events, append-only. `status` is not a mutable field on a record: it is the payload of whichever append carried it, and `foldEvents` folds the latest value on read. Event kinds: `published`, `spawned`, `spawn-failed`, `ended`, `idled`, `resumed`, `queued`, `delivered`, `reported`, `blocked`, `closed`; bare status lines from old logs are read as `legacy/status`. A half-written trailing line is skipped.
 
-The creation line also carries a queue sequence `seq` (current maximum in the log + 1). Queueing and release order read that number only: two tickets opened in the same millisecond share the same `createdAt`, and falling back to the id made FIFO wobble. Tickets from before 2026-11-13 have no `seq`; they still sort by `createdAt` and then id, so old logs read exactly as before.
+The creation line also carries a queue sequence `seq` (current maximum in the log + 1). Queueing and release order read that number only: two tickets opened in the same millisecond share the same `createdAt`, and falling back to the id made FIFO wobble. Tickets written before `seq` existed have none; they still sort by `createdAt` and then id, so old logs read exactly as before.
 
 `desk` is the only writer, through one `serialize` queue, so no two callers mutate a ticket at once. Above it sit three layers: `store/` (backend, log, fold), `tickets/` (ticket semantics: open, close, reports, delivery, sweeps), and `index.ts` (plugin wiring and tools).
 

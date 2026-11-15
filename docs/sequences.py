@@ -356,7 +356,7 @@ LANG = {
         "open_notes": [
             "The ticket is written before the spawn: step 7's published(open) always precedes step 8's startActivation, so there is no window with a worker but no ticket.",
             "The probe window is 2 minutes: if step 13 never arrives the ticket degrades — it moves to planned, is marked degraded, and gets one \"just do it, declare afterwards\" round instead of a silent release.",
-            "The plan from step 13 goes into the brief at step 16: the 200-character summary and the first 8 files, one line each, so the working fish can see its own boundary.",
+            "The plan from step 13 goes into the brief at step 16: the 200-character summary and the first 8 files, one line each, so the worker can see its own boundary.",
             "A preset failure is only a downgrade — steps 4/5 can fail and step 7 still runs; only a seam reject at step 8 leaves the ticket in open (retryable, closable, never deleted).",
             "No preset argument: the router may suggest one, but the decision and its source (llm / static / fallback) are stored on the ticket and visible via dispatch_list.",
         ],

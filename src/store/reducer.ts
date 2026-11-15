@@ -7,7 +7,7 @@
  *
  * 两条折叠路径，边界清楚：
  *
- * - 2026-11-04 之前的老行（没有 `kind`）走 `applyLegacy`，逐字保留拆分前的
+ * - 早期版本的老行（没有 `kind`）走 `applyLegacy`，逐字保留拆分前的
  *   语义；`tests/fixture-equivalence.test.ts` 拿 448 张线上票逐字段钉着它。
  * - 带 `kind` 的新事件按设计文档 §3.1 / §4 折叠，进了终态就只进不出。
  */
@@ -92,7 +92,7 @@ function blank(event: { id: string; at: string }): TicketSnapshot {
 }
 
 /**
- * 2026-11-04 之前那套折叠，逐字保留（含键的写法）。新字段只补默认值：
+ * 早期版本那套折叠，逐字保留（含键的写法）。新字段只补默认值：
  * statusSince 跟着状态行走，epoch 恒 0，epochReports 数本「老 epoch」里的报告。
  */
 function applyLegacy(state: Map<string, TicketSnapshot>, event: LegacyTicketEvent): void {
@@ -102,7 +102,7 @@ function applyLegacy(state: Map<string, TicketSnapshot>, event: LegacyTicketEven
       ...blank(event),
       goal: event.goal ?? '',
       brief: event.brief,
-      // 建票行自带的排队序号；2026-11-13 之前的老行没有，就是 undefined。
+      // 建票行自带的排队序号；早期版本的老行没有，就是 undefined。
       seq: event.seq,
       status: event.status ?? 'open',
       dir: event.dir,

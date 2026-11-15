@@ -31,8 +31,8 @@ describe('oneLine', () => {
 
 describe('sendProgress', () => {
   it('points at the notify script by default', () => {
-    // 维护者手机上那条消息靠它推，插件里不存第二份 openid。
-    expect(DEFAULT_NOTIFY_SCRIPT).toBe('/home/user/fatfish/notify.sh')
+    // 使用方手机上那条消息靠它推，插件里不存第二份 openid。
+    expect(DEFAULT_NOTIFY_SCRIPT).toBe(process.env.DSH_NOTIFY_SCRIPT ?? '')
     expect(DEFAULT_TIMEOUT_MS).toBe(5000)
   })
 

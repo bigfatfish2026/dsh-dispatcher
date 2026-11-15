@@ -11,7 +11,7 @@ export default defineConfig({
   platform: 'node',
   target: 'node22',
   dts: true,
-  // 2026-11-03：不能 clean。这个包是按 link 装进 profile 的，dsh-hmr 直接盯着
+  // 不能 clean。这个包是按 link 装进 profile 的，dsh-hmr 直接盯着
   // lib/index.js；tsdown 一 clean 就先删文件，落在删除到重写之间的一次配置重载
   // 会 import 到不存在的入口，loader 记一条错、条目就没有 fiber 了（票系统整条
   // 消失）。关掉 clean 让旧产物一直在原地，重载最差读到旧代码，不会读到空气。

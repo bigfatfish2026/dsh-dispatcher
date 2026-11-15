@@ -3,7 +3,7 @@
  *
  * 以前子会话看不见票面：被挡住、放行、收工全靠主会话转述，得等下一轮才知道。
  * 这里的做法是「按票自动挂订阅」：`spawned` 那一刻登记 `ticketId ↔ workerId`，
- * 之后票台每次落 `blocked` / 放行 / `closed` 都往这只子会话推一句话，短句、带票号
+ * 之后票台每次落 `blocked` / 放行 / `closed` 都往这个子会话推一句话，短句、带票号
  * 与状态，不塞 JSON。
  *
  * 四条规矩：
@@ -14,12 +14,12 @@
  *    `agent.cancel({ kind: 'hook' }, { keepInbox: true })` 把正在跑的那一轮真打断。
  *    `keepInbox` 是为了不把已经排在队里的活扔掉：dsh-agent 的注释写明「取消之后
  *    提交的唤醒输入排到下一轮，等被中断的活动收敛到 idle 再跑」，所以打断之后这
- *    只子会话还能被叫起来，通知与放行都不会丢。
+ *    个子会话还能被叫起来，通知与放行都不会丢。
  * 2. **通知失败不许影响票台。** 会话没了、`followup` 抛错，都只 `warn` 一行然后
  *    返回 false；票台的判定与排队一个字节都不动。
  * 3. **放行只对“被票台按住的”那只说。** 没被按住的票（正常收工、主会话自己发话
  *    继续）不推「已放行」——多一条消息只会让它多跑一轮空转。
- * 4. **订阅和退订都要留痕。** 订上时 info 一行，写明哪只子会话订了哪张票。
+ * 4. **订阅和退订都要留痕。** 订上时 info 一行，写明哪个子会话订了哪张票。
  *
  * 这一层不读票、不写票：订阅从 `desk.commit` 喂进来，文案只用喂进来的那几栏。
  */
@@ -74,7 +74,7 @@ export interface WatchNotice {
   delivered: boolean
 }
 
-/** 一条订阅：哪只子会话盯着哪张票。 */
+/** 一条订阅：哪个子会话盯着哪张票。 */
 export interface WatchSubscription {
   ticketId: string
   workerId: string
@@ -85,7 +85,7 @@ export interface WatchSubscription {
 }
 
 /**
- * 活表里的那只子会话，这里只用得到三口。
+ * 活表里的那个子会话，这里只用得到三口。
  *
  * `steer` 优先于 `followup`：正在跑的那一轮在下一个 step 边界读到通知，不另起
  * 一轮空转；idle 时 steer 照样开一轮。宿主老一点没有 `steer` 就退回 `followup`。
@@ -114,7 +114,7 @@ export interface WorkerWatchDeps {
 
 export interface WorkerWatch {
   /**
-   * 给这只子会话订上这张票。幂等：同一对重复订阅只留一条，返回 false。
+   * 给这个子会话订上这张票。幂等：同一对重复订阅只留一条，返回 false。
    *
    * 票换了 worker（原会话没了、重派一只）时按新 worker 覆盖旧订阅——旧那只已经
    * 不在活表里，留着只会把通知推给一个不存在的人。
@@ -158,7 +158,7 @@ function blockedWhy(input: BlockedNotice): string {
     return `被 ${by} 挡住${resources ? `，冲突在 ${resources}` : ''}`
   }
   const reason = input.reason?.trim()
-  return `等维护者决定${reason ? `（${reason}）` : ''}`
+  return `等使用方决定${reason ? `（${reason}）` : ''}`
 }
 
 /** blocked：票号、状态、被谁挡、冲突资源、现在该停手。 */
@@ -185,7 +185,7 @@ export function createWorkerWatch(deps: WorkerWatchDeps): WorkerWatch {
   const info = deps.info ?? (() => {})
   const clock = deps.clock ?? realClock
   const newId = deps.newId ?? (() => randomUUID())
-  /** ticketId → 订阅。一张票同一时刻只该有一只子会话在干活。 */
+  /** ticketId → 订阅。一张票同一时刻只该有一个子会话在干活。 */
   const byTicket = new Map<string, WatchSubscription>()
   /** workerId → 被挡的那张票与理由（工具守卫用）。 */
   const parked = new Map<string, { ticketId: string; why: string }>()
@@ -214,7 +214,7 @@ export function createWorkerWatch(deps: WorkerWatchDeps): WorkerWatch {
   }
 
   /**
-   * 把一句话送到这只子会话。失败只 warn：会话没了、投不进去都不许往上抛——票台
+   * 把一句话送到这个子会话。失败只 warn：会话没了、投不进去都不许往上抛——票台
    * 的判定和排队不能因为一条通知失败而停下。
    *
    * 两条投递路各有各的用处：

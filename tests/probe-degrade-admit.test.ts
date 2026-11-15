@@ -80,7 +80,7 @@ describe('探路超时当拍推进', () => {
     const ticket = h.log.get(id)!
     expect(ticket.degraded).toBe(true)
     expect(ticket.phase).toBe('running')
-    // 执行轮真的起了：第二只子会话，任务书是降级那套。
+    // 执行轮真的起了：第二个子会话，任务书是降级那套。
     expect(h.subagents.spawned).toHaveLength(2)
     expect(ticket.workerId).toBe('worker-2')
     expect(lastPrompt(h)).toContain('探路超时')

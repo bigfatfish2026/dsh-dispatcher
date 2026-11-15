@@ -39,7 +39,7 @@ function desk(): Harness {
 /**
  * 开一张探路票，再让探路子会话把 writes/reads 声明上来。
  *
- * 2026-11-14 起 open 不收 intent，意图只能走 `dispatch_declare`；冲突判定读的
+ * 此前 open 不收 intent，意图只能走 `dispatch_declare`；冲突判定读的
  * 仍是票上折出来的那一栏。
  */
 async function openProbe(
@@ -638,7 +638,7 @@ describe('A6 一个词只许一个意思', () => {
     expect(queued.phase).toBe('queued')
     expect(queued.status).toBe('running')
 
-    await h.desk.block(first, '等维护者拍板', h.main)
+    await h.desk.block(first, '等使用方拍板', h.main)
     const held = h.log.get(first)!
     expect(held.status).toBe('blocked')
     expect(held.phase).toBe('planned')

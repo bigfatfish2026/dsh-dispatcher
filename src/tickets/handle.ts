@@ -76,7 +76,7 @@ export class TicketHandle {
    * 谁能往这张票上写报告：worker 只能写自己名下的票，主会话只能写自己开的票。
    *
    * `source === 'auto'` 的补报是票台自己写的，不经过这里（没有 actor）。
-   * 老票没有 publisher（2026-11-04 之前的行）时放行主会话，只做能做的校验。
+   * 老票没有 publisher（早期版本的行）时放行主会话，只做能做的校验。
    */
   assertMayReport(actor: Actor): void {
     const ticket = this.current()

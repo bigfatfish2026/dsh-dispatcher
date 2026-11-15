@@ -52,7 +52,7 @@ export function installPromptGuard(ctx: Context, config: Config, deps: PromptGua
   // ── 巡检事实：走动态上下文快照，不往主会话里塞 user 消息 ────────
   // 宿主每次都把上下文重新渲染成一条 runtime-context 快照；文本没变就不落盘，
   // 变了才追加一条新的。模型看见的是「环境状态」，不是谁下的命令——这就是
-  // 巡检提醒不再被主会话当成维护者说话的根。worker 不需要票台近况，跳过。
+  // 巡检提醒不再被主会话当成使用方说话的根。worker 不需要票台近况，跳过。
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()
     const header = (context as { agent?: { session?: { header?: PromptHeader } } })?.agent?.session?.header

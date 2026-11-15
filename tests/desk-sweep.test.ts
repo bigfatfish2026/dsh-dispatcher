@@ -44,7 +44,7 @@ describe('巡检信号', () => {
 
   it('还没到点不发；差一分钟也不发', async () => {
     const h = makeDesk(MANUAL)
-    const { id } = await h.desk.open(INTENT, h.main)
+    await h.desk.open(INTENT, h.main)
     h.desk.attach()
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
@@ -56,7 +56,7 @@ describe('巡检信号', () => {
   it('blocked 满 60 分钟才提醒，理由是 blocked-60m', async () => {
     const h = makeDesk(MANUAL)
     const { id } = await h.desk.open(INTENT, h.main)
-    await h.desk.block(id, '等维护者拍板')
+    await h.desk.block(id, '等使用方拍板')
     h.clock.advance(minutes(59))
     expect((await h.desk.maintain()).signals).toBe(0)
     h.clock.advance(minutes(1))
@@ -125,7 +125,7 @@ describe('巡检信号', () => {
 
   it('关台之后不再巡检', async () => {
     const h = makeDesk(MANUAL)
-    const { id } = await h.desk.open(INTENT, h.main)
+    await h.desk.open(INTENT, h.main)
     h.desk.attach()
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()

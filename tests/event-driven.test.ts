@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import type { TicketBroadcast } from '../src/store'
 import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 import { mountPlugin } from './helpers/plugin-harness'
 

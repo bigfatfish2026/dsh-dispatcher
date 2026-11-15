@@ -5,7 +5,7 @@ import { SWEEP_HEADER, createSweepFacts } from '../src/tickets/sweep-facts'
 
 /**
  * 巡检提醒的新分工：三类（报告到达、干完没收工、干完没交报告）只记事实，
- * 给主会话下一轮当环境状态看；只有「等维护者决定」才真的叫醒人。
+ * 给主会话下一轮当环境状态看；只有「等使用方决定」才真的叫醒人。
  */
 
 function setup() {
@@ -57,27 +57,27 @@ describe('巡检事实，不叫醒人', () => {
     expect(facts.text()).toContain('一份报告也没交')
   })
 
-  it('快照文本是陈述句，不带工具名也不冒充维护者', async () => {
+  it('快照文本是陈述句，不带工具名也不冒充使用方', async () => {
     const { facts, notifier } = setup()
     await notifier.reportArrived({ ticketId: 't-abc', brief: '改巡检', epoch: 1, pendingReports: 1 })
 
     const text = facts.text()
     expect(text.startsWith(SWEEP_HEADER)).toBe(true)
-    expect(text).toContain('不是维护者在说话')
+    expect(text).toContain('不是使用方在说话')
     expect(text).not.toContain('dispatch_read')
     expect(text).not.toContain('dispatch_close')
   })
 })
 
-describe('只有等维护者决定才叫醒', () => {
-  it('blocked 超阈值仍会 followup，并且说清不是维护者', async () => {
+describe('只有等使用方决定才叫醒', () => {
+  it('blocked 超阈值仍会 followup，并且说清不是使用方', async () => {
     const { facts, wakes, notifier } = setup()
 
     await notifier.idle({ ticketId: 't-stuck', brief: '卡住了', reason: 'blocked-60m', sinceMinutes: 61 })
 
     expect(wakes).toHaveLength(1)
     expect(wakes[0]!.startsWith(SWEEP_PREFIX)).toBe(true)
-    expect(wakes[0]).toContain('不是维护者在说话')
+    expect(wakes[0]).toContain('不是使用方在说话')
     expect(wakes[0]).toContain('t-stuck')
     // 叫醒的那条不进快照，免得同一件事说两遍。
     expect(facts.text()).toBe('')
@@ -116,15 +116,15 @@ describe('冲突排队：事实 + 推开票方', () => {
     expect(wakes[0]).toContain('t-wait「抢目录」')
     expect(wakes[0]).toContain('t-block「占住目录」')
     expect(wakes[0]).toContain('dir:/a/b')
-    expect(wakes[0]).toContain('不是维护者在说话')
+    expect(wakes[0]).toContain('不是使用方在说话')
   })
 
   it('人工挂起不带 wake：只记事实，一句话都不推', async () => {
     const { facts, wakes, notifier } = setup()
 
-    await notifier.blocked({ ticketId: 't-manual', brief: '等拍板', reason: '等维护者拍板' })
+    await notifier.blocked({ ticketId: 't-manual', brief: '等拍板', reason: '等使用方拍板' })
 
-    expect(facts.text()).toContain('等维护者拍板')
+    expect(facts.text()).toContain('等使用方拍板')
     expect(wakes).toHaveLength(0)
   })
 
@@ -168,7 +168,7 @@ describe('冲突排队：事实 + 推开票方', () => {
     const last = wakes.at(-1)!
     expect(last).toContain('t-wait「抢目录」已放行')
     expect(last).toContain('t-block 已收工')
-    expect(last).toContain('不是维护者在说话')
+    expect(last).toContain('不是使用方在说话')
   })
 })
 

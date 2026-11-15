@@ -352,12 +352,12 @@ describe('bin 入口', () => {
   it.skipIf(!existsSync(LIB_CLI))('构建后子进程输出与进程内一致', () => {
     const out = execFileSync(
       process.execPath,
-      [join(HERE, '..', 'bin', 'tickets.mjs'), 'tickets', '--json', '--id', 't-mvxeoo0z-i5ab', '--state', FIXTURE],
+      [join(HERE, '..', 'bin', 'tickets.mjs'), 'tickets', '--json', '--id', 't-fix00001-0001', '--state', FIXTURE],
       { encoding: 'utf8' },
     )
     const payload = JSON.parse(out) as TicketsPayload
     expect(payload.v).toBe(1)
     expect(payload.tickets).toHaveLength(1)
-    expect(payload.tickets[0].id).toBe('t-mvxeoo0z-i5ab')
+    expect(payload.tickets[0].id).toBe('t-fix00001-0001')
   })
 })

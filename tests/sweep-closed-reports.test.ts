@@ -110,7 +110,7 @@ describe('只有僵尸票才叫人', () => {
     const rec = recorder()
     const h = makeDesk({ notifier: rec.notifier })
     const { id } = await h.desk.open(INTENT, h.main)
-    await h.desk.block(id, '等维护者拍板', h.main)
+    await h.desk.block(id, '等使用方拍板', h.main)
 
     h.clock.advance(61 * 60_000)
     await h.desk.maintain()

@@ -59,14 +59,14 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | `workerToolDeny` | boolean | `true` | 把 `workerDenyTools` 从 worker 的工具 schema 里摘掉 |
 | `workerDenyTools` | string[] | 7 个名字 | worker 看不见写记忆工具，见 `DEFAULT_WORKER_DENY_TOOLS` |
 | `workerPromptPrune` | boolean | `true` | 剪掉 worker 提示词里所有 `tool:*` / `mcp:*` 段 |
-| `notifyScript` | string | 安装环境的 `notify.sh` | `progress_note` 用的推送脚本 |
+| `notifyScript` | string | 空（不推送） | `progress_note` 用的推送脚本；也可由环境变量 `DSH_NOTIFY_SCRIPT` 给默认值 |
 | `notifyTimeoutMs` | number | `5000` | 一次推送最多等多久 |
 
 ## 票的存储与事件
 
 一张票是一串 JSONL 事件，只追加、不改写。`status` 不是某条记录里的可变字段，而是某次 append 的 payload，读的时候由 `foldEvents` 折出最后那个值。事件种类：`published`、`spawned`、`spawn-failed`、`ended`、`idled`、`resumed`、`queued`、`delivered`、`reported`、`blocked`、`closed`，老日志的纯状态行按 `legacy/status` 读。读到半截行会跳过。
 
-建票那一行还带一个排队序号 `seq`（日志里现有最大值 + 1），排队与放行的先后只认它：同一毫秒开的两张票 createdAt 一模一样，按 id 兜底会让 FIFO 抖。2026-11-13 之前的票没有 `seq`，排序退回 `createdAt` 再按 id，老日志照常读。
+建票那一行还带一个排队序号 `seq`（日志里现有最大值 + 1），排队与放行的先后只认它：同一毫秒开的两张票 createdAt 一模一样，按 id 兜底会让 FIFO 抖。早期版本的票没有 `seq`，排序退回 `createdAt` 再按 id，老日志照常读。
 
 写入者只有 desk 一个（`serialize` 串行队列），所以同一张票不会两路同时改。`desk` 之上分三层：`store/`（后端、日志、折叠）、`tickets/`（票的语义：开、关、报告、投递、巡检）、`index.ts`（插件接线与工具）。
 
@@ -99,7 +99,7 @@ worker 手上只有 `dispatch_report`，只往票里追加一行，改不了任�
 
 节流指纹是 `票号:原因:statusSince`，同一轮只发一次；状态翻过一轮再回来能再来一次。巡检**只提醒、不改票**：不写 status、不写 note，也不替主会话收报告。
 
-提醒分两条路。未读报告、一轮干完没交报告、干完或跑太久没收工，记成巡检事实，挂到 `system-prompt/assemble` 上作为动态上下文（`dispatcher:sweep`，`interpolate: false`）：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是维护者在说话。时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖；`dispatch_list` / `dispatch_read` / `dispatch_close` 见过这张票之后，对应条目摘掉，没读的继续挂着。只有 `blocked` 超阈值才真去 `followup`，开头 `[sweep] `，并明说不是维护者在说话。
+提醒分两条路。未读报告、一轮干完没交报告、干完或跑太久没收工，记成巡检事实，挂到 `system-prompt/assemble` 上作为动态上下文（`dispatcher:sweep`，`interpolate: false`）：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是使用方在说话。时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖；`dispatch_list` / `dispatch_read` / `dispatch_close` 见过这张票之后，对应条目摘掉，没读的继续挂着。只有 `blocked` 超阈值才真去 `followup`，开头 `[sweep] `，并明说不是使用方在说话。
 
 事实表只在内存里：进程重启后由巡检重新发现，过期提醒不会被读回来。worker 会话收不到这段上下文。
 

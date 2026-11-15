@@ -2,7 +2,7 @@
  * 选档守卫：在「档名合法」之外再问一句「这活干得了吗」。
  *
  * 分类器只回一个档名加一句理由（classify.ts），它说 t2 就 t2——哪怕任务书写着
- * 「要真的用 bash 跑命令」。2026-11-04 那两张 git 勘察票就是这么派空的：一张
+ * 「要真的用 bash 跑命令」。早先那两张 git 勘察票就是这么派空的：一张
  * 白跑，一张补跑。这一层不看模型怎么措辞，只对两件事实：
  *
  *   1. 任务要不要执行命令（接线层已经判过一次：`classify-command.ts` 的
@@ -215,7 +215,7 @@ export interface PresetRejection {
   preset: string
   /** 一行内部原因（进日志）。 */
   reason: string
-  /** 给模型和维护者看的整段文本（dispatch_open 的错误就是它）。 */
+  /** 给模型和使用方看的整段文本（dispatch_open 的错误就是它）。 */
   message: string
   /** rule2 专用：命中的关键词，方便以后调表。 */
   matchedKeyword?: string

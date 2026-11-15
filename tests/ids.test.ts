@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { hasIdFragment, hexFragments, idVariants, matchesId } from '../src/ids'
 
 /**
- * 从 index.ts 抽出来的 id 比对规则，2026-11-03 起也被僵尸巡检复用。
+ * 从 index.ts 抽出来的 id 比对规则，此前也被僵尸巡检复用。
  *
  * 这里锁的是边界：短标签能对上完整 id，纯中文标签一律对不上（不是报错），
  * 片段短于 6 位不参与比对。

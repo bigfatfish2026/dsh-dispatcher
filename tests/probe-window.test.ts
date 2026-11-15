@@ -13,7 +13,7 @@ import { WRITE_TOOLS } from '../src/protocol'
 import { ProbeWindows } from '../src/tickets/probe'
 import type { ProbeAgent, ProbePort, ProbeRegistry } from '../src/tickets/probe'
 import { cleanTempDirs, mountPlugin, tempDir } from './helpers/plugin-harness'
-import type { FakeAgent, FakePluginHost } from './helpers/plugin-harness'
+import type { FakeAgent } from './helpers/plugin-harness'
 import { flush, INTENT, makeDesk } from './helpers/desk-harness'
 
 afterEach(() => {
@@ -379,7 +379,7 @@ describe('接线：一律探路与 agent/created', () => {
     host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
     await host.settled()
 
-    // 窗口拆了，但没有 declared、没有 conflict-checked、没有第二只子会话。
+    // 窗口拆了，但没有 declared、没有 conflict-checked、没有第二个子会话。
     expect(spies[0]!.released).toBe(1)
     expect(kinds(file)).toEqual(['published', 'planning', 'spawned'])
     const ticket = ticketOf(file)
@@ -448,7 +448,7 @@ describe('探路超时降级', () => {
     expect(report.signals).toBe(0)
 
     const ticket = h.log.get(id)!
-    // 降级当拍就把这一轮推下去：判完冲突直接派执行轮，不等第二只子会话 idle。
+    // 降级当拍就把这一轮推下去：判完冲突直接派执行轮，不等第二个子会话 idle。
     expect(ticket.phase).toBe('running')
     expect(ticket.degraded).toBe(true)
     // 探路降级不写状态：status 仍是执行子会话派出去之后的 running。

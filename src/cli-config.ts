@@ -52,7 +52,7 @@ export function resolveProfileConfigPath(env: NodeJS.ProcessEnv = process.env): 
 function warnMissingProfile(reason: string): void {
   process.stderr.write(
     `[dsh-dispatcher] warn: ${reason}，后端回退 jsonl 默认值，可能不是活库；` +
-      '无人值守请先 export DSH_PROFILE=qqbot（或用 DSH_PROFILE_DIR 指名 profile 目录），' +
+      '无人值守请先 export DSH_PROFILE=<profile>（或用 DSH_PROFILE_DIR 指名 profile 目录），' +
       '或给 tickets 加 --backend sqlite\n',
   )
 }

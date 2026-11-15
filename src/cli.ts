@@ -158,7 +158,7 @@ function parse(argv: readonly string[]): CliOptions {
     throw new UsageError(`--backend 不认识的值：'${options.backend.trim()}'（可选 jsonl / sqlite）`)
   }
   if (options.db !== undefined && options.backend !== undefined && options.backend.trim() !== 'sqlite') {
-    throw new UsageError('--db 只能配 --backend sqlite（或者省略 --backend，执行方会自己按 sqlite 算）')
+    throw new UsageError('--db 只能配 --backend sqlite（或者省略 --backend，插件会自己按 sqlite 算）')
   }
   return options
 }

@@ -11,7 +11,6 @@ import {
 import type { PresetTools } from '../src/tickets/preset-guard'
 
 const allow = (...names: string[]): PresetTools => ({ mode: 'allow', names: new Set(names) })
-const deny = (...names: string[]): PresetTools => ({ mode: 'deny', names: new Set(names) })
 
 const T2_READ_ONLY = allow('read', 'glob', 'grep', 'dispatch_report', 'send_message')
 const T1_FULL = allow('bash', 'read', 'write', 'edit', 'dispatch_report', 'send_message')
@@ -117,7 +116,7 @@ describe('需求判定：关键词兜底', () => {
 
   it('负例不误伤：读 README / 查记忆 / 网页搜索都不算要命令', () => {
     expect(commandHint('读一下 README，写三句摘要')).toBeUndefined()
-    expect(commandHint('查一下记忆里维护者喜欢什么')).toBeUndefined()
+    expect(commandHint('查一下记忆里使用方喜欢什么')).toBeUndefined()
     expect(commandHint('上网查一下下周天气')).toBeUndefined()
     expect(commandHint('只读代码审查，挑逻辑问题')).toBeUndefined()
   })
@@ -246,7 +245,7 @@ describe('选档守卫：三条规则', () => {
   })
 
   it('rule2：三条负例（读 README / 查记忆 / 网页搜索）false 时放行', async () => {
-    const goals = ['读一下 README，写三句摘要', '查一下记忆里维护者喜欢什么', '上网查一下下周天气']
+    const goals = ['读一下 README，写三句摘要', '查一下记忆里使用方喜欢什么', '上网查一下下周天气']
     for (const goal of goals) {
       const rejection = await checkPresetChoice({
         ...base,

@@ -296,6 +296,8 @@ export function bindPromptFilter(
   scope.effect(
     () => {
       stop = register('system-prompt/assemble', async (assembly, _context, next) => {
+        // 监听器签名固定：这一层只看 next() 返回的装配结果。
+        void assembly
         const assembled = await next()
         const { assembly: pruned, removed } = pruneToolSections(assembled, options.allow, {
           dropAllToolSections: options.dropAllToolSections === true,

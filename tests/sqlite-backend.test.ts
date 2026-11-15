@@ -51,7 +51,7 @@ function script(): TicketEvent[] {
     { kind: 'queued', id, at: T(2), input: { id: 'e-1', text: '顺手把测试跑了' } },
     { kind: 'delivered', id, at: T(3), entry: { kind: 'input', id: 'e-1' } },
     { kind: 'reported', id, at: T(4), report: { id: 'e-2', text: '搬完了' }, source: 'worker' },
-    { kind: 'blocked', id, at: T(5), reason: '等维护者点头' },
+    { kind: 'blocked', id, at: T(5), reason: '等使用方点头' },
     { kind: 'resumed', id, at: T(6), workerId: 'worker-1', epoch: 1 },
     { kind: 'ended', id, at: T(7), workerId: 'worker-1', stopReason: 'done', epochReports: 1 },
     { kind: 'closed', id, at: T(8), outcome: 'done', note: '交付', voidedInputs: 0 },

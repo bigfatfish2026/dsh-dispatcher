@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 
 /**
- * `subagent/end` 是「这条鱼没了」唯一的信号。规矩很窄：命中 workerId 的未结
+ * `subagent/end` 是「这个子会话没了」唯一的信号。规矩很窄：命中 workerId 的未结
  * 票落 `waiting`，别的什么都不改——done/dropped 是主会话的判决，鱼自己说了不算。
  */
 

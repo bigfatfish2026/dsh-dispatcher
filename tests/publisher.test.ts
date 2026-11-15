@@ -4,7 +4,7 @@ import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 import { mountPlugin, tempDir } from './helpers/plugin-harness'
 
 /**
- * 2026-11-04 起票上记的是 `publisher`：开票那个会话的 session id。它干两件事——
+ * 此前票上记的是 `publisher`：开票那个会话的 session id。它干两件事——
  * 重复开票只在同一个人、同一件事、窗口内才算重复；投话回去时拿它当 sender。
  * 老的 `owner`/`ownerId` 两栏连同巡检的猜测逻辑一起删了：没有 publisher 的老票
  * 就是「不知道谁开的」，投不了话就老老实实留在队列里报一句。
@@ -13,7 +13,7 @@ import { mountPlugin, tempDir } from './helpers/plugin-harness'
 describe('fold 认 publisher', () => {
   it('老票没有 publisher，读出来就是 undefined', () => {
     const snapshots = foldEvents([
-      { id: 't-old', at: '2026-11-03T00:00:00.000Z', goal: '老票', status: 'running', owner: 't4 查qqbot PR' },
+      { id: 't-old', at: '2026-11-03T00:00:00.000Z', goal: '老票', status: 'running', owner: 't4 查 example PR' },
     ])
     expect(snapshots[0].publisher).toBeUndefined()
   })

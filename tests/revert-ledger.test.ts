@@ -6,7 +6,7 @@
  * - `TicketDesk` 测「声明怎么落成票」；
  * - 插件层只测接线（工具参数进得去、拒绝理由出得来、账本真落盘）。
  *
- * 2026-11-14 起开票不再收 intent，分级闸随 open 那条路一起删了；这里保留
+ * 此前开票不再收 intent，分级闸随 open 那条路一起删了；这里保留
  * 老日志的兼容用例和审计、账本、指南校验。
  */
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,8 +20,8 @@ afterEach(cleanTempDirs)
 
 const GOOD_UNDO = {
   kind: 'file',
-  ref: '/home/user/dev/dsh-dispatcher/cordis.patch.yml.bak',
-  howto: 'cp /home/user/dev/dsh-dispatcher/cordis.patch.yml.bak /home/user/dev/dsh-dispatcher/cordis.patch.yml',
+  ref: '/srv/work/dsh-dispatcher/cordis.patch.yml.bak',
+  howto: 'cp /srv/work/dsh-dispatcher/cordis.patch.yml.bak /srv/work/dsh-dispatcher/cordis.patch.yml',
 }
 
 const NOW = new Date('2026-11-10T13:00:00.000Z')
@@ -199,7 +199,7 @@ describe('撤回指南校验：空话挡得住，具体命令放得过', () => {
       ['自行处理，回头再说吧', false, 'vague'],
       ['撤一下', false, 'short'],
       ['把刚才那个东西恢复原样就行了', false, 'no-anchor'],
-      ['cp /home/user/x.yml.bak /home/user/x.yml', true],
+      ['cp /srv/x.yml.bak /srv/x.yml', true],
       ['git revert abc1234', true],
       ['systemctl --user restart dsh-example', true],
       ['撤不回；只能 git revert abc1234 后重新 push', true],
@@ -291,7 +291,7 @@ describe('结票审计：按 closedAt 限窗口，只列不改', () => {
       ticketId: 't-d',
       actor: 'worker',
       step: 1,
-      summary: '重启了 qqbot',
+      summary: '重启了示例服务',
       undo: GOOD_UNDO,
     },
   ]

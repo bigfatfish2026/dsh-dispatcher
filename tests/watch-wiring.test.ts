@@ -112,7 +112,7 @@ describe('人工挂起', () => {
     const { id } = await h.desk.open({ goal: '拆票台', brief: '拆票台' }, h.main)
     await flush()
 
-    await h.desk.block(id, '等维护者挑目录', h.main)
+    await h.desk.block(id, '等使用方挑目录', h.main)
     await flush()
 
     expect(worker.cancels).toEqual([
@@ -124,7 +124,7 @@ describe('人工挂起', () => {
     const notice = worker.messages.at(-1)!
     expect(notice).toContain(id)
     expect(notice).toContain('blocked')
-    expect(notice).toContain('等维护者决定（等维护者挑目录）')
+    expect(notice).toContain('等使用方决定（等使用方挑目录）')
     expect(watch.writeBlockReason('worker-1', 'write')).toContain(id)
     // 看票、报活不拦：子会话还得能把「我被挡了」说回来。
     expect(watch.writeBlockReason('worker-1', 'dispatch_report')).toBeUndefined()
@@ -170,7 +170,7 @@ describe('被挡那轮的收尾', () => {
     const { h } = wire([worker])
     const { id } = await h.desk.open({ goal: '拆票台', brief: '拆票台' }, h.main)
     await flush()
-    await h.desk.block(id, '等维护者拍板', h.main)
+    await h.desk.block(id, '等使用方拍板', h.main)
     await flush()
 
     // 被打断的那一轮照实收尾：票进 waiting，但不许自动补一条「报告」。
@@ -235,13 +235,13 @@ describe('冲突排队', () => {
 })
 
 describe('通知失败不影响票台', () => {
-  it('子会话会话没了：挂起照样落票、只 warn 一行，不抛', async () => {
+  it('子会话没了：挂起照样落票、只 warn 一行，不抛', async () => {
     const { h, watch, warnings } = wire([], { agents: [] })
     const { id } = await h.desk.open({ goal: '拆票台', brief: '拆票台' }, h.main)
-    // 订阅还在（spawn 那一刻订的），但活表里查不到那只子会话了。
+    // 订阅还在（spawn 那一刻订的），但活表里查不到那个子会话了。
     expect(watch.subscriptions()).toHaveLength(1)
 
-    await expect(h.desk.block(id, '等维护者决定', h.main)).resolves.toMatchObject({ status: 'blocked' })
+    await expect(h.desk.block(id, '等使用方决定', h.main)).resolves.toMatchObject({ status: 'blocked' })
     await flush()
 
     expect(h.log.get(id)!.status).toBe('blocked')
@@ -275,12 +275,12 @@ describe('插件层：守卫装在 worker 会话上', () => {
     })) as { id: string }
     await host.settled()
 
-    // 守卫只装在子会话会话上（主会话那条是等待守卫，跟票无关）。
+    // 守卫只装在子会话上（主会话那条是等待守卫，跟票无关）。
     expect(worker.guards).toHaveLength(1)
     const guard = worker.guards[0]!
     expect(guard({ name: 'bash', arguments: {} })).toBeUndefined()
 
-    await host.call('dispatch_block', { id: receipt.id, reason: '等维护者拍板' })
+    await host.call('dispatch_block', { id: receipt.id, reason: '等使用方拍板' })
     await host.settled()
 
     for (const name of ['write', 'edit', 'bash']) {
@@ -289,7 +289,7 @@ describe('插件层：守卫装在 worker 会话上', () => {
       expect(reason).toContain('blocked')
     }
     expect(guard({ name: 'dispatch_report', arguments: {} })).toBeUndefined()
-    // 通知也到了同一只子会话手上。
+    // 通知也到了同一个子会话手上。
     expect(worker.messages.at(-1)).toContain('blocked')
   })
 })

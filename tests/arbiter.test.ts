@@ -8,7 +8,7 @@ import { MemoryBackend } from './helpers/desk-harness'
 
 const T = (second: number): string => `2026-11-14T12:00:${String(second).padStart(2, '0')}.000Z`
 
-function published(id: string, second: number, writes: string[], declaredAt?: string): TicketEvent[] {
+function published(id: string, second: number): TicketEvent[] {
   return [
     {
       kind: 'published',
@@ -107,9 +107,9 @@ describe('ConflictArbiter：side 的降级兜底', () => {
 describe('ConflictArbiter：判定与落票', () => {
   function conflicts(): { arbiter: ConflictArbiter; commits: TicketEvent[]; snap: (id: string) => TicketSnapshot } {
     return tree([
-      ...published('t-a', 1, []),
+      ...published('t-a', 1),
       declared('t-a', 2, ['dir:/tmp/shared']),
-      ...published('t-b', 3, []),
+      ...published('t-b', 3),
       declared('t-b', 4, ['dir:/tmp/shared']),
     ])
   }
@@ -133,9 +133,9 @@ describe('ConflictArbiter：判定与落票', () => {
 
   it('对手不在了：判定 none，照常落一条 conflict-checked（waitOn 空）', () => {
     const { arbiter, commits, snap } = tree([
-      ...published('t-a', 1, []),
+      ...published('t-a', 1),
       declared('t-a', 2, ['dir:/tmp/shared']),
-      ...published('t-b', 3, []),
+      ...published('t-b', 3),
       declared('t-b', 4, ['dir:/tmp/shared']),
       { kind: 'closed', id: 't-a', at: T(5), cause: 'tool', outcome: 'done' },
     ])

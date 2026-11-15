@@ -21,9 +21,7 @@ import {
   intentSpecOf,
   planSpecOf,
   requestIdOf,
-  text,
   ticketLine,
-  displayPath,
   statusMark,
   phaseMark,
 } from '../tools-shared'
@@ -762,7 +760,7 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
             howto: {
               type: 'string',
               required: true,
-              description: 'The exact command or path a person would run, e.g. "cp /home/user/x.yml.bak /home/user/x.yml".',
+              description: 'The exact command or path a person would run, e.g. "cp /srv/app/x.yml.bak /srv/app/x.yml".',
             },
           },
         },
@@ -804,7 +802,7 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
     }),
   )
 
-  // ── 打点：一行进度直接推到维护者手机上 ────────────────────────────
+  // ── 打点：一行进度直接推到使用方手机上 ────────────────────────────
   // 不写 jsonl、不叫醒任何会话。推送失败只在日志里记一笔，不抛给模型——打点是
   // 顺手的礼貌，不该拖住干活。P3 起主会话和子会话的白名单里都没有它（子会话该用
   // dispatch_report），工具留着给手工调用和老的测试会话。

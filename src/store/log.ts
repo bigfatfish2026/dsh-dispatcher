@@ -32,7 +32,7 @@ export function newEntryId(now: Date = new Date()): string {
  * seq 是开票时发的单调序号（见 `TicketLog.nextSeq`），同一毫秒开的三张票也分得
  * 出先后——老实现只比 createdAt，同一毫秒就退化成按 id 字典序，FIFO 跟着抖。
  *
- * 两边都有 seq 才按 seq 比；只要有一边没有（2026-11-13 之前的老票，或手写的
+ * 两边都有 seq 才按 seq 比；只要有一边没有（早期版本的老票，或手写的
  * fixture）就按 createdAt / id 比，老票之间的相对位置一个字节都不变。实机上
  * 老票全都早于 seq 上线，两种比法给出的先后一致。
  *
@@ -152,7 +152,7 @@ export class TicketLog {
    * 开票那一行补一个排队序号。
    *
    * 只认「建票行」：带 kind 的是 `published`，不带 kind 的是 `TicketLog.open()`
-   * 写的 2026-11-04 之前那种老形状（`goal` + `status: open`，线上形状一个字节
+   * 写的 早期版本那种老形状（`goal` + `status: open`，线上形状一个字节
    * 不改，seq 只是多一栏）。调用方已经给了 seq（重放、fixture）的原样保留；
    * 别的事件一个字节都不动。
    */

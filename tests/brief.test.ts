@@ -13,7 +13,7 @@ import {
   truncateColumns,
 } from '../src/store'
 import { makeDesk } from './helpers/desk-harness'
-import { cleanTempDirs, mountPlugin, tempDir } from './helpers/plugin-harness'
+import { cleanTempDirs, mountPlugin } from './helpers/plugin-harness'
 
 const dirs: string[] = []
 
@@ -57,7 +57,7 @@ function mount(stateFile: string, overrides: Partial<Config> = {}): {
   }
 }
 
-/** A goal that exactly fills the cap: 17 汉字 = 34 columns (2026-11-02 little-screen measurement). */
+/** A goal that exactly fills the cap: 17 汉字 = 34 columns (small-screen measurement). */
 const AT_CAP = '一二三四五六七八九十一二三四五六七'
 /** One more 汉字 than fits, so the truncation has something to cut. */
 const OVER_CAP = `${AT_CAP}八九十`

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Config, DEFAULT_ROUTER_TOOLS, routerAllowList } from '../src/config'
 import type { Config as ConfigShape } from '../src/config'
 
-// 2026-11-03: 别的插件注册的工具名不写在这个仓库里。白名单由两段拼起来：
+// 约定：别的插件注册的工具名不写在这个仓库里。白名单由两段拼起来：
 // 本包自己的 DEFAULT_ROUTER_TOOLS，加上 operator 在 cordis.yml 里点名的
 // extraRouterTools。测试也只用中性名字，别把真名抄回来。
 const EXTRAS = ['external_send_file', 'screen_say', 'screen_status', 'screen_power']

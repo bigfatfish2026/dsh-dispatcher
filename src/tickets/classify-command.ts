@@ -10,12 +10,12 @@
  *
  * - **强信号优先。** 任务书里明写「需要执行命令」「要用 bash 跑命令」时不给模型
  *   留否定的余地：直接 yes，这一条不花调用。模型判 no 而任务书命中命令类词
- *   （grep/解压/journalctl）时，也以任务书为准——这是 2026-11-04 那两张白跑票
+ *   （grep/解压/journalctl）时，也以任务书为准——这是早先那两张白跑票
  *   的直接教训。
  * - **失败不猜。** 调用失败、超时、解析不出 `NEEDS_COMMAND` 行，都退回词表，
  *   并 warn 一行说明退到了哪张表、命中了哪个词；不静默当「不要命令」。
  * - **日志里没有任务书原文。** 只记模型、耗时、结论和命中的词。goal/brief 是
- *   维护者写的话，落进日志再被谁读走都是泄漏。
+ *   使用方写的话，落进日志再被谁读走都是泄漏。
  */
 import type { LlmStreamChunk, LlmService } from './classify'
 import { deadline, parseModelRoute, parseNeedsCommand, TimeoutReason } from './classify'
@@ -83,11 +83,11 @@ export const STRONG_COMMAND_SIGNALS: readonly string[] = [
  * system prompt：一条硬判据 + 一行输出格式。
  *
  * 「日志/会话记录/压缩包算要命令」这句必须留着：模型很容易把「翻一下会话记录」
- * 判成不用命令，鱼拿到手连 grep 都没有。
+ * 判成不用命令，子会话拿到手连 grep 都没有。
  */
 export function buildNeedsCommandSystem(): string {
   return [
-    '你是命令判定的分诊：读一张待派工单，只回答一件事——干完这张活，执行方需不需要真的运行程序。',
+    '你是命令判定的分诊：读一张待派工单，只回答一件事——干完这张活，这个任务需不需要真的运行程序。',
     '算需要执行命令的包括但不限于：跑 bash 或脚本、grep/find/sed/awk、zstd/gzip/tar 解压、journalctl/systemctl、git 命令、ps/top/df、curl、编译构建、安装依赖、跑测试、统计排序去重。',
     '日志、会话记录、备份包、压缩包不是普通文本文件：查它们必须用命令，算需要。',
     '真正不用命令的只有：读工作区里的普通文本或图片、查长期记忆和向量索引、上网搜资料、控制设备（放歌开灯）。',

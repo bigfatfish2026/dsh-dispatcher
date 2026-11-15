@@ -6,7 +6,7 @@
  *
  * - `undo.howto` 必须是具体命令或具体路径。「回滚即可」「自行处理」这种空话
  *   在 `checkUndoHowto` 就被挡下：空话的撤回指南比没有更糟，它让人以为有退路。
- * - 开票不再收 intent（2026-11-14 起只由 `dispatch_declare` 交），所以开票
+ * - 开票不再收 intent（此前只由 `dispatch_declare` 交），所以开票
  *   路径上没有闸；`reversibility=none` 这类事实由审计事后列出来，不是拦下来。
  * - 审计只读：按 `closedAt` 限最近 N 天扫 done 票，产出文本，一个字节都不写。
  */
@@ -114,7 +114,7 @@ export function checkUndoHowto(howto: unknown): UndoCheck {
     return {
       ok: false,
       code: 'no-anchor',
-      reason: `undo.howto 看不出具体动作（「${raw}」）：至少要有一条命令或一个路径，例如 git checkout <sha> / cp /home/user/….bak /home/user/…`,
+      reason: `undo.howto 看不出具体动作（「${raw}」）：至少要有一条命令或一个路径，例如 git checkout <sha> / cp /srv/app/….bak /srv/app/…`,
     }
   }
   return { ok: true }

@@ -120,7 +120,7 @@ describe('TicketDesk 视图', () => {
   it('挂起超过阈值就标 stale，关掉的票永不 stale', async () => {
     const h = makeDesk({ now: new Date('2026-11-01T00:00:00.000Z') })
     const receipt = await h.desk.open({ goal: 'build it', brief: '开工', requestId: 'r-1' }, h.main)
-    await h.desk.block(receipt.id, '等维护者拍板', h.main)
+    await h.desk.block(receipt.id, '等使用方拍板', h.main)
     h.clock.advance(61 * 60_000)
 
     const parked = h.desk.get(receipt.id)!

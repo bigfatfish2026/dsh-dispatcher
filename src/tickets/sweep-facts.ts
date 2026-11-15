@@ -1,8 +1,8 @@
 /**
  * 巡检事实：主会话该知道的票台近况，写成一段动态上下文，不走「人话消息」。
  *
- * 为什么不是 `followup`：注进主会话的 user 消息在模型眼里和维护者打的话一模一样，
- * 原来那几句「要看看就用 dispatch_read」读起来就是维护者下的命令，主会话回头冲着
+ * 为什么不是 `followup`：注进主会话的 user 消息在模型眼里和使用方打的话一模一样，
+ * 原来那几句「要看看就用 dispatch_read」读起来就是使用方下的命令，主会话回头冲着
  * 它自己回话。这里改成陈述句、带来源，交给宿主渲染成 runtime-context 快照——
  * 模型看见的是环境状态，不是谁在说话。
  *
@@ -47,8 +47,8 @@ export interface SweepFacts {
 /** 每个 `kind` 的先后：同一张票上「有报告」比「还没收工」更该先看。 */
 const ORDER: readonly SweepFactKind[] = ['report', 'blocked', 'no-report', 'waiting', 'running']
 
-/** 这段话的开头：说明来源，不冒充维护者。 */
-export const SWEEP_HEADER = 'dsh-dispatcher 巡检：以下是票台近况，不是维护者在说话。'
+/** 这段话的开头：说明来源，不冒充使用方。 */
+export const SWEEP_HEADER = 'dsh-dispatcher 巡检：以下是票台近况，不是使用方在说话。'
 
 /** 五分钟粒度：窗口内文本不变，窗口之间才动一次。 */
 function coarseMinutes(since: string, now: Date): number {

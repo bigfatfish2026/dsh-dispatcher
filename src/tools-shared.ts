@@ -38,7 +38,7 @@ export function stringsOf(value: unknown): string[] | undefined {
  * 把工具参数里的 `intent` 收敛成协议形状：只留认识的栏，空值丢掉。
  *
  * 模型多塞的键不进日志；`reversibility` 给了不认识的值就整栏丢掉，不静默
- * 降级成 `auto`（那等于把闸拆了），也不报错——2026-11-14 起 intent 只由
+ * 降级成 `auto`（那等于把闸拆了），也不报错——此前 intent 只由
  * `dispatch_declare` 交，声明里写错一个字不该把整条声明拒掉。
  */
 export function intentSpecOf(raw: unknown): IntentSpec | undefined {

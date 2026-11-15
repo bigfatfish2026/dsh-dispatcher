@@ -1,7 +1,7 @@
 /**
  * 探路窗口：探路子会话那一轮的只读钳子。
  *
- * 设计稿 §8：探路和执行是两只子会话，探路那只不该写盘——它只交方案（`declared`），
+ * 设计稿 §8：探路和执行是两个子会话，探路子会话不该写盘——它只交方案（`declared`），
  * 动手是执行轮的事。宿主给到手的只有「按工具名减面」这一刀
  * （`agent.ctx.tools.restrict`），所以窗口本身很朴素：一张 deny 单，`write` /
  * `edit` / `bash` 三件。
@@ -17,7 +17,7 @@
  * 但登记只记票号认不了人：宿主的 `agent/created` 是在 `startActivation` 返回
  * 之前发出来的，那一瞬派活方还拿不到 childId。所以 spawn 回来之后要补一刀
  * `bind()` 把 worker 的会话身份记进登记项；身份没落地的 `agent/created` 先挂在
- * `held` 里，等 bind 认领——别让别人的新会话把登记吃掉（2026-11-14 审计那条）。
+ * `held` 里，等 bind 认领——别让别人的新会话把登记吃掉（早先审计那条）。
  *
  * 拆窗口有三处，全在 desk 里：子会话 idle（交完声明 / 干完一轮）、探路超时降级、
  * 台子收起（`releaseAll`）。超时那处拆完就当场判冲突然派执行轮，不等 idle——
@@ -40,7 +40,7 @@ export interface ProbeAgent {
   ctx?: { tools?: { restrict?: (filter: { deny: readonly string[] }) => unknown } }
 }
 
-/** agent 的稳定身份：`id` 优先，退到 `session.id`。判「是不是那只子会话」就靠它。 */
+/** agent 的稳定身份：`id` 优先，退到 `session.id`。判「是不是那个子会话」就靠它。 */
 function agentKey(agent: ProbeAgent | undefined): string | undefined {
   return agentIdOf(agent) ?? agent?.session?.id
 }
@@ -131,7 +131,7 @@ export class ProbeWindows implements ProbePort, ProbeRegistry {
     expected.workerId = workerId
     for (const agent of expected.held) {
       if (!isSameWorker(workerId, agentKey(agent) ?? '')) continue
-      // 认领成功：登记到此为止，窗口挂到这只子会话身上。
+      // 认领成功：登记到此为止，窗口挂到这个子会话身上。
       this.expected = undefined
       this.install(expected, agent)
       return
@@ -171,7 +171,7 @@ export class ProbeWindows implements ProbePort, ProbeRegistry {
     const expected = this.expected
     if (!expected) return undefined
     const workerId = agentKey(agent)
-    // 没有 id 就判不了是不是那只子会话：忽略，也不消耗登记。
+    // 没有 id 就判不了是不是那个子会话：忽略，也不消耗登记。
     if (!workerId) return undefined
     if (expected.workerId === undefined) {
       // spawn 还没回来：身份不明，先挂着。bind 会把匹配的那只领走。

@@ -159,7 +159,7 @@ describe('send', () => {
 
   it('blocked 里投不出去：留在 blocked，别假装解封了', async () => {
     const { h, id } = await opened()
-    await h.desk.block(id, '等维护者拍板')
+    await h.desk.block(id, '等使用方拍板')
     h.agents.markGone('session-main')
     const receipt = await h.desk.send(id, '补一句')
     expect(receipt.delivered).toBe(false)
@@ -215,8 +215,8 @@ describe('close / block', () => {
 
   it('block 挂起；worker 不许改状态', async () => {
     const { h, id } = await opened()
-    expect((await h.desk.block(id, '等维护者拍板')).status).toBe('blocked')
-    expect(h.log.get(id)!.note).toBe('等维护者拍板')
+    expect((await h.desk.block(id, '等使用方拍板')).status).toBe('blocked')
+    expect(h.log.get(id)!.note).toBe('等使用方拍板')
     await expect(
       h.desk.block(id, '子会话想挂', { kind: 'worker', sessionId: 'worker-1' }),
     ).rejects.toThrow(/worker/)

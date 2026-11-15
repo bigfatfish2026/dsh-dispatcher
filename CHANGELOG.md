@@ -1,76 +1,78 @@
 # Changelog
 
-## 2.2.1 - 2026-11-15
+版本历史。条目只写改了什么，不记内部工单号与日期。
+
+## 2.2.1
 
 ### Added
 
-2026-11-15 — 探路声明成了票上意图的唯一入口：`dispatch_open` 不再收 `intent` / `probe`，每张票一律先起只读探路子会话，它用新工具 `dispatch_declare` 交 `plan`（摘要 + 文件清单）和 `intent`（writes / reads / impact / reversibility / dryRun / undo），票号不给、按调用者反查自己名下那张票，只追加不碰状态；收尾用新工具 `dispatch_touch` 报这一轮实际动过的文件，按路径合并，关票时对账。资源串认 `file:` / `dir:` / `git:` / `svc:` / `port:` / `dev:` 六个前缀，`git` 自动补仓库根；脏串（`cmd:`、`http:`、带说明的端口）只降级并 warn，不打断判定。探路窗口 2 分钟，到点没声明就转 `planned` 并标 `degraded`，投一轮「直接干、干完补声明」的任务书；交过的 `plan` 摘要（200 字）与前 8 个文件（每个一句）写进执行轮任务书，执行子会话不用重新摸边界。
+探路声明成了票上意图的唯一入口：`dispatch_open` 不再收 `intent` / `probe`，每张票一律先起只读探路子会话，它用新工具 `dispatch_declare` 交 `plan`（摘要 + 文件清单）和 `intent`（writes / reads / impact / reversibility / dryRun / undo），票号不给、按调用者反查自己名下那张票，只追加不碰状态；收尾用新工具 `dispatch_touch` 报这一轮实际动过的文件，按路径合并，关票时对账。资源串认 `file:` / `dir:` / `git:` / `svc:` / `port:` / `dev:` 六个前缀，`git` 自动补仓库根；脏串（`cmd:`、`http:`、带说明的端口）只降级并 warn，不打断判定。探路窗口 2 分钟，到点没声明就转 `planned` 并标 `degraded`，投一轮「直接干、干完补声明」的任务书；交过的 `plan` 摘要（200 字）与前 8 个文件（每个一句）写进执行轮任务书，执行子会话不用重新摸边界。
 
 冲突判定落在 `src/tickets/conflict.ts`：同一资源强冲突，`dir` 祖孙与 `svc` / `port` / `dev` 同类判 weak，同 repo 不同 worktree 按 git 两模式判（都没声明 worktree 算强冲突、各声明不同 worktree 降回文件级）；撞资源的票进 `phase=queued` 排队，由票台按 FIFO 放行，`status=blocked` 从此只表示「等人拍板」。
 
 ### Changed
 
-2026-11-15 — 生命周期收口：巡检每拍补一次漏唤醒兜底（对手票终态 / 不在日志 / worker 不在活表就放行）、排队超过 15 分钟放掉原 worker 并在放行时新起一只、越界除回执外经 notifier 推一句、删掉 189 行无调用者的 `src/zombie.ts` 与 21 条测试。`apply()` 拆成五个安装器（Prompt / Store / Restrict / Tools / Desk），1420 行收到 171 行；协议常量与配置默认值单点化到 `src/protocol.ts` / `src/defaults.ts`，工具名、状态与相位、写类工具名单、`34/20/60` 和名额默认值不再各写一份。接入 v8 覆盖率（`pnpm coverage`），cli 的兜底告警跟着走默认值。这 18 条里 apply 拆分与大纲同步那 6 条落在 `v2.2.1` tag 之后，一并记在本条目，下次发版不再重复记。
+生命周期收口：巡检每拍补一次漏唤醒兜底（对手票终态 / 不在日志 / worker 不在活表就放行）、排队超过 15 分钟放掉原 worker 并在放行时新起一只、越界除回执外经 notifier 推一句、删掉 189 行无调用者的 `src/zombie.ts` 与 21 条测试。`apply()` 拆成五个安装器（Prompt / Store / Restrict / Tools / Desk），1420 行收到 171 行；协议常量与配置默认值单点化到 `src/protocol.ts` / `src/defaults.ts`，工具名、状态与相位、写类工具名单、`34/20/60` 和名额默认值不再各写一份。接入 v8 覆盖率（`pnpm coverage`），cli 的兜底告警跟着走默认值。这 18 条里 apply 拆分与大纲同步那 6 条落在 `v2.2.1` tag 之后，一并记在本条目，下次发版不再重复记。
 
 ### Fixed
 
-2026-11-15 — 三个审计点：`delivered` 在 `phase=planning` 时不再把票推成 `running`（否则 idle 不落 `idled`、不派执行轮，只能等探路降级兜底）；`dispatch_report` 改成和 `declare` / `touch` 同一套归属反查，别人的票写不进来；planned 的票补兜底放行，探路轮 idle 不再静默。等待守卫改从 `tools` 服务取，不再吃不到工具面。
+三个审计点：`delivered` 在 `phase=planning` 时不再把票推成 `running`（否则 idle 不落 `idled`、不派执行轮，只能等探路降级兜底）；`dispatch_report` 改成和 `declare` / `touch` 同一套归属反查，别人的票写不进来；planned 的票补兜底放行，探路轮 idle 不再静默。等待守卫改从 `tools` 服务取，不再吃不到工具面。
 
 ### Docs
 
-2026-11-15 — `docs/revert-ledger.md` 落地（intent 入口从 `dispatch_open` 挪到 `dispatch_declare`）；README 中英两版同步探路窗口、`phase` 与长短等、`maxExec` / `maxQueued` 两本账和 `pnpm coverage`；`docs/sequences.py` 重画四张时序图，open 图补「探路 → declare → 放行」，lifecycle 图补「`queued` 排队」。
+`docs/revert-ledger.md` 落地（intent 入口从 `dispatch_open` 挪到 `dispatch_declare`）；README 中英两版同步探路窗口、`phase` 与长短等、`maxExec` / `maxQueued` 两本账和 `pnpm coverage`；`docs/sequences.py` 重画四张时序图，open 图补「探路 → declare → 放行」，lifecycle 图补「`queued` 排队」。
 
 Tests: 69 个文件 745 条全绿，`tsc --noEmit` 干净，`pnpm run build` 通过。
 
-## 2.2.0 - 2026-11-09
+## 2.2.0
 
 ### Added
 
-2026-11-09 — 票事件写入走 dsh-events，直写路径保留作退化：`TicketLog` 在 commit 时惰性探测 `events` 服务，拿到就用、拿不到回直写，探测结果只缓存服务对象、不缓存「暂时没有」；publish 带上票号，`foldTicket` 不再翻 payload 兜底。
+票事件写入走 dsh-events，直写路径保留作退化：`TicketLog` 在 commit 时惰性探测 `events` 服务，拿到就用、拿不到回直写，探测结果只缓存服务对象、不缓存「暂时没有」；publish 带上票号，`foldTicket` 不再翻 payload 兜底。
 
 巡检换驱动源：`dispatcher.sweep.tick` 定义并订阅，`schedule` 服务在时注册规则，注册成功才停自己的 `setInterval`；schedule 不在、注册被拒、tick 断流三条路各自回落并留一行日志。另挂 `internal/service` 监听，schedule 就绪当场 reconcile，监听器整只包 try/catch（dsh-events 的 emit 不兜错，抛出来会弄挂 timer 的 apply）。
 
 ### Fixed
 
-2026-11-09 — `clock.setInterval` 改成 unref；schedule 缺席时日志按情况分开写，watchdog 在监听挂着却一次事件没收到时从 3 个周期收紧到 10 分钟，并顺手用 `schedule.list()` 核一遍规则还在不在。
+`clock.setInterval` 改成 unref；schedule 缺席时日志按情况分开写，watchdog 在监听挂着却一次事件没收到时从 3 个周期收紧到 10 分钟，并顺手用 `schedule.list()` 核一遍规则还在不在。
 
 ### Changed
 
-2026-11-09 — 许可证统一为 MIT，版权人改为蓝色大肥鱼。
+许可证统一为 MIT，版权人改为 bigfatfish2026。
 
 Tests: 全量 `pnpm test` 与 `tsc --noEmit` 全绿；当时条数未单独记账，2.2.1 收在 69 个文件 745 条。
 
-## 2.1.1 - 2026-11-09
+## 2.1.1
 
 ### Changed
 
-2026-11-09 — 提示词里的称呼改硬：主会话提到执行任务的子会话一律写「子会话」，禁用「她」「它」「那只」「agent」这些第三人称，同时有多只写「几只子会话」，措辞写明「这是硬规则，不是建议」。`personaPrefix`、`personaSuffix`、`handoffPolicyText` 三处同步（profile 覆盖 + 本仓默认值），其余条款一字未动。
+提示词里的称呼改硬：主会话提到执行任务的子会话一律写「子会话」，禁用「她」「它」「那只」「agent」这些第三人称，同时有多只写「几个子会话」，措辞写明「这是硬规则，不是建议」。`personaPrefix`、`personaSuffix`、`handoffPolicyText` 三处同步（profile 覆盖 + 本仓默认值），其余条款一字未动。
 
 Tests: 全量 `npm test` 40 个文件 464 条全绿，`tsc --noEmit` 干净，`npm run build` 通过。
 
-## 2.1.0 - 2026-11-09
+## 2.1.0
 
 ### Added
 
-2026-11-09 — sqlite 存储后端可选（默认仍 jsonl），票 CLI 跟 `store.backend` 走：`config` 多了 `store.backend`（`jsonl` | `sqlite`）与 `store.sqlite.path`，选 sqlite 时票台读写 `~/.dsh/dispatcher/tickets.db`（WAL），事件表与 `meta` 里的 `schema_version` / `lastSeq` 对齐 jsonl 的序号；老库用 `scripts/migrate-to-sqlite.ts` 一次性搬，`scripts/verify-after-switch.sh` 做切换后验收。`tickets` CLI 不再写死 jsonl，读 profile 的 `store.backend`，也可用 `--backend` / `--db` 临时覆盖；默认配置不变，不切就跟 2.0.1 一样跑 jsonl。
+sqlite 存储后端可选（默认仍 jsonl），票 CLI 跟 `store.backend` 走：`config` 多了 `store.backend`（`jsonl` | `sqlite`）与 `store.sqlite.path`，选 sqlite 时票台读写 `~/.dsh/dispatcher/tickets.db`（WAL），事件表与 `meta` 里的 `schema_version` / `lastSeq` 对齐 jsonl 的序号；老库用 `scripts/migrate-to-sqlite.ts` 一次性搬，`scripts/verify-after-switch.sh` 做切换后验收。`tickets` CLI 不再写死 jsonl，读 profile 的 `store.backend`，也可用 `--backend` / `--db` 临时覆盖；默认配置不变，不切就跟 2.0.1 一样跑 jsonl。
 
 Tests: 新增 `tests/sqlite-backend.test.ts`、`tests/sqlite-crash.test.ts`（落盘与崩溃恢复）、`tests/migrate.test.ts`、`tests/cli-backend.test.ts`（CLI 跟后端），`tests/store-backend.test.ts` 补后端解析；全量 `npm test` 见发版记录。
 
-## 2.0.1 - 2026-11-04
+## 2.0.1
 
 ### Fixed
 
-2026-11-04 — 修「翻日志/解压/查会话记录被判成只读档」：三处一起改。分类器 prompt 把原来那句「只读看文件、只查记忆都算 no」换成硬判据——跑 bash/脚本、grep/find/sed/awk、zstd/gzip 解压、journalctl/systemctl、git、ps/top、curl、编译、跑测试、统计排序去重都算要命令；日志、会话记录、备份包不是普通文本，查它们必须用命令；只有读普通文本/图片、查记忆、网页搜索才算不用命令，拿不准就 yes + t1。选档守卫 rule2 不再信 `needsCommand === false`：false 时也跑关键词，任务书里出现命令类词就按矛盾驳回，错误信息点名命中的词（「任务书里出现命令类词「grep」，判成不需要执行命令」）；undefined 维持原样只走关键词兜底。默认关键词表补 15 个：grep、zstd、gunzip、sed、awk、curl、journalctl、解压、日志、会话记录、cat、排序、统计、跑一遍、执行（拉丁词整词、大小写不敏感，`digit`/`category`/`dispatch_report` 不误伤；「读 README」不含「日志」不拦）。
+修「翻日志/解压/查会话记录被判成只读档」：三处一起改。分类器 prompt 把原来那句「只读看文件、只查记忆都算 no」换成硬判据——跑 bash/脚本、grep/find/sed/awk、zstd/gzip 解压、journalctl/systemctl、git、ps/top、curl、编译、跑测试、统计排序去重都算要命令；日志、会话记录、备份包不是普通文本，查它们必须用命令；只有读普通文本/图片、查记忆、网页搜索才算不用命令，拿不准就 yes + t1。选档守卫 rule2 不再信 `needsCommand === false`：false 时也跑关键词，任务书里出现命令类词就按矛盾驳回，错误信息点名命中的词（「任务书里出现命令类词「grep」，判成不需要执行命令」）；undefined 维持原样只走关键词兜底。默认关键词表补 15 个：grep、zstd、gunzip、sed、awk、curl、journalctl、解压、日志、会话记录、cat、排序、统计、跑一遍、执行（拉丁词整词、大小写不敏感，`digit`/`category`/`dispatch_report` 不误伤；「读 README」不含「日志」不拦）。
 
 Tests: `tests/preset-guard.test.ts` 新增 5 条（新词表逐词、三条 false+命令词驳回、三条只读负例放行、false+有 bash 放行），`tests/classify.test.ts` 新增 5 条（4 条 NEEDS_COMMAND 格式契约：grep 会话→yes、README/记忆/放歌→no；1 条新 prompt 四例断言）并按新 prompt 更新旧断言。全量 36 个文件 421 条全绿，`tsc --noEmit` 干净，`npm run build` 通过。
 
-## 2.0.0 - 2026-11-04
+## 2.0.0
 
 ### Added
 
-2026-11-04 — 选档一致性校验：分类器挑了干不了这活的档，就不开票。原来「任务要跑命令、档里没有 bash」也能开出票来，子会话一上手就撞墙，票挂在小屏上等人收尸。现在档定了、票还没建之前过三道规则，按顺序判：档在注册表里且声明的工具面读得到（`preset-guard.ts` 解 `dsh-preset-toolset` 的 allow/deny；读不到按「档装不上」驳回，不猜）、档在 `allowedPresets` 里（空数组 = 不校验）、要跑命令的活必须落在真有命令工具的档上。驳回抛 `PresetRejectedError`，`dispatch_open` 把规则、档名、原因和建议档一起报回去；票一个事件都不写，日志留一行 `选档驳回 rule=… preset=… source=… brief=… goal=… 原因=…`。
+选档一致性校验：分类器挑了干不了这活的档，就不开票。原来「任务要跑命令、档里没有 bash」也能开出票来，子会话一上手就撞墙，票挂在小屏上等人收尸。现在档定了、票还没建之前过三道规则，按顺序判：档在注册表里且声明的工具面读得到（`preset-guard.ts` 解 `dsh-preset-toolset` 的 allow/deny；读不到按「档装不上」驳回，不猜）、档在 `allowedPresets` 里（空数组 = 不校验）、要跑命令的活必须落在真有命令工具的档上。驳回抛 `PresetRejectedError`，`dispatch_open` 把规则、档名、原因和建议档一起报回去；票一个事件都不写，日志留一行 `选档驳回 rule=… preset=… source=… brief=… goal=… 原因=…`。
 
-「要不要跑命令」是三态：分类器的 JSON 多一个 `needs_command`（true 必须查、false 不查关键词、缺失走兜底），关键词表 `commandKeywords`（默认 17 个，含否定的分句先剔掉——「不许跑命令」不算），命中且档里没命令工具就驳回，命中的词写进日志方便调表。`rejectOnMismatch` 默认开，关掉回到 2026-11-04 之前的裸选。
+「要不要跑命令」是三态：分类器的 JSON 多一个 `needs_command`（true 必须查、false 不查关键词、缺失走兜底），关键词表 `commandKeywords`（默认 17 个，含否定的分句先剔掉——「不许跑命令」不算），命中且档里没命令工具就驳回，命中的词写进日志方便调表。`rejectOnMismatch` 默认开，关掉回到早先的裸选。
 
 `allowedPresets` 是从 profile 手抄的镜像，插件读不到 `tool-subagent.allowedAgentPresets`，所以装载时对一遍注册表，抄错的名字 warn 一行。档位工具面按 id 缓存，`tools/change`（MCP 上下线）清空；宿主注册表没有 `readDocument` 这一口的老版本只 warn 一次，然后只查档名——门少一道，但不拿没依据的猜测驳回。
 
@@ -78,15 +80,15 @@ Tests: 新增 `tests/preset-guard.test.ts` 22 条（三条规则、否定分句�
 
 ### Changed
 
-2026-11-04 — 巡检提醒不再冒充维护者说话。根子是投递通道：`followup` 注进主会话的是一条 user 消息，模型看见的和维护者打的字一模一样；旧文案还写着「要看看就用 dispatch_read」，读起来就是维护者下的命令，主会话于是回头对着提醒回话。现在 reportArrived / waiting / running / noReport 四类只记成「巡检事实」（`sweep-facts.ts`），挂到 `system-prompt/assemble` 上作为动态上下文 `dispatcher:sweep`：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是谁在说话。文本以 `dsh-dispatcher 巡检：…不是维护者在说话。` 开头，一张票一行，陈述句，不点工具名；时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖。`interpolate: false`，票的 brief 里有 `{{…}}` 也不会被当成提示词变量。worker 会话（`header.origin === 'subagent'`）跳过这段上下文。
+巡检提醒不再冒充使用方说话。根子是投递通道：`followup` 注进主会话的是一条 user 消息，模型看见的和使用方打的字一模一样；旧文案还写着「要看看就用 dispatch_read」，读起来就是使用方下的命令，主会话于是回头对着提醒回话。现在 reportArrived / waiting / running / noReport 四类只记成「巡检事实」（`sweep-facts.ts`），挂到 `system-prompt/assemble` 上作为动态上下文 `dispatcher:sweep`：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是谁在说话。文本以 `dsh-dispatcher 巡检：…不是使用方在说话。` 开头，一张票一行，陈述句，不点工具名；时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖。`interpolate: false`，票的 brief 里有 `{{…}}` 也不会被当成提示词变量。worker 会话（`header.origin === 'subagent'`）跳过这段上下文。
 
-读过就撤：`dispatch_read` / `dispatch_close` 和 `dispatch_list` 见过哪张票，就把对应条目摘掉，没读的继续挂着。摘在工具层而不是 `desk.list()` 里——小屏和 readout 的轮询也走 `desk.list()`，不能让它们替人「读过」。只有 `blocked` 超阈值真去 `followup`，开头 `[sweep] `，第二句明说「这是巡检提醒，不是维护者在说话，看情况处理，不用回我」；宿主没有动态上下文这一口时其余三类退回唤醒，同样带前缀。事实表只在内存里，进程重启后由巡检重新发现，过期提醒不会被读回来。
+读过就撤：`dispatch_read` / `dispatch_close` 和 `dispatch_list` 见过哪张票，就把对应条目摘掉，没读的继续挂着。摘在工具层而不是 `desk.list()` 里——小屏和 readout 的轮询也走 `desk.list()`，不能让它们替人「读过」。只有 `blocked` 超阈值真去 `followup`，开头 `[sweep] `，第二句明说「这是巡检提醒，不是使用方在说话，看情况处理，不用回我」；宿主没有动态上下文这一口时其余三类退回唤醒，同样带前缀。事实表只在内存里，进程重启后由巡检重新发现，过期提醒不会被读回来。
 
 Tests: 新增 `tests/notify-facts.test.ts` 9 条（四类零 followup、blocked 唤醒文案、五分钟窗口内文本不变、`forget` 摘条目），`tests/sweep-snapshot.test.ts` 6 条（快照含票号、worker 不收、list/read/close 后条目消失、两次装配逐字相同）；`tests/handoff-policy.test.ts` 改成按追加段名断言，不再数 hook 个数。全量 36 个文件 411 条全绿，`tsc --noEmit` 干净。
 
 ### Docs
 
-2026-11-04 — 只动文档和图，不动运行时。README 从 276/267 行收到 92 行，只留三块：基本思想、怎么用、注意事项；配置全表、事件模型、巡检与工具面挪进 `docs/internals.zh.md` / `docs/internals.en.md`（各 125 行）。
+只动文档和图，不动运行时。README 从 276/267 行收到 92 行，只留三块：基本思想、怎么用、注意事项；配置全表、事件模型、巡检与工具面挪进 `docs/internals.zh.md` / `docs/internals.en.md`（各 125 行）。
 
 README 里原来挂的两张图（`worker-ticket-lifecycle.zh/en.png` 泳道图、`ticket-state-machine.zh/en.png` 状态机图）画于 11-02 / 11-03，讲的还是 `dispatch_touch`、`dispatch_sweep` 那套已经不存在的工具面和 5 分钟巡检、复活闸门，图上还引着一批早已失效的 `index.ts` 行号。换成按 2.0 实现重画的四张时序图：`dispatcher-seq-open.zh/en.png`（一次派活：`dispatch_open` → 票台选档、校验、建票、spawn → 回执里没有 workerId）和 `dispatcher-seq-lifecycle.zh/en.png`（一张票的全程：报告、读报告、落到 `waiting`、`dispatch_send` 回 `running`、`blocked` 进出、每 10 秒巡检把四类事实写进动态上下文且只有 `blocked` 过阈值才发一条 `[sweep]` 提醒、`dispatch_close` 收工、收工后再派活被拒）。
 
@@ -94,14 +96,14 @@ README 里原来挂的两张图（`worker-ticket-lifecycle.zh/en.png` 泳道图�
 
 ### Fixed
 
-2026-11-04 — 只动测试，不动运行时。`tests/index.test.ts` 里两处「开票后按顺序比 id」的断言（第 139、154 行）撞上同一毫秒的票号：票 id 是 `t-<毫秒 36 进制>-<4 位随机盐>`，两张票落在同一毫秒时时间戳段相同，`list()` 的兜底排序按 id 字典序，先后由随机盐决定，与插入顺序无关。本机复跑该文件 8 次红 5 次，CI 也挂在这一步（`pnpm test`）。断言改成两边都 `.sort()` 后比，仍然精确比「两张、两个具体 id」，只放弃无意义的同毫秒先后；`list()` 的 createdAt→id 排序契约一行没改。验证：该文件连跑 12 次全绿，全量 `npx vitest run` 两次 411 条全绿，`tsc --noEmit` 干净。
+只动测试，不动运行时。`tests/index.test.ts` 里两处「开票后按顺序比 id」的断言（第 139、154 行）撞上同一毫秒的票号：票 id 是 `t-<毫秒 36 进制>-<4 位随机盐>`，两张票落在同一毫秒时时间戳段相同，`list()` 的兜底排序按 id 字典序，先后由随机盐决定，与插入顺序无关。本机复跑该文件 8 次红 5 次，CI 也挂在这一步（`pnpm test`）。断言改成两边都 `.sort()` 后比，仍然精确比「两张、两个具体 id」，只放弃无意义的同毫秒先后；`list()` 的 createdAt→id 排序契约一行没改。验证：该文件连跑 12 次全绿，全量 `npx vitest run` 两次 411 条全绿，`tsc --noEmit` 干净。
 
-## 1.5.0 - 2026-11-03
+## 1.5.0
 
 
 ### Added
 
-2026-11-04 — 新增 `dispatch_reports`：报告正文终于有人读得到。2026-11-02 那次洪水之后，巡检和 `announce` 都不再往主会话送正文，主会话手上却只剩 `dispatch_list` 里的 `«n` ——数字看得见、内容拿不到，等于每张票都得靠 worker 自己 `send_message` 喊一声。
+新增 `dispatch_reports`：报告正文终于有人读得到。此前一次报告回灌之后，巡检和 `announce` 都不再往主会话送正文，主会话手上却只剩 `dispatch_list` 里的 `«n` ——数字看得见、内容拿不到，等于每张票都得靠 worker 自己 `send_message` 喊一声。
 
 新工具插在 `dispatch_report` 后面：入参 `id?`（省略＝所有还有未读的未结票，已关票要按 id 点名）、`limit?`（默认 10、上限 50）、`includeRead?`（默认 false，只给未读；没有 `unreadOnly` 这种反义开关）。返回 `{tickets:[{id,status,goal,unread,reports:[{n,id,at,text,read,truncated?}]}],returned,markedRead}`：`n` 是这张票完整报告列表里的 1 起序号，同一份报告永远同一个号；`text` 超 4000 字截断并标 `truncated`（按码点切，不劈开代理对）。
 
@@ -113,19 +115,19 @@ README 里原来挂的两张图（`worker-ticket-lifecycle.zh/en.png` 泳道图�
 
 Tests: 新增 `tests/reports-tool.test.ts` 8 条（未读过滤+读完 `«n` 归零、`limit` 挡下的不标记且下一轮接着读、`includeRead` 带全历史且不重复记账、省略 id 跨票取且不碰已关票、已关票按 id 读已读正文、4000 字截断且不截的不带 `truncated`、坏票 id 报错、读报告前后僵尸指纹不变）。全量 23 个文件 241 条全绿，`tsc --noEmit` 干净，`pnpm build` 通过。
 
-2026-11-04 — 票存储抽出后端接口。原来 `src/store.ts` 一个文件里既折票又直接 `openSync/writeSync` 写 jsonl，换个存储得把业务跟着改一遍。现在分成三层：`src/store/backend.ts` 是契约（`TicketBackend` 只有 `location` / `changed()` / `load()` / `append(event)` 四个原语，业务语义全留在门面上），`src/store/jsonl.ts` 的 `JsonlTicketStore` 是今天唯一的实现，`TicketStore` 只持有接口实例。开票、改状态、排 input、追加报告、标已读、清已关票的报告，统统是 `append()` 一条不可变事件——接 redis/sqlite 只要实现「读全量 + 原子追加 + 变更探测」，业务代码一行不改。
+票存储抽出后端接口。原来 `src/store.ts` 一个文件里既折票又直接 `openSync/writeSync` 写 jsonl，换个存储得把业务跟着改一遍。现在分成三层：`src/store/backend.ts` 是契约（`TicketBackend` 只有 `location` / `changed()` / `load()` / `append(event)` 四个原语，业务语义全留在门面上），`src/store/jsonl.ts` 的 `JsonlTicketStore` 是今天唯一的实现，`TicketStore` 只持有接口实例。开票、改状态、排 input、追加报告、标已读、清已关票的报告，统统是 `append()` 一条不可变事件——接 redis/sqlite 只要实现「读全量 + 原子追加 + 变更探测」，业务代码一行不改。
 
 配置新增 `store.backend`（默认 `jsonl`）。`redis` / `sqlite` 现在只认名字，选了在装载时抛「还没实现」，不会悄悄退回文件。日志格式、路径解析（相对 `DSH_HOME`）、一次 `writeSync` 追加、坏行跳过全部原样，老数据不用迁移。接口顶部写了五条后端验收标准：追加线性化/单写者、事件不可变、fold 可重放、崩溃后可恢复、`changed()` 只是优化。
 
 Tests: 新增 `tests/store-backend.test.ts` 5 条（默认实例化 jsonl 且路径原样、redis/sqlite 抛未实现、错名报错、内存后端跑完整业务且与整份 fold 一致、门面自己的写让 `changed()` 归零）。全量 22 个文件 233 条全绿，`tsc --noEmit` 干净，`pnpm build` 通过。
 
-2026-11-03 — 票的 owner 拆成两栏：`owner` 是人话标签（屏幕上显示的就是它，「t4 查qqbot PR」这种），新增可选 `ownerId` 存 spawn 返回的会话 id（uuid，`session-` 前缀也行）。背景是旧规矩：巡检只能从自由文本 owner 里抽 ≥6 位 hex 片段去活表比对，主会话写中文标签就抽不出来，`worker-gone` 永远不触发，票只能等 20 分钟 `silent`。
+票的 owner 拆成两栏：`owner` 是人话标签（屏幕上显示的就是它，「t4 查 example PR」这种），新增可选 `ownerId` 存 spawn 返回的会话 id（uuid，`session-` 前缀也行）。背景是旧规矩：巡检只能从自由文本 owner 里抽 ≥6 位 hex 片段去活表比对，主会话写中文标签就抽不出来，`worker-gone` 永远不触发，票只能等 20 分钟 `silent`。
 
 `dispatch_open` 带 `ownerId` 时开票前先查一次活表：不在表里直接拒绝开票（提示「ownerId 不在活表，可能是填错了或子会话已经结束」），一个事件都不写；查不到 agents 服务（没 get、或活表空着）时放行并记一条 warn。巡检那侧 `agentAlive` 多一个 `exact` 档：`ownerId` 存在就只按 `idVariants` 的几种写法精确比对，扫完没有就是 `false`，不再受 `hasIdFragment` 那道门限制；`worker-gone` 的其它条件（2 分钟新建宽限）原样。`subagent/end` 对票、以及把排队消息递回 worker 也优先用 `ownerId`。老票没有这个字段，`foldEvents` 读到就是 undefined，完全走旧路径。巡检仍然只推提醒、绝不写票状态。
 
 Tests: 新增 `tests/owner-id.test.ts` 10 条（fold 认字段、ownerId 命中活表开票、带前缀、不在活表拒开票且不落盘、没有 get 时放行并记日志、3 分钟 worker-gone、命中不推、老票中文标签仍 silent、老票短 hex 仍 worker-gone、subagent/end 按 ownerId 落 waiting）。全量 19 个文件 216 条全绿，typecheck 干净。
 
-2026-11-03 — worker subagent 的提示词也过一遍剪枝。原来只有主会话走 `bindPromptFilter`（`bindWorkerDeny` 那条分支没装），所以各插件无条件写进提示词的工具说明段（`tool:*`、`mcp:*`、`mcp-resource-servers`）在每条子会话会话里都吃满：browser 329 字、bilibili 370、bili_notify 379、jobs 384、goal 530、workflow 327、mcp-resource-servers 165、mcp:github 1828，合计 4312 字 ≈ 940 token。
+worker subagent 的提示词也过一遍剪枝。原来只有主会话走 `bindPromptFilter`（`bindWorkerDeny` 那条分支没装），所以各插件无条件写进提示词的工具说明段（`tool:*`、`mcp:*`、`mcp-resource-servers`）在每条子会话里都吃满：browser 329 字、bilibili 370、bili_notify 379、jobs 384、goal 530、workflow 327、mcp-resource-servers 165、mcp:github 1828，合计 4312 字 ≈ 940 token。
 
 口径跟主会话反着：worker 手上有什么工具由档位决定，静态清单一定对不上，所以**整族全剪**，不判断某个工具还在不在。判据没另写一套，`pruneToolSections` / `sectionToolFamily` 原样复用，只加一个 `dropAllToolSections` 开关；persona、plan policy、手递手规程这些非工具段照旧不碰。剪枝一次装、不跟着 `tools/change` 重装（结论跟 deny 名单无关），disposer 挂在 agent scope 上（`dsh-dispatcher.worker-prompt`），跟 `bindWorkerDeny` 一样撤得干净。
 
@@ -135,9 +137,9 @@ Tests: `tests/prompt.test.ts` 加 3 条（全剪、非工具段留着、无可�
 
 ### Changed
 
-2026-11-03 — 主会话白名单里不再写死别的插件注册的工具名。`DEFAULT_ROUTER_TOOLS` 摘掉四项（一个发文件的、三个小屏的），32 项；`qqPrefsPath` 的默认值也从一串路径改成空字符串。这个仓库只讲自己的口径：谁家的工具该留在主会话、会话映射文件放在哪，都由 operator 在 cordis.yml 里点名。
+主会话白名单里不再写死别的插件注册的工具名。`DEFAULT_ROUTER_TOOLS` 摘掉四项（一个发文件的、三个小屏的），32 项；`qqPrefsPath` 的默认值也从一串路径改成空字符串。这个仓库只讲自己的口径：谁家的工具该留在主会话、会话映射文件放在哪，都由 operator 在 cordis.yml 里点名。
 
-新的 `extraRouterTools`（string[]，默认空）接在 `routerTools` 后面，两段由 `routerAllowList()` 合并成一个 allow 表：顺序保留、重复丢掉、空串跳过，名字原样透传，没注册的仍旧是 router 丢掉并告警。`qqPrefsPath` 为空时不读盘，`resolveOwnerSession()` 直接给空，维护者会话只能由 `ownerSessionId` 明确指定——这是缺省语义，不是坏掉。
+新的 `extraRouterTools`（string[]，默认空）接在 `routerTools` 后面，两段由 `routerAllowList()` 合并成一个 allow 表：顺序保留、重复丢掉、空串跳过，名字原样透传，没注册的仍旧是 router 丢掉并告警。`qqPrefsPath` 为空时不读盘，`resolveOwnerSession()` 直接给空，使用方会话只能由 `ownerSessionId` 明确指定——这是缺省语义，不是坏掉。
 
 行为等价靠配置：装它的那份 profile 的 `cordis.patch.yml` 里，dispatcher 那块补上 `extraRouterTools` 四项和 `qqPrefsPath` 的原路径，主会话拿到的工具和以前一样。
 
@@ -145,7 +147,7 @@ Tests: `tests/router-allow-list.test.ts` 9 条——缺省时白名单等于 `DE
 
 ### Fixed
 
-2026-11-03 — 短标签 owner 的僵尸票不再得等满 20 分钟。原来 `zombie.ts` 先拿 `looksLikeSessionId` 卡一道：owner 不像 uuid 就连活表都不查，`worker-gone` 整条快路被跳过，`subagent 34b183b9` 这种短标签票只能退到 `silent` 慢路。
+短标签 owner 的僵尸票不再得等满 20 分钟。原来 `zombie.ts` 先拿 `looksLikeSessionId` 卡一道：owner 不像 uuid 就连活表都不查，`worker-gone` 整条快路被跳过，`subagent 34b183b9` 这种短标签票只能退到 `silent` 慢路。
 
 现在判活不看形态，看「owner 里有没有能拿去比对的东西」：`idVariants` / `matchesId` / `hexFragments` 从 `src/index.ts` 抽到新文件 `src/ids.ts`（`subagent/end` 收票和判活共用同一份，不再各留一套），`agentAlive` 拿 owner 逐个比对活表——先按 `session-` 前缀归一，再拿 ≥6 位 uuid 片段做前缀比对。扫完确实没有这个会话才判 `worker-gone`，短标签票也能立刻判死。慢路原样保留：匹配不上但长时间没动静的，照样按 `silent` 推。
 
@@ -153,11 +155,11 @@ Tests: `tests/router-allow-list.test.ts` 9 条——缺省时白名单等于 `DE
 
 Tests: 新增 `tests/ids.test.ts` 11 条（前缀归一、片段前缀、大小写、6 位阈值、纯中文不匹配、`hasIdFragment`），`tests/zombie-owner-match.test.ts` 10 条（短标签命中活会话不判、扫不到立刻 `worker-gone`、中文标签不误判、挂久了仍走 `silent`、full uuid 行为不变、新建 2 分钟宽限、活表空不判死、纯中文防住手滑的 `false`，外加两条 `apply` 端到端：sweep 只推该死的那张、活表里都在就一条不推）。全量 18 个文件 206 条全绿，`tsc --noEmit` 干净。README 中英两份和 `docs/worker-ticket-lifecycle` 图同步。
 
-## 1.4.0 - 2026-11-03
+## 1.4.0
 
 ### Changed
 
-2026-11-03 — `dispatch_open` 的 `brief` 从可选改成**必填**。1.3.0 里它是可选的，不传就从 `goal` 首句派生一句；实际跑下来主会话开票时懒得写，几乎全走回落，小屏第二行于是又变回被截断、挂着省略号的 `goal`，这个字段等于白加。
+`dispatch_open` 的 `brief` 从可选改成**必填**。1.3.0 里它是可选的，不传就从 `goal` 首句派生一句；实际跑下来主会话开票时懒得写，几乎全走回落，小屏第二行于是又变回被截断、挂着省略号的 `goal`，这个字段等于白加。
 
 两道关都拦：`parameters.brief` 进 `required` 列表，不传就在 schema 这层被拒（`missing required property "brief"`）；传了但只是空串、纯空白、纯标点或纯符号，`execute` 里用新增的 `store.ts` 导出 `briefIsBlank()`（`/^[\s\p{P}\p{S}]*$/u`）判掉，报错「brief 必填，写一句 34 列以内的短话（汉字按 2 列算，约 17 个汉字）」，列数和汉字数跟着 `briefMaxColumns` 走，票不落盘。这两条路径都不会再静默派生。
 
@@ -167,15 +169,15 @@ Tests: 新增 `tests/ids.test.ts` 11 条（前缀归一、片段前缀、大小�
 
 Tests: `tests/brief.test.ts` 17 条。新增/改写——不传 brief 报错且不落盘、空串 / 纯空白 / 纯标点（`。`、`…… ！？`、`—— 、`）全部报错且一个事件都没写、报错文案带上配置的列数与汉字数、正好 34 列原样保留不加省略号、35 列被切成 16 汉字 + 「…」且总宽正好 34、`briefMaxColumns` 调小后照样截得更短；老票那组不变（无字段折叠、派生兜底、`dispatch_list` 拿到派生值、后续事件补字段不丢）。全量 `npm test` 12 个文件 140 条全绿，`npm run typecheck` 干净。
 
-## 1.3.0 - 2026-11-02
+## 1.3.0
 
 ### Added
 
-2026-11-02 — 票多了一个可选字段 `brief`：给小屏桌宠第二行用的一句短摘要，因为完整的 `goal` 是一段任务书，屏上塞不下。
+票多了一个可选字段 `brief`：给小屏桌宠第二行用的一句短摘要，因为完整的 `goal` 是一段任务书，屏上塞不下。
 
 长度上限是显示列宽而不是字符数：一个汉字算 2 列、半角算 1 列，默认 34 列 = 17 个汉字，超出的部分截断并补一个「…」。这个数字是 `src/store.ts` 的 `BRIEF_MAX_COLUMNS` 常量，`briefMaxColumns` 配置项的默认值引用它，改一处就动全局。
 
-这个默认值来自实测而不是估计：2026-11-02 小屏实测量出第二行是 10px 字号、可用宽 172px，能放 17 个汉字或 28 个 ASCII 字符。初版先按 20 列（10 个汉字）占位，量出结果后按汉字钉到 17×2=34 列；纯 ASCII 的 brief 在 28 列左右就自然结束了，顶不到 34。同一版还顺手把省略号的宽度算清了：截断预算给它留 2 列，`charColumns` 也必须按 2 列计，不然截完总宽会比上限少一列。
+这个默认值来自实测而不是估计：小屏实测量出第二行是 10px 字号、可用宽 172px，能放 17 个汉字或 28 个 ASCII 字符。初版先按 20 列（10 个汉字）占位，量出结果后按汉字钉到 17×2=34 列；纯 ASCII 的 brief 在 28 列左右就自然结束了，顶不到 34。同一版还顺手把省略号的宽度算清了：截断预算给它留 2 列，`charColumns` 也必须按 2 列计，不然截完总宽会比上限少一列。
 
 `dispatch_open` 新增 `brief` 参数，调用方可以直接给一句；不传就从 `goal` 派生——取首句、去掉首尾标点、压掉多余空格、按列宽截断。传进来的 `brief` 也按当前上限再截一次，所以上限调小以后老日志里的长句不会把第二行撑破。`TicketSnapshot`、`TicketEvent`、`TicketView` 与 `dispatch_list` 的输出都带上这个字段。
 
@@ -183,11 +185,11 @@ Tests: `tests/brief.test.ts` 17 条。新增/改写——不传 brief 报错且�
 
 Tests: `tests/brief.test.ts` 13 条——首句提取与标点清理、短 goal 原样保留、17 汉字刚好顶格、超长截断成 16 汉字 + 省略号且总宽正好 34 列、半角文本按 1 列计、`briefMaxColumns` 变小时截得更短、`dispatch_open` 传了 `brief` 落盘、没传自动派生、传超了被截、老票无字段折叠不崩、老票派生兜底、老票通过 `dispatch_list` 拿到派生值、后续事件补字段不丢。
 
-## 1.2.1 - 2026-11-02
+## 1.2.1
 
 ### Fixed
 
-2026-11-02 — a scheduled sweep replayed every ticket's backlog of reports to the main session as one enormous message. A worker hands its report back with `send_message`, so the sweep has never been the one delivering those entries: their `delivered` flag stays `false` for the life of the ticket, and the collection step did not look at status, so a finished ticket counted as "pending reports" forever. On this machine `sweepMinutes` had been set to 0 and was restored to 5 at 18:50; the first tick found 158 pending reports over 116 `done`/`dropped` tickets (oldest from 2026-11-01, longest single report 7,075 characters) and pushed all of them in one followup — a second copy of work the person had already read and closed.
+a scheduled sweep replayed every ticket's backlog of reports to the main session as one enormous message. A worker hands its report back with `send_message`, so the sweep has never been the one delivering those entries: their `delivered` flag stays `false` for the life of the ticket, and the collection step did not look at status, so a finished ticket counted as "pending reports" forever. A deployment had `sweepMinutes` set to 0; once it was restored, the first tick found 158 pending reports across 116 `done`/`dropped` tickets (the oldest had been sitting for a long time, the longest single report was over 7,000 characters) and pushed all of them in one followup — a second copy of work the person had already read and closed.
 
 The report path is gone from the sweep altogether. It no longer collects reports, no longer pushes them for either status, and no longer counts them; a report reaches the main session through `dispatch_list`, where `«n` is the ticket's unread report count. An open ticket's reports are left exactly as they are — pending, unread, untouched — so the person-facing queue stays visible to whoever looks. Reports already sitting on a closed ticket have no reader left, so the pass clears them with a `markDelivered` (no push, no notice); that keeps `dispatch_list` from reporting unread entries nobody will ever read and leaves the text in the log. Reopening still works and is also silent now: a `done` ticket that receives mail after its close goes back to `open`, logged, without waking anyone. The only thing that may wake the owner session is a zombie ticket — when the zombie judgement finds nothing fresh, the pass returns `woke: false` and sends not one character. `quietSweep` therefore keeps only the accounting half: the same closed-ticket clear, no announcement even for a zombie, and no fingerprint recorded.
 
@@ -195,4 +197,4 @@ The report path is gone from the sweep altogether. It no longer collects reports
 
 Tests: an `open` ticket and a `done` ticket each holding one unread report — nothing is injected, the done one is cleared and the open one is still pending — plus a `dropped` ticket that must not wake the owner, a reopen that only changes status, a zombie that does wake the owner with one line and no report body, and a second sweep both in the same process and in a fresh one (no repeat clear, no repeat announcement, the clear is on disk). Measured on a copy of the live `tickets.jsonl` restored to its state just before the 18:55 sweep: the old code pushed 159 reports and 248,578 characters in one followup; the new code pushes none (0 characters) and clears 158, leaving the 1 open-ticket report pending.
 
-## 1.2.0 — 2026-11-02
+## 1.2.0

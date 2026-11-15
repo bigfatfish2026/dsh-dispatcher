@@ -29,7 +29,7 @@ async function opened(host: ReturnType<typeof mountPlugin>, extra: Record<string
   const receipt = (await host.call('dispatch_open', {
     goal: '把测试补齐',
     brief: '补齐测试',
-    dir: '/home/user/dev/dsh-dispatcher',
+    dir: '/srv/work/dsh-dispatcher',
     ...extra,
   })) as { id: string }
   return receipt.id
@@ -92,7 +92,7 @@ describe('开票', () => {
       host.call('dispatch_open', {
         goal: '把测试补齐',
         brief: '补齐测试',
-        intent: { writes: ['file:/home/user/dev/dsh-dispatcher/src/index.ts'] },
+        intent: { writes: ['file:/srv/work/dsh-dispatcher/src/index.ts'] },
       }),
     ).rejects.toThrow(/dispatch_open 不再收 intent.*dispatch_declare/)
     expect(lines(host)).toHaveLength(0)

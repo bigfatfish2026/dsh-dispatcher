@@ -302,8 +302,8 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
     try {
       const sub = service.subscribe(
         SWEEP_TOPIC,
-        (event) => {
-          handleTick(event?.payload)
+        () => {
+          handleTick()
           return undefined
         },
         { subscriberId: SWEEP_SUBSCRIBER_ID, replay: { mode: 'none' } },
@@ -344,7 +344,7 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
     }
   }
 
-  function handleTick(payload: unknown): void {
+  function handleTick(): void {
     if (stopped) return
     // 先记时间：闸掉的那一拍也算「流还活着」，否则 watchdog 会误判断流。
     lastTickAt = now()
@@ -450,8 +450,8 @@ export function createSweepDriver(options: SweepDriverOptions): SweepDriver {
     reconcile,
     markServiceWatch,
     noteServiceEvent,
-    tick(payload: unknown): void {
-      handleTick(payload)
+    tick(): void {
+      handleTick()
     },
     dispose(): void {
       if (stopped) return

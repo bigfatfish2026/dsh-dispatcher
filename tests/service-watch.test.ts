@@ -14,12 +14,6 @@ import type { SweepEventsService, SweepScheduleService } from '../src/tickets/sw
 import { flush, makeDesk } from './helpers/desk-harness'
 import { fakeEvents, fakeSchedule } from './helpers/sweep-services'
 
-const TICK = {
-  name: 'dispatcher.sweep.tick',
-  firedAt: '2026-11-09T12:00:10.000Z',
-  periodKey: 'dispatcher.sweep.every10s.1762690000',
-}
-
 /** 假 `ctx.on`：记监听器、能派发、能摘。 */
 function fakeOn() {
   const entries: Array<{ event: string; listener: (name: string, value: unknown) => void; off: boolean }> = []

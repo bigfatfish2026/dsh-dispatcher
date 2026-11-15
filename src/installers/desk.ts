@@ -54,10 +54,6 @@ interface PresetRegistry {
   readDocument?: (id: string) => Promise<{ content?: string }>
 }
 
-interface AgentHeader {
-  origin?: string
-}
-
 export interface DeskInstallerDeps {
   log: TicketLog
   serialize: Serialize
@@ -186,7 +182,7 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
 
   /**
    * 巡检事实：主会话该知道的票台近况。它走动态上下文（下一段的 assemble 钩子），
-   * 不走 `followup`——注进去的 user 消息会被模型当成维护者发的话。
+   * 不走 `followup`——注进去的 user 消息会被模型当成使用方发的话。
    *
    * `dispatch_list` / `dispatch_read` / `dispatch_close` 见过哪些票，就把对应条目
    * 摘掉；没读的继续挂着。
@@ -273,7 +269,7 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
     if (isWorkerSession(origin)) {
       deps.getWorkerTools()?.attach(agent as never)
       installGuard(agent)
-      // 重启/热重载之后这只子会话名下的票还开着：补订阅，别让它变成聋子。
+      // 重启/热重载之后这个子会话名下的票还开着：补订阅，别让它变成聋子。
       desk.adoptWorker((agent as { session?: { id?: string } }).session?.id)
     }
     return undefined

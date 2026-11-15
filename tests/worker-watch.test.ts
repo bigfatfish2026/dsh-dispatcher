@@ -67,7 +67,7 @@ function makeWatch(agents: Recorder[] = []) {
 const WAIT = [{ ticketId: 't-blocker', resources: ['dir:/tmp/ws'] }]
 
 describe('订阅', () => {
-  it('订上时日志写清哪只子会话订了哪张票，重复订阅不多一条', () => {
+  it('订上时日志写清哪个子会话订了哪张票，重复订阅不多一条', () => {
     const { watch, infos } = makeWatch([recorder('worker-1')])
     expect(watch.subscribe('t-1', 'worker-1')).toBe(true)
     expect(watch.subscribe('t-1', 'worker-1')).toBe(false)
@@ -132,12 +132,12 @@ describe('blocked：真停手', () => {
     expect(watch.writeBlockReason('worker-2', 'bash')).toBeUndefined()
   })
 
-  it('人工挂起：没有对手就写「等维护者决定的理由」', async () => {
+  it('人工挂起：没有对手就写「等使用方决定的理由」', async () => {
     const worker = recorder('worker-1')
     const { watch } = makeWatch([worker])
     watch.subscribe('t-1', 'worker-1')
-    await watch.blocked({ ticketId: 't-1', brief: '拆票台', reason: '等维护者挑目录' })
-    expect(worker.followups[0]).toContain('等维护者决定（等维护者挑目录）')
+    await watch.blocked({ ticketId: 't-1', brief: '拆票台', reason: '等使用方挑目录' })
+    expect(worker.followups[0]).toContain('等使用方决定（等使用方挑目录）')
     expect(worker.followups[0]).not.toContain('被 挡住')
   })
 

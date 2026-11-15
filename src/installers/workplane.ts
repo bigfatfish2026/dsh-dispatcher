@@ -33,7 +33,7 @@ export interface WorkerPlane {
 }
 
 export function createWorkerPlane(ctx: Context, deps: WorkerPlaneDeps): WorkerPlane {
-  // ── 探路窗口：只给正在探路的那只子会话减工具 ──────────────────────
+  // ── 探路窗口：只给正在探路的那个子会话减工具 ──────────────────────
   const probeWindows = new ProbeWindows({ warn: deps.warn })
 
   // ── 子会话的状态订阅：被挡就真停手 ────────────────────────────────

@@ -48,7 +48,7 @@ describe('apply', () => {
     expect(host.restricted).toEqual([[...DEFAULT_ROUTER_TOOLS]])
   })
 
-  // 2026-11-01 的规矩：只有主会话写记忆。dsh-memory 在 execute 里拦，这一层是
+  // 早先的规矩：只有主会话写记忆。dsh-memory 在 execute 里拦，这一层是
   // 上面那层——名字根本不进子会话的 schema。
   it('hides the memory-write tools from a worker and from nobody else', () => {
     const host = mount({ registered: [...FOREIGN_TOOLS, ...DEFAULT_WORKER_DENY_TOOLS], existingAgents: 1 })
