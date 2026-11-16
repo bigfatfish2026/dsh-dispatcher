@@ -20,7 +20,7 @@ The figure is one call chain: the main session calls `dispatch_open` once, the d
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-2.2.1.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-*.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 

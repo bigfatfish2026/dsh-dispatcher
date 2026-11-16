@@ -15,11 +15,13 @@
     "bin",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "docs/*.png"
   ],
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
     "migrate:sqlite": "npm run build && node scripts/migrate-to-sqlite.ts",

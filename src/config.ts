@@ -245,9 +245,9 @@ export interface Config {
   /** The hand-off rules themselves. Empty string turns the section off. */
   handoffPolicyText: string
   /**
-   * 所有小鱼共用的提示词：每只子会话的系统提示词里都追加这一段。
+   * 所有 worker 共用的提示词：每只子会话的系统提示词里都追加这一段。
    *
-   * 跟 `handoffPolicyText` 不是一回事：那份只给主会话，这份只给小鱼。空串
+   * 跟 `handoffPolicyText` 不是一回事：那份只给主会话，这份只给 worker。空串
    * （或全空白）= 不追加，行为跟没这个配置完全一致。
    */
   workerPrompt: string

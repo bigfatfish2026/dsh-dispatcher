@@ -197,7 +197,7 @@ function readonlyHit(read: Resource, write: Resource, options: ConflictOptions):
 /**
  * 大根目录：显式声明 `dir:/`、`dir:/home`、home 本身、仓库根这种，一片就盖住整
  * 棵树。它合法（整根操作确实存在），但不能拿它当强冲突把别的票全挡死——那正是
- * `dir:/home/julia` 锁死整棵树的那条路。判定只把这个资源降成 weak，由 arbiter
+ * `dir:<home>` 锁死整棵树的那条路。判定只把这个资源降成 weak，由 arbiter
  * 喊一行。判据只看相等，不看祖先：`dir:/home/alice/work` 这种具体目录照旧强冲突。
  */
 const WIDE_DIR_ROOTS: readonly string[] = ['/', '/home', '/root', '/usr', '/etc', '/var', '/opt', '/boot']

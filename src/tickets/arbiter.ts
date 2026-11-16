@@ -72,7 +72,7 @@ export class ConflictArbiter {
    * 跳过，绝不按宿主 cwd 猜。
    *
    * 以前这里还有一层「连 plan 都没有就拿票的 dir 整片算写」，降级票于是凭空产出
-   * `dir:/home/julia`，把整棵树都锁死（23 条 waitOn 里 15 条来自降级票）。整片
+   * `dir:<home>`，把整棵树都锁死（23 条 waitOn 里 15 条来自降级票）。整片
    * 目录不等于真在写：没有 plan 就什么也不兜底，等它真写文件时由 declare/touch
    * 自己的声明来挡。
    */

@@ -1,5 +1,5 @@
 /**
- * 小鱼提示词：一段所有小鱼共用，一段按档追加。
+ * worker 提示词：一段所有 worker 共用，一段按档追加。
  *
  * 两段都只是「后缀」——不改 `buildPrompt` 那套任务书模板（票号、工作目录、
  * dispatch_report 交活那几句一个字都不动），也不覆盖主会话的 handoffPolicyText。

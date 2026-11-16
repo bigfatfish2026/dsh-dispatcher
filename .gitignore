@@ -8,8 +8,8 @@ logs/
 *.db
 *.db-wal
 *.db-shm
-*.sqlite
-*.sqlite3
+*.sqlite*
 .env
 data/
+state/
 __pycache__/

@@ -7,7 +7,7 @@ import { apply } from '../src/index'
 import { composeWorkerPrompt, presetPromptSuffix } from '../src/tickets/worker-prompt'
 
 /**
- * 小鱼提示词两段后缀：共用 `workerPrompt` + 按档 `promptSuffix`。
+ * worker 提示词两段后缀：共用 `workerPrompt` + 按档 `promptSuffix`。
  *
  * 落点是 `system-prompt/assemble` 的 section，所以这里跑的是真钩子：`apply`
  * 装完之后逐层过一遍，看子会话的装配结果里有没有那一段、内容对不对、顺序对
@@ -52,7 +52,7 @@ function promptHost() {
   return { ctx, hooks }
 }
 
-/** 跑一轮装配，返回小鱼提示词那一段的正文（没注入就是 undefined）。 */
+/** 跑一轮装配，返回 worker 提示词那一段的正文（没注入就是 undefined）。 */
 async function workerSection(
   config: Record<string, unknown>,
   header: Record<string, unknown>,
@@ -76,8 +76,8 @@ async function workerSection(
 
 describe('worker prompt suffix', () => {
   it('injects the shared block into a worker session', async () => {
-    const text = await workerSection({ workerPrompt: '【小鱼底线】共用这段' }, { origin: 'subagent' })
-    expect(text).toBe('【小鱼底线】共用这段')
+    const text = await workerSection({ workerPrompt: '【worker baseline】共用这段' }, { origin: 'subagent' })
+    expect(text).toBe('【worker baseline】共用这段')
   })
 
   it('puts the shared block first and the preset suffix second, one blank line apart', async () => {
@@ -123,7 +123,7 @@ describe('worker prompt suffix', () => {
   })
 
   it('leaves the main session untouched', async () => {
-    const text = await workerSection({ workerPrompt: '只给小鱼' }, {})
+    const text = await workerSection({ workerPrompt: '只给 worker' }, {})
     expect(text).toBeUndefined()
   })
 

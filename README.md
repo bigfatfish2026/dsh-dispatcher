@@ -20,7 +20,7 @@
 
 ```sh
 pnpm pack
-dsh plugin --profile <name> add ./dsh-dispatcher-2.2.1.tgz
+dsh plugin --profile <name> add ./dsh-dispatcher-*.tgz
 dsh --profile <name> --dump-config | grep 'dsh-dispatcher'
 ```
 

@@ -321,8 +321,9 @@ describe('任务书要求绝对路径并打出票的 dir', () => {
   const base = { ticketId: 't-path', goal: '改一处', brief: '路径基准' }
 
   it('探路轮打出票的 dir，并说清相对路径按它解析', () => {
-    const prompt = buildPrompt({ ...base, epoch: 1, round: 'probe', dir: '/home/julia/fatfish/plugins/dsh-dispatcher' })
-    expect(prompt).toContain('票的 dir：/home/julia/fatfish/plugins/dsh-dispatcher')
+    const repo = join(tmpdir(), 'dsh-resource-paths')
+    const prompt = buildPrompt({ ...base, epoch: 1, round: 'probe', dir: repo })
+    expect(prompt).toContain(`票的 dir：${repo}`)
     expect(prompt).toContain('路径一律写绝对路径')
   })
 

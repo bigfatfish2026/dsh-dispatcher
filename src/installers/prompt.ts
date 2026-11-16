@@ -12,7 +12,7 @@ import { composeWorkerPrompt, presetPromptSuffix } from '../tickets/worker-promp
 
 interface PromptHeader {
   origin?: string
-  /** 会话 spawn 时钉下的档；小鱼的系统提示词按它取 `promptSuffix`。 */
+  /** 会话 spawn 时钉下的档；worker 的系统提示词按它取 `promptSuffix`。 */
   agentPreset?: string
 }
 
@@ -52,10 +52,10 @@ export function installPromptGuard(ctx: Context, config: Config, deps: PromptGua
     })
   }
 
-  // ── 小鱼提示词：共用段 + 本档 promptSuffix ──────────────────────
+  // ── worker 提示词：共用段 + 本档 promptSuffix ───────────────────
   // 落点是真·系统提示词：子会话的 `system-prompt/assemble` 同样经过这里，
   // 所以不用改 `buildPrompt` 的任务书模板（票号 / 工作目录 / dispatch_report
-  // 那几句一个字都不动），也不会被小鱼当成派活方说的话。两段都空就连 section
+  // 那几句一个字都不动），也不会被 worker 当成派活方说的话。两段都空就连 section
   // 都不加，模型那边看不见空段落。
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()

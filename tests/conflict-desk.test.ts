@@ -226,7 +226,7 @@ describe('探路收工那刻判定', () => {
     const planner = receipt.id
     h.clock.advance(3 * 60_000)
     // 降级当拍就判：plan 空着就什么写都不占，不拿票面 dir 整片兜底（那就是
-    // dir:/home/julia 锁死整棵树那条路）。
+    // dir:<home> 锁死整棵树那条路）。
     await h.desk.maintain()
     const degraded = h.log.get(planner)!
     expect(degraded.degraded).toBe(true)

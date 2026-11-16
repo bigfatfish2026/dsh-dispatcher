@@ -1,7 +1,7 @@
 /**
  * 降级票的写边界，以及「大根目录」不再硬拦。
  *
- * 今天两张票被 `dir:/home/julia` 锁死：探路超时降级时，arbiter 拿票的 dir 整片
+ * 今天两张票被 `dir:<home>` 锁死：探路超时降级时，arbiter 拿票的 dir 整片
  * 合成写锁，凭空占住整棵树（23 条 waitOn 里 15 条来自降级票）。这里的断言就钉
  * 两件事：
  *
@@ -10,9 +10,10 @@
  * 2. 显式声明 `dir:/`、`dir:<home>` 这类大根目录仍然合法，但判定只降成 weak 并
  *    warn 一行，不再把整棵树当强冲突；真正写在里面的具体文件照旧强冲突。
  */
-import { homedir } from 'node:os'
-import { describe, expect, it } from 'vitest'
-import { foldEvents } from '../src/store'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 import type { TicketEvent, TicketSnapshot } from '../src/store'
 import { TicketLog } from '../src/store/log'
 import { ConflictArbiter } from '../src/tickets/arbiter'
@@ -21,6 +22,10 @@ import { judgeConflict } from '../src/tickets/conflict'
 import { MemoryBackend } from './helpers/desk-harness'
 
 const T = (second: number): string => `2026-11-16T12:00:${String(second).padStart(2, '0')}.000Z`
+
+/** 临时基准目录：测试只拿它当路径字符串，不落盘，避免把个人路径写进仓库。 */
+const BASE = mkdtempSync(join(tmpdir(), 'dispatcher-degraded-lock-'))
+afterAll(() => rmSync(BASE, { recursive: true, force: true }))
 
 function published(id: string, second: number, dir?: string): TicketEvent {
   return {
@@ -76,31 +81,31 @@ function tree(events: TicketEvent[]): {
 describe('降级票不再拿票的 dir 整片当写锁', () => {
   it('degraded + writes 空 + 有 dir：不产生 dir:<票的 dir>', () => {
     const { arbiter, snap } = tree([
-      published('t-deg', 1, '/home/julia'),
+      published('t-deg', 1, BASE),
       degraded('t-deg', 2),
     ])
     const side = arbiter.side(snap('t-deg'))
     expect(side.writes).toEqual([])
-    expect(side.writes).not.toContain('dir:/home/julia')
+    expect(side.writes).not.toContain(`dir:${BASE}`)
   })
 
   it('degraded + plan.files 绝对路径：只占父目录', () => {
     const { arbiter, snap } = tree([
-      published('t-deg', 1, '/home/julia'),
-      degraded('t-deg', 2, [{ path: '/home/julia/fatfish/plugins/dsh-dispatcher/src/a.ts' }]),
+      published('t-deg', 1, BASE),
+      degraded('t-deg', 2, [{ path: join(BASE, 'repo/src/a.ts') }]),
     ])
     const side = arbiter.side(snap('t-deg'))
-    expect(side.writes).toEqual(['dir:/home/julia/fatfish/plugins/dsh-dispatcher/src'])
-    expect(side.writes).not.toContain('dir:/home/julia')
+    expect(side.writes).toEqual([`dir:${join(BASE, 'repo/src')}`])
+    expect(side.writes).not.toContain(`dir:${BASE}`)
   })
 
   it('degraded + plan.files 相对路径：按票的 dir 归一化父目录，不吃宿主 cwd', () => {
     const { arbiter, snap } = tree([
-      published('t-deg', 1, '/home/julia/fatfish/plugins/dsh-dispatcher'),
+      published('t-deg', 1, join(BASE, 'repo')),
       degraded('t-deg', 2, [{ path: 'src/tickets/arbiter.ts' }]),
     ])
     expect(arbiter.side(snap('t-deg')).writes).toEqual([
-      'dir:/home/julia/fatfish/plugins/dsh-dispatcher/src/tickets',
+      `dir:${join(BASE, 'repo/src/tickets')}`,
     ])
   })
 
