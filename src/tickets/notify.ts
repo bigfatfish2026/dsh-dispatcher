@@ -8,8 +8,9 @@
  *   快照，模型看见的是环境状态，不会当成使用方发的指令回话。
  * - 冲突排队（`blocked` 带上 `wake`）—— 记事实之外再推开票方一句；主会话不在
  *   活表里就只剩事实，下一轮 runtime context 照样看得见。人工挂起不 wake。
- * - 票挂起超过阈值（等使用方决定）—— 才真的 `followup` 一条，开头 `[sweep] `，
- *   第二句明说不是使用方在说话。这种「叫醒」只能走 user 消息，所以话得自己说清。
+ * - 票停在那儿没人接（`waiting` 满阈值）、或者挂起超过阈值（等使用方决定）——
+ *   才真的 `followup` 一条，开头 `[sweep] `，第二句明说这是巡检、不是使用方在
+ *   说话。这种「叫醒」只能走 user 消息，所以话得自己说清，还要带上怎么收场。
  * - 宿主没有动态上下文这一口 —— 退回唤醒，同样带 `[sweep] ` 前缀，至少不让
  *   模型把提醒当成使用方的命令。
  *
@@ -137,7 +138,9 @@ export function reportArrivedText(input: ReportArrivedInput): string {
 export function idleText(input: IdleInput): string {
   switch (input.reason) {
     case 'waiting-20m':
-      return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」干完 ${input.sinceMinutes} 分钟了还没收工。`
+      // waiting 是「子会话停了、没人接」，得把主会话叫起来：一句话说清谁、停了
+      // 多久、怎么收场，别让它回头冲着提醒本身回话。
+      return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」进 waiting 已满 ${input.sinceMinutes} 分钟没动作。这是 dsh-dispatcher 巡检，不是使用方在说话。要看就 dispatch_read ${input.ticketId}，要收就 dispatch_close ${input.ticketId}。`
     case 'blocked-60m':
       return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」挂了 ${input.sinceMinutes} 分钟，在等使用方决定。这是巡检提醒，不是使用方在说话，看情况处理，不用回我。`
     case 'running-90m':
@@ -208,13 +211,16 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
       )
     },
     idle(input) {
-      // 只有「等使用方决定」才值得打断：其余都是主会话下一轮抬头就能看到的状态。
-      if (input.reason === 'blocked-60m') return send(idleText(input), true)
+      // 票停在 waiting 没人接、或者挂起等使用方决定——都值得叫起来看一眼，
+      // 走同一条 followup 通道。其余都是主会话下一轮抬头就能看到的状态。
+      if (input.reason === 'waiting-20m' || input.reason === 'blocked-60m') {
+        return send(idleText(input), true)
+      }
       return record(
         {
           ticketId: input.ticketId,
           brief: input.brief,
-          kind: input.reason === 'running-90m' ? 'running' : 'waiting',
+          kind: 'running',
           since: new Date(clock.now().getTime() - input.sinceMinutes * 60_000).toISOString(),
         },
         idleText(input),
