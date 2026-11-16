@@ -60,6 +60,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     repeatWindowMinutes: 10,
     handoffPolicy: true,
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
+    workerPrompt: '',
+    presets: [],
     noWaitGuard: true,
     maxCommandMs: 30000,
     maxWaitMs: 5000,

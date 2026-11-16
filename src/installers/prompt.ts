@@ -8,9 +8,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config'
 import { isWorkerSession, noWaitReason } from '../no-wait'
 import type { SweepFacts } from '../tickets/sweep-facts'
+import { composeWorkerPrompt, presetPromptSuffix } from '../tickets/worker-prompt'
 
 interface PromptHeader {
   origin?: string
+  /** 会话 spawn 时钉下的档；小鱼的系统提示词按它取 `promptSuffix`。 */
+  agentPreset?: string
 }
 
 interface PromptAgent {
@@ -48,6 +51,26 @@ export function installPromptGuard(ctx: Context, config: Config, deps: PromptGua
       }
     })
   }
+
+  // ── 小鱼提示词：共用段 + 本档 promptSuffix ──────────────────────
+  // 落点是真·系统提示词：子会话的 `system-prompt/assemble` 同样经过这里，
+  // 所以不用改 `buildPrompt` 的任务书模板（票号 / 工作目录 / dispatch_report
+  // 那几句一个字都不动），也不会被小鱼当成派活方说的话。两段都空就连 section
+  // 都不加，模型那边看不见空段落。
+  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
+    const assembled = await next()
+    const header = (context as { agent?: { session?: { header?: PromptHeader } } })?.agent?.session?.header
+    if (!isWorkerSession(header?.origin)) return assembled
+    const text = composeWorkerPrompt(
+      config.workerPrompt,
+      presetPromptSuffix(config.presets, header?.agentPreset),
+    )
+    if (!text) return assembled
+    return {
+      ...assembled,
+      sections: [...assembled.sections, { name: 'dispatcher:worker-prompt', order: 90, text }],
+    }
+  })
 
   // ── 巡检事实：走动态上下文快照，不往主会话里塞 user 消息 ────────
   // 宿主每次都把上下文重新渲染成一条 runtime-context 快照；文本没变就不落盘，

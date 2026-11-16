@@ -119,6 +119,22 @@ dispatch_open 一步到位：它自己挑档、自己起子会话、自己记票
 子会话卡住会在报告里说清卡点，票挂在 waiting / blocked 上等你：决定下一步用 dispatch_block 挂起、dispatch_send 回话、dispatch_close 收工。
 记忆只有主会话能写：子会话只许 memory_recall 查，memory_save / memory_archive / memory_merge / memory_split 一律不许调，发现该记的东西在 dispatch_report 里提一句，交回主会话落笔。`
 
+/**
+ * 一档 preset 的提示词条目。
+ *
+ * 两种写法都能用：只写档名（`- t1`）表示这档不追加；写成对象再给
+ * `promptSuffix`。字符串写法是兼容形态，老配置不用改。
+ */
+export interface PresetPromptEntry {
+  /** 档名，跟 preset 注册表里的 id 对齐（`t1` / `t5` …）。 */
+  name: string
+  /** 这档追加的提示词；空串 = 这档不追加。 */
+  promptSuffix?: string
+}
+
+/** `presets` 配置项：字符串或对象，两种混着写。 */
+export type PresetPromptConfig = string | PresetPromptEntry
+
 export interface Config {
   /** Where the ticket log lives. One JSON object per line, append-only. */
   stateFile: string
@@ -228,6 +244,18 @@ export interface Config {
   handoffPolicy: boolean
   /** The hand-off rules themselves. Empty string turns the section off. */
   handoffPolicyText: string
+  /**
+   * 所有小鱼共用的提示词：每只子会话的系统提示词里都追加这一段。
+   *
+   * 跟 `handoffPolicyText` 不是一回事：那份只给主会话，这份只给小鱼。空串
+   * （或全空白）= 不追加，行为跟没这个配置完全一致。
+   */
+  workerPrompt: string
+  /**
+   * 每档 preset 各自追加的提示词。字符串 = 只写档名（这档不追加），对象 =
+   * 档名 + `promptSuffix`；两种混着写。档名对不上注册表的那条静默不生效。
+   */
+  presets: PresetPromptConfig[]
   /** Refuse main-session tool calls that would sit and wait. */
   noWaitGuard: boolean
   /** Longest a single command may hold the main session, in milliseconds. */
@@ -413,6 +441,28 @@ export const Config: Schema<Config> = Schema.object({
     .default(DEFAULT_HANDOFF_POLICY)
     .description(
       'The hand-off rules appended to the main session system prompt. Rewrite the whole block here to change the wording without touching code. An empty (or whitespace-only) string means the section is not injected at all.',
+    ),
+  workerPrompt: Schema.string()
+    .default('')
+    .description(
+      'One block of text every worker subagent gets in its system prompt, appended after the ticket brief. Independent of handoffPolicyText (that one is the main session only). Empty or whitespace-only means nothing is appended.',
+    ),
+  presets: Schema.array(
+    Schema.union([
+      Schema.object({
+        name: Schema.string()
+          .required()
+          .description('Preset id, matching the registry (t1, t5, ...).'),
+        promptSuffix: Schema.string()
+          .default('')
+          .description('Extra text for this preset, appended after workerPrompt. Empty means this preset adds nothing.'),
+      }),
+      Schema.string().description('Preset id short form: this preset adds no text.'),
+    ]),
+  )
+    .default([])
+    .description(
+      'Per-preset prompt text. Accepts "t1" (id only, adds nothing) or { name: t1, promptSuffix: "..." }; the two forms mix. A name the registry does not know is ignored. Order is workerPrompt first, this preset suffix second, one blank line between.',
     ),
   noWaitGuard: Schema.boolean()
     .default(true)
