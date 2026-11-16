@@ -2,6 +2,28 @@
 
 版本历史。条目只写改了什么，不记内部工单号与日期。
 
+## 2.3.0
+
+### Added
+
+worker 提示词分成两段：`workerPrompt` 是一段所有 worker 共用的文本，`presets[].promptSuffix` 按档追加一段，两段都注入子会话的真·系统提示词（`system-prompt/assemble` 的 `dispatcher:worker-prompt` section），共用在前、档位在后、空行相隔；任一段为空就只剩另一段，两段都空连 section 都不加。不碰 `buildPrompt` 的任务书模板，也不覆盖主会话的 `handoffPolicyText`。`presets` 两种写法混用：`"t1"` 只表示这档存在、不追加，`{ name, promptSuffix }` 才带文本，档名对不上注册表的那条静默不生效。
+
+新增 `dispatcher` 查票服务：`lookupTicket(id)` / `hasTicket(id)` 两个只读方法，给 dsh-backlog 挂工单前核票号。和 `dispatcher/tickets`（整份读数，给 `/tickets` 和桌宠）是两个口子，这个只给查票，不暴露 readout、log、desk 或任何能改状态的句柄；查不到返回 `null` / `false`，不抛错。
+
+### Changed
+
+巡检的 `waiting` 档改走 followup：票进 `waiting` 满 `waitingMinutes`（默认 20 分钟）不再只记一条巡检事实，而是真的叫醒一次——`waiting` 是「子会话停了、没人接」，只挂着的话主会话下一轮未必翻到。文案说清票号、停了多少分钟、这是巡检不是使用方在说话，并带上 `dispatch_read` / `dispatch_close` 两条收场路径；事实表里不再写 `waiting` 条目，一张票一轮只叫一次，`running` 那档仍只记事实。
+
+### Fixed
+
+声明路径按票的 `dir` 归一化：`declare` 与 `touch` 的相对路径统一按票上那个 `dir` 解析成绝对路径落盘，回执回显「相对 → 绝对」；票上没有 `dir` 的相对路径原样保留、不按宿主 cwd 猜。`declare` 成功后当场重判排队票，不用白等下一次收工。降级票（探路超时、没等到声明）不再拿票的 `dir` 整片合成写锁，只取 `plan.files` 的父目录，没有 plan 就什么也不占——凭空占住整棵树、把别的票全挡死的那条路没了。显式声明的大根目录（`dir:/`、home、仓库根）仍然合法，但判定只降成 weak 并 warn 一行，写在里面的具体文件照旧强冲突。
+
+### Docs
+
+`docs/internals.zh.md` / `internals.en.md` 的配置表补上此前漏记的 `workerPrompt` 与 `presets`；README 中英两版的装包命令不再写死 tgz 版本号；`.gitignore` 补 `*.sqlite*`（盖住 `-wal` / `-shm`）与 `state/`；`package.json` 加 `pretest`（`test` 前先 `build`），`files` 带上 `docs/*.png`，README 里的时序图在 npm 上也能显示；源码注释与测试夹具里的内部称呼统一改成仓库本来的 `worker`，测试里写死的家目录路径换成临时目录或 `dir:<home>` 写法。
+
+Tests: 全量 `npm test` 74 个文件 803 条全绿，`tsc --noEmit` 干净（`--noUnusedLocals --noUnusedParameters` 也干净），`npm run build` 通过。
+
 ## 2.2.1
 
 ### Added

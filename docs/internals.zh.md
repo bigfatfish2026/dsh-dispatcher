@@ -49,6 +49,8 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | `repeatWindowMinutes` | number | `10` | 同人同事在这个窗口内再开票视为重复 |
 | `handoffPolicy` | boolean | `true` | 把派活规矩拼进主会话系统提示词；subagent 不注入 |
 | `handoffPolicyText` | string | 内置那段 | 派活规矩原文，整段重写即可改口径 |
+| `workerPrompt` | string | 空 | 所有 worker 共用的提示词段，追加在每只子会话的系统提示词里；空串（或全空白）= 不追加。跟 `handoffPolicyText` 各管一边：那份只给主会话 |
+| `presets` | (string \| object)[] | `[]` | 按档追加的提示词：`"t1"` 只表示这档存在、不加文本；`{ name, promptSuffix }` 加一段，排在 `workerPrompt` 之后、空行相隔。档名对不上注册表的那条静默忽略 |
 | `noWaitGuard` | boolean | `true` | 拦下会让主会话干等的调用；worker 不受影响 |
 | `maxCommandMs` | number | `30000` | 单条命令最多占用主会话多久 |
 | `maxWaitMs` | number | `5000` | `job_output` 最多占用主会话多久 |

@@ -49,6 +49,8 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | `repeatWindowMinutes` | number | `10` | Opening the same request again inside this window counts as a duplicate |
 | `handoffPolicy` | boolean | `true` | Append the hand-off rules to the main session prompt; workers are untouched |
 | `handoffPolicyText` | string | built-in block | The rules themselves; rewrite the whole block to change the wording |
+| `workerPrompt` | string | empty | One block every worker subagent gets in its system prompt; empty or whitespace-only means nothing is appended. Independent of `handoffPolicyText`, which is main-session only |
+| `presets` | (string \| object)[] | `[]` | Per-preset prompt text: `"t1"` means this preset exists and adds nothing; `{ name, promptSuffix }` appends text after `workerPrompt`, one blank line apart. A name the registry does not know is ignored |
 | `noWaitGuard` | boolean | `true` | Refuse calls that would park the main session; workers unaffected |
 | `maxCommandMs` | number | `30000` | Longest a command may hold the main session |
 | `maxWaitMs` | number | `5000` | Longest a job wait may hold the main session |
