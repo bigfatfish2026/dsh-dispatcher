@@ -25,12 +25,47 @@ export const TICKETS_SCHEMA_VERSION = 1 as const
 /** cordis service 名：`/tickets` 指令用 `ctx.get('dispatcher/tickets')` 直接拿。 */
 export const TICKETS_SERVICE = 'dispatcher/tickets'
 
+/**
+ * 查票服务的 cordis service 名：dsh-backlog 用 `ctx.inject(['dispatcher'])` 拿它，
+ * 挂工单之前先确认票号真在票台上。和 `dispatcher/tickets` 是两个口子：那个给
+ * `/tickets` 和桌宠吃整份读数，这个只留查票的两个方法。
+ */
+export const DISPATCHER_SERVICE = 'dispatcher'
+
 /** 只读出口真正依赖的东西：store 折好的快照，别的都不要。 */
 export interface TicketSource {
   list(): TicketSnapshot[]
   get(id: string): TicketSnapshot | undefined
   /** 日志在哪儿（jsonl 是路径，redis 是地址），只给诊断用。 */
   readonly location: string
+}
+
+/**
+ * 查票口子返回的单票读数：只够调用方判断「这张票在不在、什么状态」，不给
+ * 报告、账本、意图这些内部栏。可选栏缺省时整个键不出现（与 `TicketView` 同一
+ * 口径），不吃 null。
+ */
+export interface TicketLookup {
+  id: string
+  status: TicketStatus
+  /** 一句话摘要；老票由 goal 推出来，和 dispatch_list 同一份。 */
+  brief: string
+  goal: string
+  preset?: string
+  owner?: string
+  createdAt: string
+}
+
+/**
+ * `dispatcher` service 的唯一形状：两个只读方法，不暴露 readout、log、desk
+ * 或任何能改状态的句柄。
+ *
+ * 两个方法都只读 store 折好的快照，不追加事件、不开写事务、不触发广播；
+ * 查不到的票返回 `null`（`hasTicket` 返回 `false`），不抛错。
+ */
+export interface DispatcherService {
+  lookupTicket(id: string): TicketLookup | null
+  hasTicket(id: string): boolean
 }
 
 /**
@@ -186,6 +221,31 @@ export class TicketReadout {
   get(id: string): TicketView | undefined {
     const ticket = this.source.get(id)
     return ticket ? this.view(ticket, this.now()) : undefined
+  }
+
+  /**
+   * 查票：有就返回收窄后的读数，没有返回 `null`。
+   *
+   * 只走 `source.get()` 这条现成的折叠读路径，不碰后端、不开事务、不广播。
+   */
+  lookupTicket(id: string): TicketLookup | null {
+    const ticket = this.source.get(id)
+    if (!ticket) return null
+    const view = this.view(ticket, this.now())
+    return {
+      id: view.id,
+      status: view.status,
+      brief: view.brief,
+      goal: view.goal,
+      ...(view.preset ? { preset: view.preset } : {}),
+      ...(ticket.owner ? { owner: ticket.owner } : {}),
+      createdAt: ticket.createdAt,
+    }
+  }
+
+  /** 票在不在；内部直接调 `lookupTicket`，两个口子结论永远一致。 */
+  hasTicket(id: string): boolean {
+    return this.lookupTicket(id) !== null
   }
 
   /** 按 `selection` 选票，保持 store 的顺序（排队序号 seq 升序；老票按 createdAt，老的在前）。 */

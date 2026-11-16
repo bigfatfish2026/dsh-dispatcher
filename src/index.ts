@@ -39,6 +39,13 @@ export { DEFAULT_HANDOFF_POLICY as HANDOFF_POLICY }
  */
 export { WORKER_FORBIDDEN_TOOLS } from './installers/restrict'
 
+/**
+ * 查票口子的对外形状：`ctx.inject(['dispatcher'])` 拿到的服务就是它。
+ * 给 backlog 这类同进程消费者直接 import 用，不引 cordis 类型包。
+ */
+export { DISPATCHER_SERVICE } from './tickets/readout'
+export type { DispatcherService, TicketLookup } from './tickets/readout'
+
 /** 票事件队列的把手：测试等它排空，生产里没人用。 */
 export const ticketEventQueue = new WeakMap<object, () => Promise<void>>()
 

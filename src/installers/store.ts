@@ -11,7 +11,8 @@ import { createTicketBackend, resolveStateFile } from '../store'
 import { createTicketEventPublisher } from '../store/bus'
 import type { TicketEventPublisher, TicketEventsService } from '../store/bus'
 import { TicketLog } from '../store/log'
-import { TICKETS_SERVICE, TicketReadout } from '../tickets/readout'
+import { DISPATCHER_SERVICE, TICKETS_SERVICE, TicketReadout } from '../tickets/readout'
+import type { DispatcherService } from '../tickets/readout'
 import { TicketSnapshotFile } from '../tickets/snapshot'
 import type { Serialize } from '../tickets/desk'
 
@@ -115,6 +116,22 @@ export function installStore(ctx: Context, config: Config, deps: StoreInstallerD
     } catch (error) {
       // 热重载时同名服务可能还没被上一份 fiber 释放：降级成只有 CLI/文件可用。
       warn(`[dispatcher] ${TICKETS_SERVICE} 服务没挂上：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // ── 查票口子：只给 backlog 校验票号 ──────────────────────────────
+  // dsh-backlog 挂工单之前要确认票号真在，用 `ctx.inject(['dispatcher'])` 拿。
+  // 这里只递两个闭包，不把 readout / log / desk 递出去：拿到服务的人也改不了
+  // 任何状态。两个方法都只读折叠好的快照，不加事件、不开写事务、不广播。
+  const dispatcherService: DispatcherService = {
+    lookupTicket: (id) => readout.lookupTicket(id),
+    hasTicket: (id) => readout.hasTicket(id),
+  }
+  if (typeof provider === 'function') {
+    try {
+      provider.call(ctx, DISPATCHER_SERVICE, dispatcherService)
+    } catch (error) {
+      warn(`[dispatcher] ${DISPATCHER_SERVICE} 服务没挂上：${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
