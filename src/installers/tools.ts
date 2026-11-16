@@ -561,7 +561,7 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
   const declareTool = defineTool({
     name: TOOL_NAMES.declare,
     description:
-      'Declare your plan and reversal intent on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot write on someone else\'s. Append-only, status untouched. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
+      'Declare your plan and reversal intent on the ticket you are working. Ticket id is not a parameter: the desk looks up the ticket attached to this worker, so you cannot write on someone else\'s. Append-only, status untouched. Write absolute paths in writes/reads: relative ones are resolved against the ticket dir and echoed back, and a ticket without a dir keeps them as-is. Refused when no ticket is attached to this worker or the ticket is already done/dropped.',
     parameters: {
       plan: {
         type: 'object',
@@ -648,16 +648,40 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
           epoch: { type: 'number' },
           files: { type: 'number' },
           resources: { type: 'number' },
+          resolved: {
+            type: 'array',
+            description: 'Relative paths resolved against the ticket dir: what you wrote → what was stored.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { from: { type: 'string' }, to: { type: 'string' } },
+            },
+          },
+          unresolved: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Relative resources kept as-is because the ticket has no dir; write absolute paths.',
+          },
         },
       },
-      render: (_args, value) => [
-        {
-          type: 'text',
+      render: (_args, value) => {
+        const lines = [
           // 回执只说「交上了」，不说「放行」：冲突判定要等探路子会话 idle 那一拍，
           // 以前的英文回执被子会话读成「已经判过、放行了」。
-          text: `ticket ${value.id} 已登记 ${value.files} 个文件、${value.resources} 个资源，等探路收工后判定冲突`,
-        },
-      ],
+          `ticket ${value.id} 已登记 ${value.files} 个文件、${value.resources} 个资源，等探路收工后判定冲突`,
+        ]
+        // 声明落盘的是绝对路径：相对路径解析成了什么，当场回显，别让子会话自己猜。
+        if (value.resolved?.length) {
+          lines.push('路径已按票的 dir 解析：')
+          for (const item of value.resolved) lines.push(`  ${item.from} → ${item.to}`)
+        }
+        if (value.unresolved?.length) {
+          lines.push(
+            `票上没有 dir，这些相对路径原样落盘：${value.unresolved.join('、')}。路径一律写绝对路径。`,
+          )
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
     },
     async execute(args, exec) {
       // 票号不收：按调用者的会话 id 反查归属，desk 只许写到这张票上。
@@ -673,6 +697,8 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
         epoch: receipt.epoch,
         files: receipt.files,
         resources: receipt.resources,
+        resolved: receipt.resolved,
+        unresolved: receipt.unresolved,
       }
     },
   })

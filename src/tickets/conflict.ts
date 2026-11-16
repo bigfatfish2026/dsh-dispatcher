@@ -12,6 +12,7 @@
  * 这一层是纯判定：不认识票、不读 desk、不写日志、不碰状态迁移，也没有调用方。
  * 一件故意不管的事：`writes` 为空但票标了 degraded 的目录回填由调用方先做。
  */
+import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import { findGitRoot, parseResource, scanGitResources, scanResources } from './resources'
 import type { InvalidResource, ResourceOptions } from './resources'
@@ -191,6 +192,27 @@ function weakHit(a: Resource, b: Resource, options: ConflictOptions): string | u
 function readonlyHit(read: Resource, write: Resource, options: ConflictOptions): string | undefined {
   if (!sameOrContains(read, write, options)) return undefined
   return `一票只读 ${read.uri}，另一票会写 ${write.uri}`
+}
+
+/**
+ * 大根目录：显式声明 `dir:/`、`dir:/home`、home 本身、仓库根这种，一片就盖住整
+ * 棵树。它合法（整根操作确实存在），但不能拿它当强冲突把别的票全挡死——那正是
+ * `dir:/home/julia` 锁死整棵树的那条路。判定只把这个资源降成 weak，由 arbiter
+ * 喊一行。判据只看相等，不看祖先：`dir:/home/alice/work` 这种具体目录照旧强冲突。
+ */
+const WIDE_DIR_ROOTS: readonly string[] = ['/', '/home', '/root', '/usr', '/etc', '/var', '/opt', '/boot']
+
+/** 这条归一化资源串是不是「大根目录」。非 dir、认不出来的串一律 false。 */
+export function isWideDirRoot(uri: string): boolean {
+  let parsed
+  try {
+    parsed = parseResource(uri)
+  } catch {
+    return false
+  }
+  if (parsed.kind !== 'dir') return false
+  const roots = [...WIDE_DIR_ROOTS, homedir(), process.cwd()]
+  return roots.some((root) => parsed.value === (root.length > 1 && root.endsWith('/') ? root.slice(0, -1) : root))
 }
 
 /**

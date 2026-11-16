@@ -15,6 +15,7 @@
  * - **写盘失败和 reconcile 失败不是一回事。** `commit` 同步、会抛；抛了就让调用
  *   方看见（工具报错），不许吞掉——票和现实不一致时，人得知道。
  */
+import { isAbsolute } from 'node:path'
 import { briefOf, isOpen, minutesSince, pending } from '../store'
 import type {
   Actor,
@@ -53,7 +54,7 @@ import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
 import type { WorkerWatch } from './watch'
 import { outOfScopePaths } from './conflict'
-import { normalizeResources, scanResources } from './resources'
+import { normalizeResource, normalizeResources, parseResource, scanResources } from './resources'
 import { TicketHandle } from './handle'
 import { ConflictArbiter, byClaimOrder } from './arbiter'
 import { WorkerRegistry } from './registry'
@@ -263,6 +264,19 @@ export interface DeclareReceipt {
   epoch: number
   files: number
   resources: number
+  /**
+   * 「相对路径 → 绝对路径」的解析对照：只有真的变了才列（相对路径按票的 dir 解
+   * 析、`~` 展开、符号链接 realpath）。子会话当场能看见自己声明成了什么。
+   */
+  resolved: ResolvedResource[]
+  /** 没解析的相对路径（票上没有 dir 可依）：原样落盘，回执里明说。 */
+  unresolved: string[]
+}
+
+/** 声明落盘时的一条路径解析对照。 */
+export interface ResolvedResource {
+  from: string
+  to: string
 }
 
 /** 收尾自报的回执：写到了哪张票、这次报了几条、票上现在一共几条。 */
@@ -352,6 +366,52 @@ function quotaFullText(
 
 /** 一条动作摘要的上限：账本是给人扫的，一句说清，别抄整份报告。 */
 const ACTION_SUMMARY_MAX = 300
+
+/**
+ * 把声明里的 writes / reads 按票的 dir 归一化成绝对路径。
+ *
+ * 落盘的那份必须是绝对路径：相对路径按票的 dir（spawn 时的 cwd）解析，不是宿主
+ * 进程的 cwd——两边基准不一样，对账时就会把「明明声明过的文件」报成越界（今天
+ * 那张票的误报就是这么来的）。票上没有 dir 的老票不猜 cwd：相对路径原样保留，
+ * 并在回执的 `unresolved` 里明说没解析。
+ */
+function normalizeDeclaredIntent(
+  intent: IntentSpec,
+  base: string | undefined,
+): { intent: IntentSpec; resolved: ResolvedResource[]; unresolved: string[] } {
+  const resolved: ResolvedResource[] = []
+  const unresolved: string[] = []
+  const fix = (list: readonly string[] | undefined): string[] | undefined => {
+    if (!list) return undefined
+    const out: string[] = []
+    for (const raw of list) {
+      const trimmed = raw.trim()
+      const parsed = parseResource(trimmed)
+      const pathKind = parsed.kind !== 'svc' && parsed.kind !== 'port'
+      const relative = pathKind && !isAbsolute(parsed.value) && !parsed.value.startsWith('~')
+      if (relative && !base) {
+        if (!unresolved.includes(trimmed)) unresolved.push(trimmed)
+        if (!out.includes(trimmed)) out.push(trimmed)
+        continue
+      }
+      const normalized = normalizeResource(trimmed, base ? { base } : {})
+      if (normalized !== trimmed) resolved.push({ from: trimmed, to: normalized })
+      if (!out.includes(normalized)) out.push(normalized)
+    }
+    return out
+  }
+  const writes = fix(intent.writes)
+  const reads = fix(intent.reads)
+  return {
+    intent: {
+      ...intent,
+      ...(writes ? { writes } : {}),
+      ...(reads ? { reads } : {}),
+    },
+    resolved,
+    unresolved,
+  }
+}
 
 export class TicketDesk {
   private readonly config: DeskConfig
@@ -709,19 +769,19 @@ export class TicketDesk {
       const nextPlan = summary || files.length
         ? { ...(summary ? { summary } : {}), ...(files.length ? { files } : {}) }
         : target.plan ?? {}
-      const nextIntent = Object.keys(intent).length > 0 ? intent : target.intent ?? {}
+      const rawIntent = Object.keys(intent).length > 0 ? intent : target.intent ?? {}
       // 探路是每张票的必经流程，所以声明必须交齐：plan 说清改哪儿，intent 划出
       // 读写边界。少哪一半都不进执行轮——admit 前那道硬校验只认完整的声明。
       if (!summary && files.length === 0) {
         throw new Error('declare 必须给 plan：要改哪几个文件、每个一句话说改什么')
       }
-      if (Object.keys(nextIntent).length === 0) {
+      if (Object.keys(rawIntent).length === 0) {
         throw new Error('declare 必须给 intent：writes / reads 用六个前缀写，再给 reversibility')
       }
       // 新声明先过一遍资源扫描：cmd:/http:/带说明的端口这类串判定层虽然能兜，
       // 但它们不是资源，收进来只会让冲突判定永远按「不认识」处理。历史票不回溯，
       // 这里只拦新的声明。
-      const scan = scanResources([...(nextIntent.writes ?? []), ...(nextIntent.reads ?? [])])
+      const scan = scanResources([...(rawIntent.writes ?? []), ...(rawIntent.reads ?? [])])
       if (scan.invalid.length > 0) {
         const bad = scan.invalid.map((item) => `${item.raw}（${item.reason}）`).join('；')
         throw new Error(
@@ -729,6 +789,9 @@ export class TicketDesk {
             '命令写进 plan.summary，网址写进报告，不要当资源',
         )
       }
+      // 落盘的必须是绝对路径：相对声明按这张票的 dir（spawn 时的 cwd）解析，跟
+      // touch 对账用同一个基准，别再吃宿主进程 cwd。
+      const declared = normalizeDeclaredIntent(rawIntent, target.dir?.trim() || undefined)
 
       this.commit({
         kind: 'declared',
@@ -736,11 +799,14 @@ export class TicketDesk {
         at: this.at(),
         cause: 'tool',
         plan: nextPlan,
-        intent: nextIntent,
+        intent: declared.intent,
         workerId,
       })
       // 重新声明会把 phase 从 queued 折回 planned：排队作废，挂起那条也撤掉。
       this.forgetBlocked(target.id)
+      // 挡路的票补了真声明：排队里的票当场重判一次。今天那张排队票白等了 4 分
+      // 51 秒，就是因为声明落盘后没人重判，只能等下一次收工。
+      await this.releaseBlocked()
       const after = this.log.get(target.id)!
       return {
         id: target.id,
@@ -748,6 +814,8 @@ export class TicketDesk {
         epoch: after.epoch,
         files: files.length,
         resources,
+        resolved: declared.resolved,
+        unresolved: declared.unresolved,
       }
     })
   }
@@ -760,13 +828,20 @@ export class TicketDesk {
    * 在工具层补好 `file:`），落一条 `touch-reported`；reducer 按首次出现
    * 顺序合并去重，分几次报不会互相覆盖。
    *
+   * 归一化的基准是**这张票的 dir**（declare 用的是同一把尺子），不是宿主进程
+   * 的 cwd；这样 declared 与 touched 才可比，关票对账不会误报越界。
+   *
    * 不碰 status / statusSince / closedAt：收工的票也允许补记最后一轮。
    */
   async touch(workerId: string, paths: readonly string[]): Promise<TouchReceipt> {
     return this.serialize(async () => {
-      const normalized = normalizeResources(paths)
-      if (normalized.length === 0) throw new Error('touch 至少要给一个路径')
+      // 顺序不能反：先取票拿到这张票的 dir，再拿它当基准归一化。以前先按宿主
+      // cwd 归一化、后取票，touch 常报绝对路径没事，一报相对路径就跟 declared
+      // 两套写法，关票对账立刻多出「动了没声明的资源」。
       const target = TicketHandle.forWorker(this.log, workerId, '报路径').current()
+      const base = target.dir?.trim() || undefined
+      const normalized = normalizeResources(paths, base ? { base } : {})
+      if (normalized.length === 0) throw new Error('touch 至少要给一个路径')
       this.commit({
         kind: 'touch-reported',
         id: target.id,
@@ -1808,8 +1883,9 @@ export class TicketDesk {
   /**
    * 探路超时：票停在 planning 太久，说明这只探路子会话要么没交活要么没了。
    *
-   * 不拦巡检——它只是巡检里的一小段。降级的语义是「声明拿不到了」：按整片 dir
-   * 当写进兜底（设计稿 §8），票转 planned 并标 degraded，窗口拆掉。
+   * 不拦巡检——它只是巡检里的一小段。降级的语义是「声明拿不到了」：票转
+   * planned 并标 degraded，窗口拆掉。冲突判定那边只拿 plan.files 的父目录兜底，
+   * 不再拿票的 dir 整片当写（那条路会把整棵树锁死）。
    *
    * 降级写完当场就把这一轮推下去：重取票面、走同一条 `admit`（判冲突 → 没有
    * 冲突就派执行轮）。以前这里只改票面，派活要等那只探路子会话自己回合结束发

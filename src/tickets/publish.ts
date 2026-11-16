@@ -315,6 +315,10 @@ export function buildPrompt(input: PromptInput): string {
       '用 read / glob / grep 把活看明白，然后用 dispatch_declare 交两样东西。',
       'plan：要改哪几个文件、每个一句话说改什么；文件级就够，别写行号，也别写函数细节。',
       'intent：writes / reads 用 file: dir: git: svc: port: dev: 六个前缀写资源串，再给一个 reversibility。',
+      // 探路轮就把票的 dir 亮出来：声明按它解析，写相对路径的人才知道基准在哪。
+      input.dir
+        ? `票的 dir：${input.dir}（declare 里的相对路径按它解析）`
+        : '票上没有 dir：相对路径没有解析基准，一律写绝对路径。',
       '报完就直接交活，别试着改文件，也别硬等。',
     )
   } else if (round === 'degraded') {
@@ -330,6 +334,10 @@ export function buildPrompt(input: PromptInput): string {
   }
   lines.push(`目标：${input.goal}`)
   if (input.dir) lines.push(`工作目录：${input.dir}`)
+  else lines.push('票上没有 dir：declare 里的相对路径没有解析基准，路径一律写绝对路径。')
+  // 历史上 declare 与 touch 用两套基准（票的 dir / 宿主 cwd），相对路径两边写得
+  // 不一样，关票对账就误报「动了没声明的资源」。一句话堵住这个来源。
+  lines.push('路径一律写绝对路径：资源串里别写相对路径，写了也会按票的 dir 解析并回显。')
   lines.push(
     `交活只走 dispatch_report：把这一轮的结论写进票 ${input.ticketId}，交完就停。`,
     '票的状态只有主会话能改：你手上只有 dispatch_report 这一个票工具，别自己标完成、别自己挂起。',

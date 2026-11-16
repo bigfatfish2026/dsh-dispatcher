@@ -131,7 +131,7 @@ describe('探路超时当拍推进', () => {
     expect(h.subagents.spawned).toHaveLength(2)
   })
 
-  it('降级时撞上别人占的资源：不派执行轮，落 blocked 排队', async () => {
+  it('降级时没交 plan：不假装占整片目录，不排队、照派执行轮', async () => {
     const h = desk()
     // 挡路的票先跑起来：声明过、探路收工、已经派了执行轮。
     const blocker = await h.desk.open({ goal: '占住目录', brief: '占住目录' }, h.main)
@@ -151,10 +151,11 @@ describe('探路超时当拍推进', () => {
 
     const ticket = h.log.get(dealt.id)!
     expect(ticket.degraded).toBe(true)
-    expect(ticket.phase).toBe('queued')
-    expect(ticket.waitOn).toEqual([{ ticketId: blocker.id, resources: [DIR] }])
-    // 两只探路 + 挡路那张的执行轮；降级票这一轮一只都没派。
-    expect(h.subagents.spawned).toHaveLength(3)
+    // plan 空着就什么写都不占：降级票不再拿票面 dir 整片兜底。
+    expect(ticket.phase).toBe('running')
+    expect(ticket.waitOn).toBeUndefined()
+    // 两只探路 + 挡路那张的执行轮 + 降级票自己的执行轮。
+    expect(h.subagents.spawned).toHaveLength(4)
   })
 
   it('2 分钟按毫秒算：119999ms 不降级，120000ms 降级，日志里打实际毫秒', async () => {

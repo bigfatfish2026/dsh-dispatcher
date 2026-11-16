@@ -207,7 +207,7 @@ describe('探路收工那刻判定', () => {
     expect(h.subagents.spawned).toHaveLength(3)
   })
 
-  it('降级票仍按目录兜底算写：声明没等到，别当成不冲突', async () => {
+  it('降级票没交 plan：不拿票面 dir 整片当写，不排队、照派执行轮', async () => {
     const h = makeDesk({
       config: { defaultPreset: 't1', sweepMs: 0, probeTimeoutMinutes: 2 },
       probe: fakeProbe(),
@@ -225,16 +225,15 @@ describe('探路收工那刻判定', () => {
     )
     const planner = receipt.id
     h.clock.advance(3 * 60_000)
-    // 降级当拍就判：撞上占着这片目录的票就排队，不等探路子会话 idle。
+    // 降级当拍就判：plan 空着就什么写都不占，不拿票面 dir 整片兜底（那就是
+    // dir:/home/julia 锁死整棵树那条路）。
     await h.desk.maintain()
     const degraded = h.log.get(planner)!
     expect(degraded.degraded).toBe(true)
-
-    const blocked = h.log.get(planner)!
-    expect(blocked.phase).toBe('queued')
-    expect(blocked.waitOn).toEqual([{ ticketId: blocker, resources: [DIR] }])
-    // 判输了不派：两只探路 + 一张执行轮，planner 没有执行轮。
-    expect(h.subagents.spawned).toHaveLength(3)
+    expect(degraded.phase).toBe('running')
+    expect(degraded.waitOn).toBeUndefined()
+    // 两只探路 + 挡路那张的执行轮 + 降级票自己的执行轮。
+    expect(h.subagents.spawned).toHaveLength(4)
   })
 })
 

@@ -72,7 +72,7 @@ describe('ConflictArbiter：排队先后', () => {
 })
 
 describe('ConflictArbiter：side 的降级兜底', () => {
-  it('degraded 且没声明 writes：plan.files 的父目录当写；连 plan 都没有才用票的 dir', () => {
+  it('degraded 且没声明 writes：只拿 plan.files 的父目录当写，不拿票的 dir 整片兜底', () => {
     const snapshots = foldEvents([
       {
         kind: 'published',
@@ -96,11 +96,13 @@ describe('ConflictArbiter：side 的降级兜底', () => {
     })
     expect(arbiter.side(snapshots[0]!)).toEqual({ writes: ['dir:/tmp/a'], reads: [] })
 
+    // 连 plan 都没有：不猜「可能写整片目录」，什么也不占。降级票凭空产出
+    // dir:<票 dir> 就是那条把整棵树锁死的路。
     const bare = foldEvents([
       { kind: 'published', id: 't-bare', at: T(0), goal: 'x', brief: 'x', publisher: 'session-main', preset: 't1', presetSource: 'fallback', dir: '/tmp/fallback-dir' },
       { kind: 'declared', id: 't-bare', at: T(1), cause: 'timer', plan: {}, intent: {}, degraded: true },
     ])
-    expect(arbiter.side(bare[0]!)).toEqual({ writes: ['dir:/tmp/fallback-dir'], reads: [] })
+    expect(arbiter.side(bare[0]!)).toEqual({ writes: [], reads: [] })
   })
 })
 
