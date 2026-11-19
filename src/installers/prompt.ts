@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config'
 import { isWorkerSession, noWaitReason } from '../no-wait'
 import type { SweepFacts } from '../tickets/sweep-facts'
+import type { MainSessionFilter } from '../tickets/main-session'
 import { composeWorkerPrompt, presetPromptSuffix } from '../tickets/worker-prompt'
 
 interface PromptHeader {
@@ -17,7 +18,7 @@ interface PromptHeader {
 }
 
 interface PromptAgent {
-  session?: { header?: PromptHeader }
+  session?: { id?: string; header?: PromptHeader }
   ctx?: {
     effect?: (callback: () => () => void, label?: string) => unknown
     tools?: {
@@ -29,6 +30,11 @@ interface PromptAgent {
 export interface PromptGuardDeps {
   sweepFacts: Pick<SweepFacts, 'text'>
   info: (message: string) => void
+  /**
+   * 巡检出口的闸：只有主会话收票台近况。不给就是老行为（全部非子会话都收），
+   * 只为兼容只装配了提示词层的测试；生产接线在 `src/index.ts` 一定给。
+   */
+  mainSession?: MainSessionFilter
   agents?: () => { list(): PromptAgent[] } | undefined
 }
 
@@ -76,10 +82,16 @@ export function installPromptGuard(ctx: Context, config: Config, deps: PromptGua
   // 宿主每次都把上下文重新渲染成一条 runtime-context 快照；文本没变就不落盘，
   // 变了才追加一条新的。模型看见的是「环境状态」，不是谁下的命令——这就是
   // 巡检提醒不再被主会话当成使用方说话的根。worker 不需要票台近况，跳过。
+  // 群聊会话同样跳过：那里是公开场合，票台近况（含私聊票的 brief）不该出现；
+  // 判据在 `tickets/main-session.ts`，跳过时由那把闸记 debug 一行，不静默。
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()
-    const header = (context as { agent?: { session?: { header?: PromptHeader } } })?.agent?.session?.header
-    if (header?.origin === 'subagent') return assembled
+    const agent = (context as { agent?: PromptAgent })?.agent
+    // 没接线上的闸（只装了提示词层的测试）退回老判据：非子会话。
+    const allowed = deps.mainSession
+      ? deps.mainSession.allows(agent)
+      : !isWorkerSession(agent?.session?.header?.origin)
+    if (!allowed) return assembled
     const text = deps.sweepFacts.text()
     if (!text) return assembled
     // interpolate: false —— 票的 brief 是自由文本，别让 {{…}} 被当成提示词变量。

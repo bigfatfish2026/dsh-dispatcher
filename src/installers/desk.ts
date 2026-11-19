@@ -27,6 +27,7 @@ import type { PresetTools } from '../tickets/preset-guard'
 import type { PresetCatalog } from '../tickets/publish'
 import type { SubagentSeam } from '../tickets/workers'
 import type { WorkerTicketTools } from '../tickets/worker-tools'
+import type { MainSessionFilter } from '../tickets/main-session'
 import { isWorkerSession } from '../no-wait'
 import { createWorkerPlane } from './workplane'
 
@@ -62,6 +63,8 @@ export interface DeskInstallerDeps {
   warn: (message: string) => void
   info: (message: string) => void
   getWorkerTools: () => WorkerTicketTools | undefined
+  /** 巡检出口的闸：主会话才收票台近况与唤醒（见 `tickets/main-session.ts`）。 */
+  mainSession?: MainSessionFilter
   setSweepDriver?: (driver: SweepDriver) => void
 }
 
@@ -123,11 +126,22 @@ export function createPresetCatalog(
   }
 }
 
-/** 把一句话推给主会话：指名会话优先，退回落第一个能 followup 的主会话。 */
-export function createWake(agentsOf: () => AgentsService | undefined) {
+/**
+ * 把一句话推给主会话：指名会话优先，退回落第一个能 followup 的主会话。
+ *
+ * 「主会话」由巡检那把闸判（`tickets/main-session.ts`）：子会话、群聊会话都不收
+ * 票台近况。指名的那个不是主会话就记一行 debug（闸里记），再回落——话不能因为
+ * 指名对象是群聊就整个吞掉，主人那边还得看得见。
+ */
+export function createWake(
+  agentsOf: () => AgentsService | undefined,
+  mainSession?: MainSessionFilter,
+) {
   return async (body: string, to?: string): Promise<boolean> => {
     const usable = (agent: AgentLike): boolean =>
-      !isWorkerSession(agent.session?.header?.origin) && typeof agent.followup === 'function'
+      (mainSession?.allows(agent) ?? true) &&
+      !isWorkerSession(agent.session?.header?.origin) &&
+      typeof agent.followup === 'function'
     const deliver = async (agent: AgentLike): Promise<boolean> => {
       await agent.followup!({
         id: randomUUID(),
@@ -242,9 +256,10 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
    *
    * 有 `to`（被挡/放行那张票的开票方）就先指名送它——这台机器上挂两个主会话
    * 时，话不能推给另一个；指名的不在活表（会话没了/重启过）再回落第一个主会话，
-   * 至少别把话吞掉。子会话不收票台通知：它只在执行轮里干活。
+   * 至少别把话吞掉。子会话和群聊会话不收票台通知：闸在
+   * `tickets/main-session.ts` 的同一只过滤上，跳过会留 debug 一行。
    */
-  const wake = createWake(agentsOf)
+  const wake = createWake(agentsOf, deps.mainSession)
 
   // 巡检间隔：新键 sweepMs 说了算，老键 sweepMinutes 显式配了才折算并 warn 一句。
   const sweepMs = resolveSweepMs(config)

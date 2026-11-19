@@ -18,6 +18,8 @@ import { installDesk } from './installers/desk'
 import { installStore } from './installers/store'
 import { installRestrict } from './installers/restrict'
 import { installPromptGuard } from './installers/prompt'
+import { createMainSessionFilter } from './tickets/main-session'
+import type { QqbotPrefsLike } from './tickets/main-session'
 
 export const name = 'dsh-dispatcher'
 export const inject = ['tools', 'agents']
@@ -95,6 +97,21 @@ export function apply(ctx: Context, config: ConfigShape): void {
   const info = (message: string): void => {
     logger?.info?.(message)
   }
+  const debug = (message: string): void => {
+    logger?.debug?.(message)
+  }
+
+  /**
+   * 巡检出口的闸：只有主会话收票台近况与唤醒。
+   *
+   * 判据是 `qqbot/prefs` 里 sessionId → 会话键的反查（群聊键是
+   * `qqbot:<appId>:group:<peerId>`）；服务不在（非 qqbot 部署、热重载空档）就按
+   * 主会话放行，只有 header 明说子会话、或键明说群聊才拦。跳过由闸自己记 debug。
+   */
+  const mainSession = createMainSessionFilter({
+    prefs: () => probed<QqbotPrefsLike>(ctx, 'qqbot/prefs'),
+    debug,
+  })
 
   const { log, serialize } = installStore(ctx, config, {
     warn,
@@ -112,12 +129,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
     probed,
     warn,
     info,
+    mainSession,
     getWorkerTools: () => workerTicketTools,
     setSweepDriver: (driver) => sweepDriverSlot.set(ctx as unknown as object, driver),
   })
 
   // ── 提示词注入：交接规矩、巡检事实、等待守卫 ────────────────────
-  installPromptGuard(ctx, config, { sweepFacts, info, agents: agentsOf })
+  installPromptGuard(ctx, config, { sweepFacts, info, mainSession, agents: agentsOf })
 
   // ── 十一个工具：router 六个 + worker 三件 + 账本 + 打点 ─────────
   workerTicketTools = installTools(ctx, { config, desk, sweepFacts, warn })

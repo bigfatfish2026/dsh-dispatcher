@@ -16,13 +16,15 @@ worker 提示词分成两段：`workerPrompt` 是一段所有 worker 共用的�
 
 ### Fixed
 
+巡检只进主会话：票台近况的快照（`dispatcher:sweep` 动态上下文）和巡检唤醒（`waiting` / `blocked` 的 followup、冲突排队与放行、越界提醒）从此只投给主会话，群聊会话一律跳过，跳过时在 debug 日志留一行原因。判据是 `qqbot/prefs` 服务里 sessionId → 会话键的反查（`qqbot:<appId>:group:<peerId>`），宿主 `SessionHeader` 本身只有 `origin` / `agentPreset`，分不出群聊；非 qqbot 部署（headless / TUI）没有这个服务，按主会话放行，只有 `origin === 'subagent'` 或键明说 `group` 才拦。
+
 声明路径按票的 `dir` 归一化：`declare` 与 `touch` 的相对路径统一按票上那个 `dir` 解析成绝对路径落盘，回执回显「相对 → 绝对」；票上没有 `dir` 的相对路径原样保留、不按宿主 cwd 猜。`declare` 成功后当场重判排队票，不用白等下一次收工。降级票（探路超时、没等到声明）不再拿票的 `dir` 整片合成写锁，只取 `plan.files` 的父目录，没有 plan 就什么也不占——凭空占住整棵树、把别的票全挡死的那条路没了。显式声明的大根目录（`dir:/`、home、仓库根）仍然合法，但判定只降成 weak 并 warn 一行，写在里面的具体文件照旧强冲突。
 
 ### Docs
 
 `docs/internals.zh.md` / `internals.en.md` 的配置表补上此前漏记的 `workerPrompt` 与 `presets`；README 中英两版的装包命令不再写死 tgz 版本号；`.gitignore` 补 `*.sqlite*`（盖住 `-wal` / `-shm`）与 `state/`；`package.json` 加 `pretest`（`test` 前先 `build`），`files` 带上 `docs/*.png`，README 里的时序图在 npm 上也能显示；源码注释与测试夹具里的内部称呼统一改成仓库本来的 `worker`，测试里写死的家目录路径换成临时目录或 `dir:<home>` 写法。
 
-Tests: 全量 `npm test` 74 个文件 803 条全绿，`tsc --noEmit` 干净（`--noUnusedLocals --noUnusedParameters` 也干净），`npm run build` 通过。
+Tests: 全量 `npm test` 75 个文件 814 条全绿，`tsc --noEmit` 干净（`--noUnusedLocals --noUnusedParameters` 也干净），`npm run build` 通过。
 
 ## 2.2.1
 

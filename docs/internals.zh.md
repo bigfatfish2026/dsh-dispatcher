@@ -101,9 +101,9 @@ worker 手上只有 `dispatch_report`，只往票里追加一行，改不了任�
 
 节流指纹是 `票号:原因:statusSince`，同一轮只发一次；状态翻过一轮再回来能再来一次。巡检**只提醒、不改票**：不写 status、不写 note，也不替主会话收报告。
 
-提醒分两条路。未读报告、一轮干完没交报告、干完或跑太久没收工，记成巡检事实，挂到 `system-prompt/assemble` 上作为动态上下文（`dispatcher:sweep`，`interpolate: false`）：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是使用方在说话。时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖；`dispatch_list` / `dispatch_read` / `dispatch_close` 见过这张票之后，对应条目摘掉，没读的继续挂着。只有 `blocked` 超阈值才真去 `followup`，开头 `[sweep] `，并明说不是使用方在说话。
+提醒分两条路。未读报告、一轮干完没交报告、干完或跑太久没收工，记成巡检事实，挂到 `system-prompt/assemble` 上作为动态上下文（`dispatcher:sweep`，`interpolate: false`）：宿主把它渲染成 runtime-context 快照，模型看见的是票台近况，不是使用方在说话。时间只写到五分钟粒度，同一状态反复渲染一字不差，KV 前缀缓存不跟着抖；`dispatch_list` / `dispatch_read` / `dispatch_close` 见过这张票之后，对应条目摘掉，没读的继续挂着。只有 `waiting` / `blocked` 超阈值才真去 `followup`，开头 `[sweep] `，并明说不是使用方在说话。
 
-事实表只在内存里：进程重启后由巡检重新发现，过期提醒不会被读回来。worker 会话收不到这段上下文。
+事实表只在内存里：进程重启后由巡检重新发现，过期提醒不会被读回来。worker 会话收不到这段上下文，群聊会话也收不到：判据是 `qqbot/prefs` 服务里 sessionId → 会话键的反查（`qqbot:<appId>:group:<peerId>`），宿主 `SessionHeader` 只有 `origin` / `agentPreset`，分不出群聊；非 qqbot 部署（没有这个服务）按主会话放行。唤醒（`waiting` / `blocked` 的 `followup`、冲突排队与放行、越界提醒）走同一只闸，只找主会话，跳过时 debug 记一行原因。
 
 ## 工具面：白名单与 worker 限制
 
