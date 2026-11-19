@@ -65,7 +65,7 @@ async function idle(h: Harness, worker: string): Promise<void> {
 /** 最后一次派活的 prompt：看它派的是哪张票、第几轮。 */
 function lastPrompt(h: Harness): string {
   const spec = h.subagents.spawned.at(-1)!
-  return spec.request.prompt.map((block) => block.text).join('\n')
+  return spec.prompt.map((block) => block.text).join('\n')
 }
 
 describe('探路收工那刻判定', () => {

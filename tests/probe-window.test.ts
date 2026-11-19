@@ -338,7 +338,7 @@ describe('接线：一律探路与 agent/created', () => {
     expect(spies[0]!.released).toBe(0)
 
     // 第一轮发出去的就是探路任务书，不是执行任务书。
-    const prompt = host.subagents.spawned[0]!.request.prompt[0]!.text
+    const prompt = host.subagents.spawned[0]!.prompt[0]!.text
     expect(prompt).toContain('这一轮是只读轮')
     expect(prompt).toContain('dispatch_declare')
     expect(prompt).toContain(receipt.id)

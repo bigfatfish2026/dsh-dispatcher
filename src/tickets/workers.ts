@@ -1,9 +1,10 @@
 /**
  * worker 的登记表：谁派出去的、还活不活、怎么收回来。
  *
- * 这一层只认结构，不认 cordis：`startActivation` / `sendMessage` 的形状按
- * `dsh-tool-subagent` 的实际实现抄（lib/index.js:462-482），但传进来的是接口，
- * 测试塞假实现就行，一个真子会话都不会开。
+ * 这一层只认结构，不认 cordis：`startActivation` / `sendMessage` 的形状按宿主
+ * rc.5 的 `dsh-tool-subagent` 实际调用抄（`startActivation({ provider, label,
+ * ...任务字段, signal, delivery })`，任务字段直接摊平，见下面的 `SubagentSpec`），
+ * 但传进来的是接口，测试塞假实现就行，一个真子会话都不会开。
  *
  * 两条硬规矩：
  *
@@ -20,16 +21,25 @@ export interface PromptBlock {
   text: string
 }
 
+/**
+ * `ctx.subagents.startActivation` 的入参。
+ *
+ * 形状按宿主 rc.5（0.2.2-rc.5）的 `SubagentActivationSpec` 抄：任务字段
+ * （`prompt` / `parent` / `cwd` / `agentPreset` / `maxDepth`）直接摊在 spec 顶层。
+ * rc.1 是把它们收在 `spec.request` 里的一层嵌套，rc.5 去掉了那层——还按旧形状
+ * 传的话宿主里 `spec.parent` 是 undefined，第一处 `spec.parent.id` 就抛
+ * `Cannot read properties of undefined (reading 'id')`，票建出来了子会话却起不来。
+ */
 export interface SubagentSpec {
   provider: string
   label: string
-  request: {
-    prompt: PromptBlock[]
-    parent: unknown
-    cwd?: string
-    agentPreset?: string
-    maxDepth?: number
-  }
+  /** 子会话名；不吃宿主自动分配的 `agent-N` 时由调用方给。 */
+  name?: string
+  prompt: PromptBlock[]
+  parent: unknown
+  cwd?: string
+  agentPreset?: string
+  maxDepth?: number
   signal: AbortSignal
   delivery: 'parent'
 }
@@ -127,13 +137,12 @@ export function createWorkerPool(deps: WorkerPoolDeps): WorkerPool {
       const activation = await seam.startActivation({
         provider: input.provider,
         label: input.label,
-        request: {
-          prompt: textBlocks(input.prompt),
-          parent: input.parent,
-          ...(input.cwd ? { cwd: input.cwd } : {}),
-          agentPreset: input.preset,
-          ...(input.maxDepth ? { maxDepth: input.maxDepth } : {}),
-        },
+        // rc.5：任务字段摊在 spec 顶层，没有 `request` 那一层（见 SubagentSpec 的注释）。
+        prompt: textBlocks(input.prompt),
+        parent: input.parent,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        agentPreset: input.preset,
+        ...(input.maxDepth ? { maxDepth: input.maxDepth } : {}),
         // 故意不传调用方的 signal：工具轮一结束它就会 abort。
         signal: controller.signal,
         delivery: 'parent',

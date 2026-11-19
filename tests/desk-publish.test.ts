@@ -136,10 +136,10 @@ describe('开票：发布与补偿', () => {
     const spec = h.subagents.spawned[0]!
     expect(spec.signal).toBeInstanceOf(AbortSignal)
     expect(spec.signal.aborted).toBe(false)
-    expect(spec.request.agentPreset).toBe('t1')
-    expect(spec.request.prompt[0]!.text).toContain(receipt.id)
+    expect(spec.agentPreset).toBe('t1')
+    expect(spec.prompt[0]!.text).toContain(receipt.id)
     // parent 必须是活着的那个 Agent 本体，不是它的 id。
-    expect(spec.request.parent).toBe(h.agents.get('session-main'))
+    expect(spec.parent).toBe(h.agents.get('session-main'))
     expect(spec.delivery).toBe('parent')
     // 收票时这个 controller 才 abort：票台自己攥着它。
     await h.desk.close(receipt.id)

@@ -45,7 +45,7 @@ async function idle(h: Harness, worker: string): Promise<void> {
 
 /** 最后一次派活的 prompt：看派的是第几轮、哪套任务书。 */
 function lastPrompt(h: Harness): string {
-  return h.subagents.spawned.at(-1)!.request.prompt.map((block) => block.text).join('\n')
+  return h.subagents.spawned.at(-1)!.prompt.map((block) => block.text).join('\n')
 }
 
 describe('探路超时当拍推进', () => {

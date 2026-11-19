@@ -154,7 +154,7 @@ describe('派活接线：任务书按轮次真的换了', () => {
   it('探路票第一轮派出去的是只读任务书', async () => {
     const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe: probePort })
     await h.desk.open({ ...INTENT }, h.main)
-    const text = h.subagents.spawned[0]!.request.prompt[0]!.text
+    const text = h.subagents.spawned[0]!.prompt[0]!.text
     expect(text).toContain('这一轮是只读轮')
     expect(text).toContain('dispatch_declare')
     expect(text).toContain(INTENT.goal)
@@ -175,7 +175,7 @@ describe('派活接线：任务书按轮次真的换了', () => {
     await flush()
 
     expect(h.log.get(id)!.workerId).toBe('worker-2')
-    const text = h.subagents.spawned[1]!.request.prompt[0]!.text
+    const text = h.subagents.spawned[1]!.prompt[0]!.text
     expect(text).toContain(INTENT.goal)
     expect(text).toContain('方案：改 publish.ts 的任务书')
     expect(text).toContain('要改的文件：src/tickets/publish.ts（按轮次出三套）')
@@ -198,7 +198,7 @@ describe('派活接线：任务书按轮次真的换了', () => {
     expect(ticket.workerId).toBe('worker-2')
     expect(h.subagents.spawned).toHaveLength(2)
 
-    const text = h.subagents.spawned[1]!.request.prompt[0]!.text
+    const text = h.subagents.spawned[1]!.prompt[0]!.text
     expect(text).toContain('探路超时')
     expect(text).toContain('dispatch_declare')
     expect(text).toContain(INTENT.goal)
@@ -257,7 +257,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
     })
     const { id } = await h.desk.open({ ...INTENT }, h.main)
     expect(h.subagents.spawned).toHaveLength(1)
-    expect(h.subagents.spawned[0]!.request.prompt[0]!.text).toContain('这一轮是只读轮')
+    expect(h.subagents.spawned[0]!.prompt[0]!.text).toContain('这一轮是只读轮')
 
     await h.desk.declare(
       'worker-1',
@@ -355,7 +355,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
 
     // 会话档钉死在 spawn，落成只读档连 write / edit 都收不回来；探路那轮的
     // 只读靠窗口那三件 deny，不吃主会话当前挂的档。
-    expect(h.subagents.spawned[0]!.request.agentPreset).toBe('t1')
+    expect(h.subagents.spawned[0]!.agentPreset).toBe('t1')
     expect(h.log.get(id)!.preset).toBe('t1')
 
     await h.desk.declare('worker-1', { summary: '改一处' }, { writes: [], reads: [] })
@@ -427,7 +427,7 @@ describe('执行轮接线：原会话还在就 followup', () => {
       },
     })
     const { id } = await h.desk.open({ ...INTENT, preset: 't2' }, h.main)
-    expect(h.subagents.spawned[0]!.request.agentPreset).toBe('t2')
+    expect(h.subagents.spawned[0]!.agentPreset).toBe('t2')
     // t2 的 allow 名单里没有 dispatch_touch：工具面靠 agent 层那一道兜住。
     expect(attached).toEqual(['worker-1'])
 
