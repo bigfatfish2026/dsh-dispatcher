@@ -66,6 +66,7 @@ const JSON_KEYS = [
   'brief',
   'goal',
   'status',
+  'phase',
   'owner',
   'createdAt',
   'updatedAt',
@@ -121,6 +122,7 @@ describe('dsh-dispatcher tickets --json', () => {
       expect(view.brief).toBe(briefOf(snapshot))
       expect(view.goal).toBe(snapshot.goal)
       expect(view.status).toBe(snapshot.status)
+      expect(view.phase).toBe(snapshot.phase ?? null)
       expect(view.owner).toBe(snapshot.owner ?? null)
       expect(view.createdAt).toBe(snapshot.createdAt)
       expect(view.updatedAt).toBe(snapshot.updatedAt)
@@ -296,6 +298,34 @@ describe('桌面快照文件', () => {
     const next = JSON.parse(readFileSync(file, 'utf8')) as TicketsPayload
     expect(next.counts.openTotal).toBe(0)
     expect(next.tickets.map((view) => view.status)).toEqual(['done', 'done'])
+  })
+
+  it('gated 票的 phase 跟着快照出去：屏上靠它认出「派活被驳回」', () => {
+    const logFile = writeLog([
+      {
+        kind: 'published',
+        id: 't-gated',
+        at: '2026-10-01T00:00:00.000Z',
+        goal: '要跑命令但档里没 bash',
+        brief: '跑测试',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: 'req-gated',
+      },
+      { kind: 'gated', id: 't-gated', at: '2026-10-01T00:01:00.000Z', cause: 'reaction', reason: '没 bash' },
+    ])
+    const readout = new TicketReadout(new TicketLog(logFile), {
+      now: () => new Date('2026-11-04T12:00:00.000Z'),
+    })
+    const file = join(tempDir(), 'gated.snapshot.json')
+    new TicketSnapshotFile(readout, { file, recentClosed: 20 }).write()
+    const payload = JSON.parse(readFileSync(file, 'utf8')) as TicketsPayload
+    const view = payload.tickets[0]!
+    // status 只有 waiting，phase 才是那一档「被驳回」的唯一线索。
+    expect(view.status).toBe('waiting')
+    expect(view.phase).toBe('gated')
+    expect(payload.counts).toEqual({ open: 0, running: 0, waiting: 1, blocked: 0, openTotal: 1 })
   })
 
   it('只带未结票 + 最近 N 张结票，counts 按全量算', () => {

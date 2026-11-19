@@ -472,6 +472,14 @@ export interface Declared extends EventBase {
    * 兜底。只给对账和巡检看，不额外开事件种类——一条消息一次写完。
    */
   degraded?: boolean
+  /**
+   * 派活失败的回滚：只有 desk 的 `rollbackPlanned` 会带它。
+   *
+   * reducer 收到 running 上的 declared 一律保持 running（免得把正在跑的票
+   * 打回 planned、再被 admit 一次），唯独这一条要真的把 phase 退回 planned：
+   * 票面不许停在「有人正在干」，其实 spawn 已经失败。
+   */
+  rollback?: boolean
 }
 
 /**

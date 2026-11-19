@@ -150,6 +150,38 @@ describe('intent / plan 从工具里读得回来', () => {
     expect(text).not.toContain('（')
   })
 
+  it('gated 也翻成中文：status 是 waiting，标记补出「已驳回」', async () => {
+    const file = logFile([
+      {
+        kind: 'published',
+        id: 't-gated',
+        at: T(0),
+        goal: '要跑命令但档里没 bash',
+        brief: '跑测试',
+        publisher: 'session-main',
+        preset: 't1',
+        presetSource: 'fallback',
+        requestId: 'req-gated',
+      },
+      {
+        kind: 'gated',
+        id: 't-gated',
+        at: T(1),
+        cause: 'reaction',
+        reason: 't1 没有 bash，判驳回',
+      },
+    ])
+    const host = mountPlugin({ config: { stateFile: file } })
+    const output = (await host.call('dispatch_list', {})) as ListOutput
+    const row = output.tickets[0]!
+    // status 仍是 waiting：光看它跟「干完等人接」分不出来。
+    expect(row.status).toBe('waiting')
+    expect(row.phase).toBe('gated')
+
+    const text = renderOf(host, 'dispatch_list', output)
+    expect(text).toContain('waiting（已驳回）：跑测试')
+  })
+
   it('票面把 phase 翻成中文：探路中 / 冲突排队', async () => {
     const file = logFile([
       {

@@ -378,15 +378,22 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
     case 'declared': {
       // 探路交活：plan 与 intent 一起覆盖。published 是开票凭证、append-only
       // 改不了，所以重写意图只能落在这条事件上。同样不碰 status。
+      //
+      // phase 只在「没在跑」时折回 planned：执行轮正跑（phase=running）时子会话
+      // 再交一次声明只是补内容，按回 planned 会让票面变成「方案就绪、没人派」，
+      // 同一只还在跑的 worker 下一拍又被 admit 一次，等于重复执行。
+      // 唯一例外是派活失败的回滚（`rollback`）：它要的正是把 phase 退回 planned。
       if (!previous || isTerminal(previous.status)) return
+      const keepRunning = previous.phase === 'running' && event.rollback !== true
       state.set(event.id, {
         ...previous,
         updatedAt: event.at,
         plan: event.plan,
         intent: event.intent,
-        phase: 'planned',
+        phase: keepRunning ? 'running' : 'planned',
         // 排队先后只认第一次声明：重新声明 / 降级 / 回滚都走这条事件，
-        // 不能让它们把「谁先抢到这片资源」改掉。
+        // 不能让它们把「谁先抢到这片资源」改掉。运行中二次声明同样不刷新
+        // （execReady 只判 declaredAt 有没有，不看新旧，见 admission.ts:81）。
         declaredAt: previous.declaredAt ?? event.at,
         degraded: event.degraded === true,
         // 重新声明 = 影响面变了：旧的排队关系和弱冲突提示都不作数，等下一次判。

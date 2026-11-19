@@ -139,6 +139,43 @@ describe('探路收工后的续派', () => {
     expect(h.subagents.spawned).toHaveLength(2)
   })
 
+  it('E：执行轮跑着再交声明，phase 仍是 running，巡检不会再派一次', async () => {
+    const h = makeDesk(MANUAL)
+    h.desk.attach()
+    const { id } = await h.desk.open(INTENT, h.main)
+    await h.desk.declare(
+      'worker-1',
+      { summary: '改 desk', files: [{ path: 'src/tickets/desk.ts' }] },
+      { writes: ['file:src/tickets/desk.ts'], reads: [], reversibility: 'auto' },
+    )
+    h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'completed' })
+    await flush()
+    await h.desk.maintain()
+
+    // 执行轮已经派出去：worker-2 在跑，phase=running。
+    const exec = h.log.get(id)!
+    expect(exec.phase).toBe('running')
+    expect(h.subagents.spawned).toHaveLength(2)
+
+    // 跑着的子会话补一份声明：内容照换，phase 不许被打回 planned。
+    await h.desk.declare(
+      'worker-2',
+      { summary: '顺手把 reducer 一起改了', files: [{ path: 'src/store/reducer.ts' }] },
+      { writes: ['file:src/store/reducer.ts'], reads: [], reversibility: 'auto' },
+    )
+    const declared = h.log.get(id)!
+    expect(declared.phase).toBe('running')
+    expect(declared.plan?.summary).toBe('顺手把 reducer 一起改了')
+    expect(declared.status).toBe('running')
+
+    // 下一拍照样不派：phase=running 在 execReady 里是明确的不派。
+    const lines = h.lines()
+    for (let i = 0; i < 3; i += 1) await h.desk.maintain()
+    expect(h.subagents.spawned).toHaveLength(2)
+    expect(h.log.get(id)!.phase).toBe('running')
+    expect(h.lines()).toBe(lines)
+  })
+
   it('D：gated 之后连扫 5 拍不重派、不刷日志', async () => {
     // t2 的工具面里没有 bash：分类器说「要跑命令」时守卫必须驳回。
     const toolsets = {

@@ -115,11 +115,16 @@ export function text(value: unknown): string {
 /**
  * phase 的中文标记：票面只有 status 时，探路中/等放行/排队三档在屏上跟干活
  * 票长得一模一样。只在 phase 有值且不是 `running` 时补，老票不会撑出 undefined。
+ *
+ * `gated` 必须有一项：它的 status 也是 waiting，不补这一格就跟「干完等人接」
+ * 完全分不出来。dispatch_list 的文本不限宽（每行截 200 列），这里用完整短词；
+ * 小屏那一行放不下三个汉字，标记由桌宠自己画（见报告）。
  */
 const PHASE_MARKS: Record<string, string> = {
   planning: '探路中',
   planned: '待放行',
   queued: '冲突排队',
+  gated: '已驳回',
 }
 
 /** 票面上给人看的补充：status=blocked 是「等人」，phase=queued 是「等资源」。 */

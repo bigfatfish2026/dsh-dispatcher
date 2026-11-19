@@ -123,6 +123,76 @@ describe('探路与对账事件', () => {
       expect(ticket.phase).toBeUndefined()
       expect(ticket.degraded).toBeUndefined()
     })
+
+    it('执行轮正在跑时再交声明：phase 保持 running，只换 plan / intent', () => {
+      const running: TicketEvent[] = [
+        published,
+        { kind: 'planning', id: ID, at: T1, cause: 'tool', preset: 't2' },
+        declared,
+        // 判定过了、放行：phase 折成 running，执行轮在跑。
+        { kind: 'conflict-checked', id: ID, at: T3, cause: 'tool', level: 'none', waitOn: [] },
+      ]
+      expect(one(running).phase).toBe('running')
+
+      // 子会话干到一半又交一份声明：内容照换，phase 不许被打回 planned。
+      const again = one([
+        ...running,
+        {
+          kind: 'declared',
+          id: ID,
+          at: T4,
+          cause: 'tool',
+          plan: { summary: '改主意了：连 reducer 一起收窄' },
+          intent: { reversibility: 'manual' },
+          workerId: 'worker-2',
+        },
+      ])
+      expect(again.phase).toBe('running')
+      expect(again.plan?.summary).toBe('改主意了：连 reducer 一起收窄')
+      expect(again.intent?.reversibility).toBe('manual')
+      // 二次声明不抢排队顺序：declaredAt 还是第一次那一条。
+      expect(again.declaredAt).toBe(T2)
+      expect(again.updatedAt).toBe(T4)
+    })
+
+    it('派活失败的回滚（rollback）才把 running 退回 planned', () => {
+      const ticket = one([
+        published,
+        { kind: 'planning', id: ID, at: T1, cause: 'tool', preset: 't2' },
+        declared,
+        { kind: 'conflict-checked', id: ID, at: T3, cause: 'tool', level: 'none', waitOn: [] },
+        {
+          kind: 'declared',
+          id: ID,
+          at: T4,
+          cause: 'reaction',
+          plan: { summary: 'spawn 没成，退回等重试' },
+          intent: {},
+          rollback: true,
+        },
+      ])
+      expect(ticket.phase).toBe('planned')
+      expect(ticket.plan?.summary).toBe('spawn 没成，退回等重试')
+    })
+
+    it('planned 里再交声明：行为不变，仍是 planned、declaredAt 不动', () => {
+      const ticket = one([
+        published,
+        { kind: 'planning', id: ID, at: T1, cause: 'tool', preset: 't2' },
+        declared,
+        {
+          kind: 'declared',
+          id: ID,
+          at: T4,
+          cause: 'tool',
+          plan: { summary: '补一条路径' },
+          intent: { reversibility: 'auto' },
+        },
+      ])
+      expect(ticket.phase).toBe('planned')
+      expect(ticket.declaredAt).toBe(T2)
+      expect(ticket.plan?.summary).toBe('补一条路径')
+    })
   })
 
   it('declared 把 plan 与 intent 一起折进快照，后一次覆盖前一次', () => {

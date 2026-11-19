@@ -1864,6 +1864,11 @@ export class TicketDesk {
    *
    * 复用 `declared` 的折叠（只写 phase / plan / intent / degraded，不碰 status），
    * 所以票面回到「方案就绪、等派活」——这正是设计稿 §11 说的 spawn 失败状态。
+   *
+   * 必须带 `rollback`：判定已经先写了 phase=running，reducer 对 running 上的
+   * declared 默认保持 running（防止执行轮中二次声明把票打回 planned），只有
+   * 这一条明确要求退回。不带的话票会永远停在 phase=running，execReady 判
+   * `phase:running`，巡检再也不重试——一张死票。
    */
   private rollbackPlanned(ticket: TicketSnapshot): void {
     try {
@@ -1874,6 +1879,7 @@ export class TicketDesk {
         cause: 'reaction',
         plan: ticket.plan ?? {},
         intent: ticket.intent ?? {},
+        rollback: true,
         ...(ticket.degraded ? { degraded: true } : {}),
       })
     } catch (error) {

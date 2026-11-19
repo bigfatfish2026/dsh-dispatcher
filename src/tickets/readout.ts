@@ -16,10 +16,16 @@
 import { isOpen } from '../store'
 import { BLOCKED_MINUTES, BRIEF_MAX_COLUMNS, WAITING_MINUTES } from '../defaults'
 import { ticketView } from './view'
-import type { TicketSnapshot, TicketStatus } from '../store'
+import type { TicketPhase, TicketSnapshot, TicketStatus } from '../store'
 import type { TicketView, ViewOptions } from './view'
 
-/** 跨进程 JSON 的 schema 版本。字段增删都要 +1，消费者按它选解析器。 */
+/**
+ * 跨进程 JSON 的 schema 版本。
+ *
+ * 只做**加法**（多一个键）不升版本：现有消费者按名字取键、认不出来的键直接
+ * 忽略，升到 2 反而会让只认 v1 的一方（桌宠 `ticket_snap.rs` 里 `ver != 1`
+ * 就整份丢帧）当场读不出票。删键、改名、改语义才升版本，那时要两边一起换。
+ */
 export const TICKETS_SCHEMA_VERSION = 1 as const
 
 /** cordis service 名：`/tickets` 指令用 `ctx.get('dispatcher/tickets')` 直接拿。 */
@@ -80,6 +86,14 @@ export interface TicketJsonView {
   brief: string
   goal: string
   status: TicketStatus
+  /**
+   * 相位（planning / planned / queued / gated / running），没有就是 null。
+   *
+   * 消费者光看 status 分不出「派活被驳回」和普通 waiting：gated 那张票
+   * status 也是 waiting。小屏要画「×」这类标记只能靠这一栏，所以它跟着
+   * 快照一起出去，别让桌宠自己猜。
+   */
+  phase: TicketPhase | null
   /** 小屏/工具用的 owner 标签；没有就是 null。 */
   owner: string | null
   createdAt: string
@@ -150,6 +164,7 @@ export function toJsonView(view: TicketView, ticket: TicketSnapshot): TicketJson
     brief: view.brief,
     goal: view.goal,
     status: view.status,
+    phase: view.phase ?? null,
     owner: ticket.owner ?? null,
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
