@@ -1579,7 +1579,7 @@ export class TicketDesk {
    *
    * 只在「非 queued → queued」那一刻调用（admit 在落 conflict-checked 前取到的
    * phase）；巡检多拍、releaseBlocked 重写 waitOn、自动放行都不走这里。
-   * ego 提的票不叫醒：别绕过它自己的回合（和原先冲突 wake 的口径一致）。
+   * 一句话：进队叫一次，放行不叫。
    */
   private notifyQueued(ticket: TicketSnapshot, waitOn: readonly ConflictWait[]): void {
     const notify = this.notifier.queued
@@ -1847,8 +1847,8 @@ export class TicketDesk {
       // 不再推，主会话不会每 10 秒被同一条提醒吵一次。
       const snapshot = this.log.get(current.id) ?? current
       this.rememberBlocked(snapshot, { waitOn: verdict.waitOn })
-      // ego 提的票只落事实：不把叫人绕过 ego 自己的回合（和原冲突 wake 同口径）。
-      if (!wasQueued && (current.origin ?? 'main') !== 'ego') this.notifyQueued(snapshot, verdict.waitOn)
+      // 进队叫一次，放行不叫。
+      if (!wasQueued) this.notifyQueued(snapshot, verdict.waitOn)
       return false
     }
     const outcome = await this.startTask(current)

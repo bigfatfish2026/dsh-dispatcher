@@ -47,8 +47,8 @@ function wired(backend?: MemoryBackend) {
   return { h, facts, wakes, queued: () => wakes.filter((entry) => entry.text.includes('已进冲突排队')) }
 }
 
-async function openProbe(h: Harness, goal: string, writes: string[]): Promise<string> {
-  const receipt = await h.desk.open({ goal, brief: goal }, h.main)
+async function openProbe(h: Harness, goal: string, writes: string[], origin?: 'ego'): Promise<string> {
+  const receipt = await h.desk.open({ goal, brief: goal, ...(origin ? { origin } : {}) }, h.main)
   const workerId = h.log.get(receipt.id)!.workerId!
   await h.desk.declare(workerId, { summary: goal }, { writes })
   return receipt.id
@@ -59,14 +59,14 @@ async function idle(h: Harness, worker: string): Promise<void> {
   await flush()
 }
 
-/** 开一张占住目录的执行票 + 一张撞上来的排队票。 */
-async function pair() {
+/** 开一张占住目录的执行票 + 一张撞上来的排队票（secondOrigin 可指定 ego 票）。 */
+async function pair(secondOrigin?: 'ego') {
   const wiredDesk = wired()
   const { h } = wiredDesk
   const first = await openProbe(h, '占住目录', [DIR])
   await idle(h, 'worker-1')
   h.agents.markAlive(h.log.get(first)!.workerId!)
-  const second = await openProbe(h, '抢目录', [DIR])
+  const second = await openProbe(h, '抢目录', [DIR], secondOrigin)
   await idle(h, h.log.get(second)!.workerId!)
   expect(h.log.get(second)!.phase).toBe('queued')
   return { ...wiredDesk, first, second }
@@ -132,6 +132,19 @@ describe('queued 通知：进排队那一刻一条', () => {
     await h.desk.maintain()
     expect(h.log.get(second)!.phase).toBe('queued')
     expect(queued()).toHaveLength(2)
+  })
+
+  it('origin=ego 的票进 queued 也发一条，连扫三拍不重复', async () => {
+    const { h, queued, second } = await pair('ego')
+    expect(h.log.get(second)!.origin).toBe('ego')
+    expect(queued()).toHaveLength(1)
+
+    for (let beat = 0; beat < 3; beat += 1) {
+      h.clock.advance(10_000)
+      await h.desk.maintain()
+    }
+
+    expect(queued()).toHaveLength(1)
   })
 })
 
