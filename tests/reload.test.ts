@@ -44,6 +44,8 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     outOfScopeAllowEnabled: true,
     outOfScopeAllow: [...DEFAULT_OUT_OF_SCOPE_ALLOW],
     sweepMs: 0,
+    // 聚合提醒跟巡检同一套拍子：定时器关掉时它也不跑。
+    reportDigestSeconds: 0,
     waitingMinutes: 12,
     blockedMinutes: 60,
     runningReminderMinutes: 0,

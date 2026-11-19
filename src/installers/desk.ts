@@ -17,6 +17,7 @@ import type { LlmService } from '../tickets/classify'
 import { classifyNeedsCommand } from '../tickets/classify-command'
 import type { NeedsCommandInput } from '../tickets/classify-command'
 import { createNotifier } from '../tickets/notify'
+import { createReportDigest } from '../tickets/report-digest'
 import { createSweepFacts } from '../tickets/sweep-facts'
 import type { SweepFacts } from '../tickets/sweep-facts'
 import { attachServiceWatch, createSweepDriver } from '../tickets/sweep-driver'
@@ -289,6 +290,9 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
     }
     return undefined
   })
+  // 提醒出口先建出来：票台自己用（报告到达、挂起、收工越界），聚合提醒也用同一条
+  // followup 通道，不另开一套。
+  const notifier = createNotifier({ wake, facts: sweepFacts, quiet: false, warn })
   const desk = createDesk({
     log,
     serialize,
@@ -312,7 +316,7 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
     classify: config.presetStrategy === 'static' ? undefined : classifier,
     ...(judgeCommand ? { judgeCommand } : {}),
     routerPreset,
-    notifier: createNotifier({ wake, facts: sweepFacts, quiet: false, warn }),
+    notifier,
     watch: workerWatch,
     probe: probeWindows,
     workerTools: {
@@ -387,6 +391,30 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
       sweepDriver.dispose()
     }
   }, 'dsh-dispatcher.sweep')
+
+  // ── 报告聚合提醒：搭巡检拍子，不另起定时器 ──────────────────────
+  // 「交完活、变 waiting、报告还没被主会话读过」的票攒成一条，每
+  // `reportDigestSeconds` 秒最多推一次（0/负数关掉）。已读判断只用报告条目的
+  // `delivered`（`dispatch_read` 追加 `delivered` 事件置位），票面不加字段。
+  // 收摊只撤 pulse 订阅——定时器本身归 `startInterval` 管，热重载不会多出一条。
+  const reportDigest = createReportDigest({
+    tickets: () => log.list(),
+    clock: realClock,
+    seconds: config.reportDigestSeconds,
+    briefMaxColumns: config.briefMaxColumns,
+    send: (input) => notifier.reportDigest?.(input) ?? Promise.resolve(false),
+    warn,
+  })
+  const unwatchReportDigest = desk.onPulse(() => {
+    // tick 自己兜错、返回 false；这里只负责每拍递一次手。
+    void reportDigest.tick()
+  })
+  ctx.effect(() => {
+    return () => {
+      unwatchReportDigest()
+      reportDigest.dispose()
+    }
+  }, 'dsh-dispatcher.report-digest')
 
   return { desk, sweepFacts, agentsOf }
 }

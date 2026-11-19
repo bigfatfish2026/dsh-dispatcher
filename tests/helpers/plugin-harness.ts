@@ -54,6 +54,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     // 定时器关掉：插件层测的是接线，不是拍子。schema 的最小值 500 只校验 yml，
     // 这里直接给 desk 的配置，0 = 不起定时器。
     sweepMs: 0,
+    // 聚合提醒跟巡检同一套拍子：定时器关掉时它也不跑。
+    reportDigestSeconds: 0,
     waitingMinutes: 12,
     blockedMinutes: 60,
     runningReminderMinutes: 0,

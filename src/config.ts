@@ -16,6 +16,7 @@ import {
   MAX_EXEC,
   MAX_QUEUED,
   REPEAT_WINDOW_MINUTES,
+  REPORT_DIGEST_SECONDS,
   RUNNING_REMINDER_MINUTES,
   SWEEP_MS,
   WAITING_MINUTES,
@@ -238,6 +239,11 @@ export interface Config {
    * 折算成 `sweepMs`，装载时 warn 一句；0 = 关巡检。不配置就用 `sweepMs`。
    */
   sweepMinutes?: number
+  /**
+   * 报告聚合提醒的窗口，秒。每这么多秒把「交完活、变 waiting、报告还没被主会话
+   * 读过」的票攒成一条 followup；0 或负数 = 关。复用巡检定时器，不另起一套调度。
+   */
+  reportDigestSeconds: number
   /** waiting 多久算「该催一下」，分钟。 */
   waitingMinutes: number
   /** blocked 多久算「人忘了」，分钟。 */
@@ -428,6 +434,11 @@ export const Config: Schema<Config> = Schema.object({
     .min(0)
     .description(
       'Deprecated: use sweepMs. When set explicitly it wins (sweepMs = sweepMinutes × 60000) and the plugin logs a warning at load. 0 turns maintenance off. Leave it out to use sweepMs.',
+    ),
+  reportDigestSeconds: Schema.number()
+    .default(REPORT_DIGEST_SECONDS)
+    .description(
+      'Seconds between aggregated report reminders. Every N seconds the tickets that handed off (status waiting) and whose reports the main session has not read yet are batched into ONE followup: up to 5 tickets by id + brief + one-line summary, the rest counted as "还有 N 张". No pending ticket means no message at all. The window rides the existing sweep timer, so it never adds a second scheduler. 0 or any negative number disables it.',
     ),
   waitingMinutes: Schema.natural()
     .default(WAITING_MINUTES)

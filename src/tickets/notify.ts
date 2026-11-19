@@ -98,6 +98,27 @@ export interface OwnerNotifier {
    * 票台的调用点会判 `typeof === 'function'`。
    */
   outOfScope?(input: OutOfScopeInput): Promise<boolean>
+  /**
+   * 报告聚合提醒：一张票一条太吵，攒一批合成一条（`report-digest.ts` 节流）。
+   * 老宿主/假件可以不实现，聚合组件会把 undefined 当「没送出去」。
+   */
+  reportDigest?(input: ReportDigestInput): Promise<boolean>
+}
+
+/** 聚合提醒里的一张票：票号、标题、这轮攒下的未读条数、一行摘要。 */
+export interface DigestTicket {
+  ticketId: string
+  brief: string
+  /** 窗口内还没读的报告条数。 */
+  reports: number
+  /** 最新那条未读报告的第一行，已按列宽压过。 */
+  summary: string
+}
+
+/** 一批待提醒的票；`more` 是超出上限没列出来的张数。 */
+export interface ReportDigestInput {
+  tickets: readonly DigestTicket[]
+  more: number
 }
 
 /** 收工越界：一句话说清票号、越界几处、前几处是什么；不回滚，只提醒。 */
@@ -152,6 +173,27 @@ export function outOfScopeText(input: OutOfScopeInput): string {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 聚合提醒的文案：一句话交代「几张票在等你读、分别是什么、怎么收场」。
+ *
+ * 这是给主会话的内部话：不喊主人、不碰 QQ、不冒充使用方。票多时先列前几张，
+ * 剩下的只报数——聚合的意义是把噪音压成一条，不是把票面抄一遍。
+ */
+export function reportDigestText(input: ReportDigestInput): string {
+  const total = input.tickets.length + input.more
+  const lines = input.tickets.map((ticket) => {
+    const summary = ticket.summary ? `：${ticket.summary}` : ''
+    return `${ticket.ticketId}「${ticket.brief}」${ticket.reports} 条报告${summary}`
+  })
+  const more = input.more > 0 ? `；还有 ${input.more} 张没列` : ''
+  return (
+    `${SWEEP_PREFIX}票台：${total} 张票交完活在 waiting，报告还没读。` +
+    `${lines.join('；')}${more}。` +
+    '看正文 dispatch_read <票号>；要接着派 dispatch_send <票号>；收工 dispatch_close <票号>。' +
+    '这是票台聚合提醒，不是使用方在说话。'
+  )
 }
 
 /** 一句话，别带正文：提醒是钩子，不是内容。陈述句，不点名工具。 */
@@ -278,6 +320,11 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
     },
     outOfScope(input) {
       return send(outOfScopeText(input), false, input.publisher)
+    },
+    reportDigest(input) {
+      // 聚合提醒不指名：谁在主会话谁收（多个主会话时第一个能 followup 的）。
+      // quiet 闸也不拦——这正是「有活等人读」那件事本身。
+      return send(reportDigestText(input), false)
     },
   }
 }

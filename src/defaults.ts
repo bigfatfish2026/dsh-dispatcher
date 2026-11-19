@@ -53,6 +53,20 @@ export const SWEEP_MS = 10_000
 export const CLASSIFY_TIMEOUT_MS = 8_000
 
 /**
+ * 报告聚合提醒的窗口（秒）：每这么多秒把「交完活、变 waiting、报告还没被主会话
+ * 读过」的票攒成一条推出去；0 或负数 = 关掉。
+ *
+ * 120 秒是「两条巡检拍子之间人还没顾上看」的量级：比 10 秒的巡检慢一档，主会话
+ * 不至于被每张票单独叫一次；又不至于一小时才发现有一批票在等人读。这个窗口复用
+ * 巡检那把定时器（`desk.onPulse` 节流），不另起调度。
+ */
+export const REPORT_DIGEST_SECONDS = 120
+/** 一条聚合提醒最多列几张票，超出的写「还有 N 张」：一句话别顶满整屏。 */
+export const REPORT_DIGEST_MAX_LINES = 5
+/** 聚合提醒里每张票那行摘要的列宽上限：一个汉字两列，只看一眼就够。 */
+export const REPORT_DIGEST_SUMMARY_COLUMNS = 40
+
+/**
  * 命令判定的短超时与默认模型。
  *
  * 这个判定只为一句话 yes/no，比选档更不该等：晚到 4 秒还没回话，按关键词表先
