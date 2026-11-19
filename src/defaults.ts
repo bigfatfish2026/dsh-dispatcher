@@ -65,3 +65,48 @@ export const COMMAND_HINT_EFFORT = 'off'
 /** 撤回审计：往回扫 3 天，两次审计最小间隔 1 小时。 */
 export const REVERT_AUDIT_DAYS = 3
 export const REVERT_AUDIT_MS = 60 * 60 * 1000
+
+/**
+ * 收工对账的「合理产物」白名单：明显不是业务产物的写入不算越界。
+ *
+ * 取值依据（票 t-mwn0xmdc-o8r8 翻票库实测）：历史上 152 张票带 `outOfScope`，
+ * 一类是备份与临时产物（`backups/`、`/tmp`、`*.bak-时间戳`），另一类是构建产物
+ * （`lib/`、`node_modules/`、`.git/` 内部文件）。这些路径不是任何人要保护的业务
+ * 源码，报出来只会让每张票都补一句「这些我声明了」。
+ *
+ * 两种写法：
+ * - 以 `/` 开头 = 绝对目录前缀（`/tmp/` 只匹配 /tmp 本身和它下面的东西，
+ *   `/tmpfoo` 不匹配）；
+ * - 不带 `/` = 任意层级的目录段（`backups/` 匹配 `/a/backups/x`，不匹配
+ *   `/a/mybackups/x`），或者文件名（`.DS_Store`）；
+ * - 带 `*` = 文件名通配符（`*.bak` 匹配 `/a/x.yml.bak`）。
+ *
+ * 配置项 `outOfScopeAllow` 整体覆盖这张表，`outOfScopeAllowEnabled=false` 关掉
+ * 这一层判定。
+ */
+export const DEFAULT_OUT_OF_SCOPE_ALLOW: readonly string[] = [
+  // 备份与临时目录。
+  '/tmp/',
+  '/var/tmp/',
+  'tmp/',
+  'backups/',
+  // 日志与构建产物。
+  'logs/',
+  'node_modules/',
+  '.git/',
+  '__pycache__/',
+  '.cache/',
+  // 备份文件与编辑器残留。
+  '*.bak',
+  '*.bak.*',
+  '*.bak-*',
+  '*.orig',
+  '*.orig.*',
+  '*.orig-*',
+  '*.rej',
+  '*.rej.*',
+  '*.v*bak',
+  '*.swp',
+  '*~',
+  '.DS_Store',
+]

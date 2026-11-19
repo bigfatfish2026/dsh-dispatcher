@@ -59,8 +59,8 @@ function touchTicket(status?: 'done' | 'dropped'): string {
 
 type Call = (name: string, args: Record<string, unknown>, options?: { agent?: unknown }) => Promise<unknown>
 
-function mount(file: string): { host: FakePluginHost; call: Call } {
-  const host = mountPlugin({ config: { stateFile: file } })
+function mount(file: string, config: Record<string, unknown> = {}): { host: FakePluginHost; call: Call } {
+  const host = mountPlugin({ config: { stateFile: file, ...config } })
   return { host, call: (name, args, options) => host.call(name, args, options as never) }
 }
 
@@ -154,9 +154,12 @@ describe('dispatch_touch', () => {
 })
 
 describe('关票对账', () => {
-  async function closedTicket(paths: string[]): Promise<{ file: string; host: FakePluginHost }> {
+  async function closedTicket(
+    paths: string[],
+    config: Record<string, unknown> = {},
+  ): Promise<{ file: string; host: FakePluginHost }> {
     const file = touchTicket()
-    const { host, call } = mount(file)
+    const { host, call } = mount(file, config)
     const agent = worker(host, 'worker-touch-1')
     await call('dispatch_touch', { paths }, { agent })
     await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })
@@ -197,6 +200,31 @@ describe('关票对账', () => {
 
     const snapshot = new TicketStore(file).get('t-touch')!
     expect(snapshot.outOfScope).toBeUndefined()
+  })
+
+  it('备份与 /tmp 产物不报：白名单挡在覆盖判定前面（历史误报的主流）', async () => {
+    const { file, host } = await closedTicket([
+      SRC,
+      `${BASE}/backups/sqlite/sbi-before-step8-20261118.db`,
+      '/tmp/sbi-smoke.mjs',
+      `${BASE}/src/tickets/conflict.ts.bak-20261119`,
+      `${BASE}/.git/refs/tags`,
+    ])
+
+    expect(rows(file).at(-1)!).not.toHaveProperty('outOfScope')
+    expect(new TicketStore(file).get('t-touch')!.outOfScope).toBeUndefined()
+    expect(host.agents[0]!.messages.join('\n')).not.toContain('收工时对不上账')
+  })
+
+  it('白名单只挡产物：备份不报，业务源码照报', async () => {
+    const { file } = await closedTicket([SRC, '/tmp/smoke.mjs', EVENTS])
+    expect(rows(file).at(-1)!.outOfScope).toEqual([`file:${EVENTS}`])
+  })
+
+  it('白名单可关：outOfScopeAllowEnabled=false 退回老口径，备份也报', async () => {
+    const backup = `${BASE}/backups/sqlite/x.db`
+    const { file } = await closedTicket([SRC, backup], { outOfScopeAllowEnabled: false })
+    expect(rows(file).at(-1)!.outOfScope).toEqual([`file:${backup}`])
   })
 
   it('没有声明 writes 就不对账：快路径的票不该满屏越界', async () => {

@@ -322,21 +322,145 @@ function covers(write: Resource, item: Resource): boolean {
   return false
 }
 
+/** 越界对账的白名单：条目写法见 `defaults.ts` 的 `DEFAULT_OUT_OF_SCOPE_ALLOW`。 */
+export interface OutOfScopeOptions {
+  /**
+   * 合理产物白名单。空数组（或不给）= 不过滤，老行为。路径已由 `scanResources`
+   * 归一化成绝对路径，比对按目录边界做，`/tmp` 不会误命中 `/tmpfoo`。
+   */
+  allow?: readonly string[]
+  /**
+   * 票的工作目录（规范化后的绝对路径）。票就在 `/tmp` 里干活时，`/tmp/` 这条
+   * 绝对前缀白名单不该把票自己的业务文件一起放过——落在工作目录下的照旧对账，
+   * 工作目录之外的临时产物才忽略。
+   */
+  base?: string
+}
+
+/** 取路径最后一段。 */
+function baseName(value: string): string {
+  const at = value.lastIndexOf('/')
+  return at < 0 ? value : value.slice(at + 1)
+}
+
+/** 去尾斜杠，根目录 `/` 保留。 */
+function trimSlash(value: string): string {
+  let out = value
+  while (out.length > 1 && out.endsWith('/')) out = out.slice(0, -1)
+  return out
+}
+
+/** 只认 `*` 的通配：够覆盖 `*.bak`、`*.bak-*` 这些写法，不做正则展开。 */
+function wildcardMatch(pattern: string, text: string): boolean {
+  let p = 0
+  let t = 0
+  let star = -1
+  let mark = 0
+  while (t < text.length) {
+    if (p < pattern.length && pattern[p] === text[t]) {
+      p += 1
+      t += 1
+      continue
+    }
+    if (p < pattern.length && pattern[p] === '*') {
+      star = p
+      p += 1
+      mark = t
+      continue
+    }
+    if (star >= 0) {
+      p = star + 1
+      mark += 1
+      t = mark
+      continue
+    }
+    return false
+  }
+  while (p < pattern.length && pattern[p] === '*') p += 1
+  return p === pattern.length
+}
+
+/** 一条白名单条目是否命中这个路径（值已归一化成绝对路径）。 */
+function entryMatches(value: string, name: string, segments: readonly string[], entry: string): boolean {
+  // 带通配：先按文件名比（`*.bak`），条目里有 `/` 再按整条路径比。
+  if (entry.includes('*')) {
+    if (wildcardMatch(entry, name)) return true
+    if (entry.includes('/') && wildcardMatch(entry, value)) return true
+    return false
+  }
+  // 绝对目录前缀：只认边界，`/tmp` 不吃 `/tmpfoo`。
+  if (entry.startsWith('/')) {
+    const dir = trimSlash(entry)
+    return value === dir || value.startsWith(`${dir}/`)
+  }
+  // 任意层级的目录段，或末尾的文件名（`.DS_Store`）。
+  const seg = trimSlash(entry)
+  return segments.includes(seg) || name === seg
+}
+
 /**
- * 越界对账（P4）：`touched` 里没有被票上声明的 `writes` 覆盖的项。
+ * 这一条归一化资源串是不是「合理产物」——备份、临时文件、构建/库目录这类，
+ * 不该算进收工越界。
+ *
+ * 只看文件类资源（file / dir / git）：svc / port / dev 不是文件路径，按目录段
+ * 猜它们没有意义。`value` 已经是绝对路径（`normalizeResource` 做过），比对用
+ * 目录边界，`/tmp/a` 命中 `/tmp/`，`/tmpfoo` 不命中。
+ *
+ * `base` 是票的工作目录：票本身就在 `/tmp/xxx`（或某个 backups 目录）里干活时，
+ * 那片目录里的东西是这张票的业务面，白名单不该整片放过——工作目录之下一律
+ * 照旧对账，工作目录之外的产物才忽略。
+ */
+export function isAllowedProduct(uri: string, allow: readonly string[], base?: string): boolean {
+  if (allow.length === 0) return false
+  let parsed
+  try {
+    parsed = parseResource(uri)
+  } catch {
+    return false
+  }
+  if (parsed.kind !== 'file' && parsed.kind !== 'dir' && parsed.kind !== 'git') return false
+  const value = parsed.value
+  const name = baseName(value)
+  const segments = value.split('/').filter((segment) => segment.length > 0)
+  const scope = base ? trimSlash(base) : undefined
+  if (scope) {
+    // 工作目录自己就落在某条白名单目录里：它下面的东西按业务面处理。
+    const scopeName = baseName(scope)
+    const scopeSegments = scope.split('/').filter((segment) => segment.length > 0)
+    const scopeIsProductDir = allow.some((raw) => {
+      const entry = raw.trim()
+      return entry.length > 0 && entryMatches(scope, scopeName, scopeSegments, entry)
+    })
+    if (scopeIsProductDir && (value === scope || value.startsWith(`${scope}/`))) return false
+  }
+  return allow.some((raw) => {
+    const entry = raw.trim()
+    return entry.length > 0 && entryMatches(value, name, segments, entry)
+  })
+}
+
+/**
+ * 越界对账（P4）：`touched` 里没有被票上声明的 `writes` 覆盖、也不属于合理产物
+ * 的项。
  *
  * 入参两边都先过 `scanResources`，跟冲突判定读同一个写法；输出是归一化后
  * 的资源串，按 touched 的首次出现顺序。没有声明 writes 就没有边界可比，返回
  * 空数组——快路径的票不该因为没写声明就满屏越界。
+ *
+ * 白名单只挡「票外产物」（备份、临时文件、构建输出），业务源码不在此列：
+ * 声明之外的 `src/` 文件照样报出来。
  */
 export function outOfScopePaths(
   touched: readonly string[] | undefined,
   writes: readonly string[] | undefined,
+  options: OutOfScopeOptions = {},
 ): string[] {
   const declared = toPlainResources(writes)
   if (declared.length === 0) return []
+  const allow = options.allow ?? []
   const outside: string[] = []
   for (const item of toPlainResources(touched)) {
+    if (isAllowedProduct(item.uri, allow, options.base)) continue
     if (declared.some((write) => covers(write, item))) continue
     outside.push(item.uri)
   }

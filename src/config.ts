@@ -10,6 +10,7 @@ import {
   COMMAND_HINT_TIMEOUT_MS,
   DEFAULT_STATE_FILE,
   DEFAULT_STORE_BACKEND,
+  DEFAULT_OUT_OF_SCOPE_ALLOW,
   DEFAULT_STORE_FILE,
   FRESH_MINUTES,
   MAX_EXEC,
@@ -217,6 +218,17 @@ export interface Config {
    */
   briefMaxColumns: number
   /**
+   * 收工对账白名单开关。true（默认）：备份、临时文件、构建产物这类票外写入不算
+   * 越界；false：退回老口径，只有声明的 writes 才算覆盖。
+   */
+  outOfScopeAllowEnabled: boolean
+  /**
+   * 收工对账白名单，写法见 `defaults.ts` 的 `DEFAULT_OUT_OF_SCOPE_ALLOW`：
+   * `/tmp/` 是绝对目录前缀，`backups/` 是任意层级目录段，`*.bak` 是文件名通配。
+   * 整表覆盖默认值，配成空数组等于一条也不放过。
+   */
+  outOfScopeAllow: string[]
+  /**
    * 巡检间隔，毫秒。只看状态、只发信号，不改票。0 = 关巡检（既不起定时器也不订阅 tick）。
    * 非 0 时优先由 dsh-timer 的 `dispatcher.sweep.tick` 驱动，拿不到才回落到自己的定时器。
    */
@@ -391,6 +403,16 @@ export const Config: Schema<Config> = Schema.object({
       'Deprecated: the quota is split into maxExec and maxQueued. Kept so older profiles still load; it no longer limits anything, execution falls back to the maxExec default of 8.',
     ),
   // 小屏第二行的宽度：一个汉字占两列，默认 34 列 = 17 个汉字（小屏实测）。
+  outOfScopeAllowEnabled: Schema.boolean()
+    .default(true)
+    .description(
+      'Whitelist for the closing out-of-scope check. true (default): backups, temp files and build output touched by a ticket are not reported as out-of-scope writes. false: the old rule, only declared writes cover anything.',
+    ),
+  outOfScopeAllow: Schema.array(Schema.string())
+    .default([...DEFAULT_OUT_OF_SCOPE_ALLOW])
+    .description(
+      'Entries for that whitelist: a leading / is an absolute directory prefix (/tmp/ does not match /tmpfoo), a bare segment matches that directory at any depth (backups/ does not match mybackups/), * is a file-name wildcard (*.bak). Replaces the default table; an empty array turns the whitelist off without touching the switch.',
+    ),
   briefMaxColumns: Schema.natural()
     .default(BRIEF_MAX_COLUMNS)
     .description(

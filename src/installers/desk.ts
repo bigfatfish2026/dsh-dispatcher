@@ -322,6 +322,8 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
       maxExec: config.maxExec,
       maxQueued: config.maxQueued,
       briefMaxColumns: config.briefMaxColumns,
+      outOfScopeAllowEnabled: config.outOfScopeAllowEnabled,
+      outOfScopeAllow: config.outOfScopeAllow,
       waitingMinutes: config.waitingMinutes,
       blockedMinutes: config.blockedMinutes,
       runningReminderMinutes: config.runningReminderMinutes,

@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../../src/config'
+import { DEFAULT_OUT_OF_SCOPE_ALLOW } from '../../src/defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from '../../src/tickets/preset-guard'
 import type { Config } from '../../src/config'
 import { apply, ticketEventQueue } from '../../src/index'
@@ -48,6 +49,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     // 已废弃：只为老 profile 还能加载，计数不看它。
     maxOpen: 8,
     briefMaxColumns: 34,
+    outOfScopeAllowEnabled: true,
+    outOfScopeAllow: [...DEFAULT_OUT_OF_SCOPE_ALLOW],
     // 定时器关掉：插件层测的是接线，不是拍子。schema 的最小值 500 只校验 yml，
     // 这里直接给 desk 的配置，0 = 不起定时器。
     sweepMs: 0,

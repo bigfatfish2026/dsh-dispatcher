@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
+import { DEFAULT_OUT_OF_SCOPE_ALLOW } from '../src/defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from '../src/tickets/preset-guard'
 import type { Config } from '../src/config'
 import { apply } from '../src/index'
@@ -40,6 +41,8 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     maxQueued: 4,
     maxOpen: 4,
     briefMaxColumns: 20,
+    outOfScopeAllowEnabled: true,
+    outOfScopeAllow: [...DEFAULT_OUT_OF_SCOPE_ALLOW],
     sweepMs: 0,
     waitingMinutes: 20,
     blockedMinutes: 60,

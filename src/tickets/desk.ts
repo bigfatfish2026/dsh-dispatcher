@@ -46,6 +46,7 @@ import {
   REPEAT_WINDOW_MINUTES,
   REVERT_AUDIT_DAYS,
   REVERT_AUDIT_MS,
+  DEFAULT_OUT_OF_SCOPE_ALLOW,
   RUNNING_REMINDER_MINUTES,
   SWEEP_MS,
   WAITING_MINUTES,
@@ -119,6 +120,10 @@ export interface DeskConfig {
   /** 已废弃：名额拆成 `maxExec` / `maxQueued`，这个键只为老配置还能加载而留着。 */
   maxOpen?: number
   briefMaxColumns: number
+  /** 收工对账白名单开关；关掉就退回「只有声明的 writes 才算覆盖」。 */
+  outOfScopeAllowEnabled: boolean
+  /** 收工对账白名单：备份、临时文件、构建产物这类票外写入不计越界。 */
+  outOfScopeAllow: readonly string[]
   waitingMinutes: number
   blockedMinutes: number
   /** 0 = 不发「跑了很久」提醒。 */
@@ -160,6 +165,8 @@ export const DESK_DEFAULTS: Omit<DeskConfig, 'defaultPreset'> = {
   maxExec: MAX_EXEC,
   maxQueued: MAX_QUEUED,
   briefMaxColumns: BRIEF_MAX_COLUMNS,
+  outOfScopeAllowEnabled: true,
+  outOfScopeAllow: DEFAULT_OUT_OF_SCOPE_ALLOW,
   waitingMinutes: WAITING_MINUTES,
   blockedMinutes: BLOCKED_MINUTES,
   runningReminderMinutes: RUNNING_REMINDER_MINUTES,
@@ -945,7 +952,10 @@ export class TicketDesk {
       const voided = pending(ticket.inputs).length
       // 越界对账（P4）：关票那一刻拿 touched 跟声明的 writes 比，没被覆盖的算越界。
       // 没有声明 writes 就没有边界可比，outOfScopePaths 返回空，不留痕。
-      const outOfScope = outOfScopePaths(ticket.touched, ticket.intent?.writes)
+      const outOfScope = outOfScopePaths(ticket.touched, ticket.intent?.writes, {
+        allow: this.config.outOfScopeAllowEnabled ? this.config.outOfScopeAllow : [],
+        ...(ticket.dir?.trim() ? { base: ticket.dir.trim() } : {}),
+      })
       this.commit({
         kind: 'closed',
         id,
