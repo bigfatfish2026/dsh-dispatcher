@@ -22,8 +22,8 @@ export const DEFAULT_STORE_FILE = ''
 /** 票面 brief 的默认列宽：一个汉字占两列，34 列 = 17 个汉字（小屏实测）。 */
 export const BRIEF_MAX_COLUMNS = 34
 
-/** 巡检三档：waiting 20 分钟、blocked 60 分钟提醒一次；running 默认不催。 */
-export const WAITING_MINUTES = 20
+/** 巡检三档：waiting 12 分钟、blocked 60 分钟提醒一次；running 默认不催。 */
+export const WAITING_MINUTES = 12
 export const BLOCKED_MINUTES = 60
 export const RUNNING_REMINDER_MINUTES = 0
 

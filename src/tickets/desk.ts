@@ -1178,7 +1178,7 @@ export class TicketDesk {
         const since = minutesSince(ticket.statusSince, now)
 
         if (ticket.status === 'waiting' && since >= this.config.waitingMinutes) {
-          if (this.signal(ticket, 'waiting-20m', since)) signals += 1
+          if (this.signal(ticket, 'waiting-12m', since)) signals += 1
           continue
         }
         if (ticket.status === 'blocked' && since >= this.config.blockedMinutes) {

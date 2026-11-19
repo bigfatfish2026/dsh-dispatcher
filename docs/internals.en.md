@@ -40,7 +40,7 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | `briefMaxColumns` | number | `34` | Display width cap for `brief`; a 汉字 counts as 2 |
 | `sweepMs` | number | `10000` | Sweep interval in ms, minimum 500; `0` disables the timer |
 | `sweepMinutes` | number | — | Obsolete; use `sweepMs`. If set, it wins at `×60000` and logs a warning |
-| `waitingMinutes` | number | `20` | How long a ticket may sit in `waiting` before one reminder |
+| `waitingMinutes` | number | `12` | How long a ticket may sit in `waiting` before one reminder |
 | `blockedMinutes` | number | `60` | Same for `blocked` |
 | `runningReminderMinutes` | number | `0` | Reminder interval for `running`; `0` disables |
 | `freshMinutes` | number | `2` | Grace period after `disposed` before a worker counts as gone |
@@ -95,7 +95,7 @@ Each ticket carries two queues, both stored as log lines so they survive restart
 
 Every `sweepMs` milliseconds (10 seconds by default) the plugin walks open tickets and emits signals based on status and age:
 
-- `waiting` for `waitingMinutes` (20 by default)
+- `waiting` for `waitingMinutes` (12 by default)
 - `blocked` for `blockedMinutes` (60)
 - `running` for `runningReminderMinutes` (0, off)
 

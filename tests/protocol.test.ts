@@ -67,7 +67,7 @@ describe('协议常量', () => {
 
 describe('可配置默认值', () => {
   it('提醒 / brief / 探路 / 名额的默认值就是这一组', () => {
-    expect(WAITING_MINUTES).toBe(20)
+    expect(WAITING_MINUTES).toBe(12)
     expect(BLOCKED_MINUTES).toBe(60)
     expect(BRIEF_MAX_COLUMNS).toBe(34)
     expect(PROBE_TIMEOUT_MINUTES).toBe(2)

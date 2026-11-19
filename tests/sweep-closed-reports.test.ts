@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { WAITING_MINUTES } from '../src/defaults'
 import { INTENT, flush, makeDesk } from './helpers/desk-harness'
 
 /**
@@ -89,7 +90,7 @@ describe('巡检不投报告', () => {
 })
 
 describe('只有僵尸票才叫人', () => {
-  it('waiting 过 20 分钟推一条摘要，不带正文，同一轮只推一次', async () => {
+  it('waiting 过阈值推一条摘要，不带正文，同一轮只推一次', async () => {
     const rec = recorder()
     const h = makeDesk({ notifier: rec.notifier })
     const { id } = await h.desk.open(INTENT, h.main)
@@ -97,7 +98,7 @@ describe('只有僵尸票才叫人', () => {
     h.desk.attach()
     // 造一张「真干过活的 waiting 票」：先探路交声明、派执行轮，再让执行轮结束。
     // 不能「open 后直接 end」——那种票是 (waiting, planning)，巡检会按探路超时
-    // 降级并派活，不再是等 20 分钟提醒的僵尸票。
+    // 降级并派活，不再是等巡检阈值提醒的僵尸票。
     h.agents.markAlive('worker-1')
     await h.desk.declare('worker-1', { summary: '探完了' }, { writes: [], reads: [] })
     h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
@@ -107,11 +108,11 @@ describe('只有僵尸票才叫人', () => {
     await flush()
     expect(h.log.get(id)!.status).toBe('waiting')
 
-    h.clock.advance(21 * 60_000)
+    h.clock.advance((WAITING_MINUTES + 1) * 60_000)
     await h.desk.maintain()
     await h.desk.maintain()
 
-    expect(rec.calls.idle).toEqual([{ ticketId: id, reason: 'waiting-20m' }])
+    expect(rec.calls.idle).toEqual([{ ticketId: id, reason: 'waiting-12m' }])
     expect(h.desk.get(id)!.pendingReports).toBe(1)
   })
 

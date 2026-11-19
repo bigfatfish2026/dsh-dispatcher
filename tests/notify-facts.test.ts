@@ -47,14 +47,14 @@ describe('巡检事实，不叫醒人', () => {
   it('waiting 满阈值改走 followup：叫醒一句，事实表一条不记', async () => {
     const { facts, wakes, notifier } = setup()
 
-    await notifier.idle({ ticketId: 't-wait', brief: '等收工', reason: 'waiting-20m', sinceMinutes: 20 })
+    await notifier.idle({ ticketId: 't-wait', brief: '等收工', reason: 'waiting-12m', sinceMinutes: 12 })
 
     // 走的是 send/followup，不是 facts.remember。
     expect(wakes).toHaveLength(1)
     expect(wakes[0]!.startsWith(SWEEP_PREFIX)).toBe(true)
     expect(wakes[0]).toContain('t-wait')
     expect(wakes[0]).toContain('等收工')
-    expect(wakes[0]).toContain('20 分钟')
+    expect(wakes[0]).toContain('12 分钟')
     expect(wakes[0]).toContain('巡检')
     expect(wakes[0]).toContain('不是使用方在说话')
     expect(wakes[0]).toContain('dispatch_read t-wait')

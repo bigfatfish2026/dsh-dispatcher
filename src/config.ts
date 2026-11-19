@@ -422,7 +422,7 @@ export const Config: Schema<Config> = Schema.object({
     .min(500)
     .default(SWEEP_MS)
     .description(
-      'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 20m, blocked 60m); it never writes a ticket. When dsh-timer is present the pass is driven by the dispatcher.sweep.tick event; otherwise this becomes the plugin\'s own interval. A beat is skipped when the previous pass is still queued, so a slow pass never stacks up. 0 disables maintenance entirely.',
+      'Milliseconds between maintenance passes; default 10s, minimum 500ms. A pass only reads state and emits signals (waiting 12m, blocked 60m); it never writes a ticket. When dsh-timer is present the pass is driven by the dispatcher.sweep.tick event; otherwise this becomes the plugin\'s own interval. A beat is skipped when the previous pass is still queued, so a slow pass never stacks up. 0 disables maintenance entirely.',
     ),
   sweepMinutes: Schema.number()
     .min(0)

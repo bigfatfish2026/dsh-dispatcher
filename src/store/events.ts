@@ -192,7 +192,7 @@ export interface TicketSnapshot {
   /** Reports the worker handed back, oldest first. */
   reports: TicketEntry[]
   /**
-   * 进入当前状态的时刻。20 分钟 / 60 分钟两档提醒按它算，也当提醒指纹：同一轮
+   * 进入当前状态的时刻。12 分钟 / 60 分钟两档提醒按它算，也当提醒指纹：同一轮
    * waiting 只提醒一次，waiting→running→waiting 之后自然能再提醒一次。
    */
   statusSince: string

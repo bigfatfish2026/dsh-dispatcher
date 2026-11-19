@@ -40,7 +40,7 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | `briefMaxColumns` | number | `34` | `brief` 显示列宽上限，汉字算 2 列 |
 | `sweepMs` | number | `10000` | 巡检间隔，毫秒，最小 500；`0` 关定时器 |
 | `sweepMinutes` | number | — | 已过时，改用 `sweepMs`；显式配了按 `×60000` 折算并 warn |
-| `waitingMinutes` | number | `20` | `waiting` 满多久提醒一次 |
+| `waitingMinutes` | number | `12` | `waiting` 满多久提醒一次 |
 | `blockedMinutes` | number | `60` | `blocked` 满多久提醒一次 |
 | `runningReminderMinutes` | number | `0` | `running` 隔多久提醒；`0` = 不提醒 |
 | `freshMinutes` | number | `2` | `disposed` 后宽限多久才认子会话真没了 |
@@ -95,7 +95,7 @@ worker 手上只有 `dispatch_report`，只往票里追加一行，改不了任�
 
 每 `sweepMs` 毫秒（默认 10 秒）看一遍未结票，按状态和停留时长发信号：
 
-- `waiting` 满 `waitingMinutes`（默认 20）
+- `waiting` 满 `waitingMinutes`（默认 12）
 - `blocked` 满 `blockedMinutes`（默认 60）
 - `running` 满 `runningReminderMinutes`（默认 0，关）
 

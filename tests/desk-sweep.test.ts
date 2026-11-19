@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { fakeClock } from '../src/tickets/clock'
+import { WAITING_MINUTES } from '../src/defaults'
 import { createNotifier } from '../src/tickets/notify'
 import { createSweepFacts } from '../src/tickets/sweep-facts'
 import { flush, INTENT, makeDesk } from './helpers/desk-harness'
@@ -48,7 +49,7 @@ async function toTask(h: ReturnType<typeof makeDesk>, id: string): Promise<void>
 }
 
 describe('巡检信号', () => {
-  it('waiting 满 20 分钟提醒一次；再扫一遍不重复打扰', async () => {
+  it(`waiting 满 ${WAITING_MINUTES} 分钟提醒一次；再扫一遍不重复打扰`, async () => {
     const h = makeDesk(MANUAL)
     const { id } = await h.desk.open(INTENT, h.main)
     await toTask(h, id)
@@ -57,10 +58,10 @@ describe('巡检信号', () => {
     expect(h.log.get(id)!.status).toBe('waiting')
     const before = h.lines()
 
-    h.clock.advance(minutes(20))
+    h.clock.advance(minutes(WAITING_MINUTES))
     const first = await h.desk.maintain()
     expect(first.signals).toBe(1)
-    expect(idleSignals(h)[0]?.payload).toMatchObject({ id, reason: 'waiting-20m', sinceMinutes: 20 })
+    expect(idleSignals(h)[0]?.payload).toMatchObject({ id, reason: 'waiting-12m', sinceMinutes: WAITING_MINUTES })
 
     const second = await h.desk.maintain()
     expect(second.signals).toBe(0)
@@ -69,18 +70,18 @@ describe('巡检信号', () => {
     expect(h.log.get(id)!.status).toBe('waiting')
   })
 
-  it('还没到点不发；差一分钟也不发', async () => {
+  it('还没到阈值不发；差一分钟也不发', async () => {
     const h = makeDesk(MANUAL)
     await h.desk.open(INTENT, h.main)
     h.desk.attach()
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
-    h.clock.advance(minutes(19))
+    h.clock.advance(minutes(WAITING_MINUTES - 1))
     expect((await h.desk.maintain()).signals).toBe(0)
     expect(idleSignals(h)).toHaveLength(0)
   })
 
-  it('waiting 19 分钟一个字都不发：不 followup，也不写事实表', async () => {
+  it('waiting 差一分钟到阈值一个字都不发：不 followup，也不写事实表', async () => {
     const { h, facts, wakes, advance } = wiredDesk()
     const { id } = await h.desk.open(INTENT, h.main)
     await toTask(h, id)
@@ -91,14 +92,14 @@ describe('巡检信号', () => {
     facts.forget(id)
     expect(facts.text()).toBe('')
 
-    advance(minutes(19))
+    advance(minutes(WAITING_MINUTES - 1))
     expect((await h.desk.maintain()).signals).toBe(0)
     await flush()
     expect(wakes).toHaveLength(0)
     expect(facts.text()).toBe('')
   })
 
-  it('waiting 满 20 分钟走 followup 叫醒一次；事实表不记，再扫不重复', async () => {
+  it('waiting 满阈值走 followup 叫醒一次；事实表不记，再扫不重复', async () => {
     const { h, facts, wakes, advance } = wiredDesk()
     const { id } = await h.desk.open(INTENT, h.main)
     await toTask(h, id)
@@ -108,7 +109,7 @@ describe('巡检信号', () => {
     facts.forget(id)
     expect(facts.text()).toBe('')
 
-    advance(minutes(20))
+    advance(minutes(WAITING_MINUTES))
     expect((await h.desk.maintain()).signals).toBe(1)
     await flush()
     // 走的是 send/followup，不是 facts.remember。
@@ -178,7 +179,7 @@ describe('巡检信号', () => {
     await toTask(h, id)
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'end' })
     await flush()
-    h.clock.advance(minutes(20))
+    h.clock.advance(minutes(WAITING_MINUTES))
     expect((await h.desk.maintain()).signals).toBe(1)
 
     // 又派了一轮：waiting → running → 再 idle → waiting（新的 statusSince）。
@@ -187,7 +188,7 @@ describe('巡检信号', () => {
     h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
     await flush()
     expect(h.log.get(id)!.status).toBe('waiting')
-    h.clock.advance(minutes(20))
+    h.clock.advance(minutes(WAITING_MINUTES))
     expect((await h.desk.maintain()).signals).toBe(1)
     expect(idleSignals(h)).toHaveLength(2)
   })

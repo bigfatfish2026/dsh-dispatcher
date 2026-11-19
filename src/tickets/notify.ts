@@ -48,7 +48,7 @@ export interface ReportArrivedInput {
   pendingReports: number
 }
 
-export type IdleReason = 'waiting-20m' | 'blocked-60m' | 'running-90m'
+export type IdleReason = 'waiting-12m' | 'blocked-60m' | 'running-90m'
 
 export interface IdleInput {
   ticketId: string
@@ -137,7 +137,7 @@ export function reportArrivedText(input: ReportArrivedInput): string {
 
 export function idleText(input: IdleInput): string {
   switch (input.reason) {
-    case 'waiting-20m':
+    case 'waiting-12m':
       // waiting 是「子会话停了、没人接」，得把主会话叫起来：一句话说清谁、停了
       // 多久、怎么收场，别让它回头冲着提醒本身回话。
       return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」进 waiting 已满 ${input.sinceMinutes} 分钟没动作。这是 dsh-dispatcher 巡检，不是使用方在说话。要看就 dispatch_read ${input.ticketId}，要收就 dispatch_close ${input.ticketId}。`
@@ -213,7 +213,7 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
     idle(input) {
       // 票停在 waiting 没人接、或者挂起等使用方决定——都值得叫起来看一眼，
       // 走同一条 followup 通道。其余都是主会话下一轮抬头就能看到的状态。
-      if (input.reason === 'waiting-20m' || input.reason === 'blocked-60m') {
+      if (input.reason === 'waiting-12m' || input.reason === 'blocked-60m') {
         return send(idleText(input), true)
       }
       return record(

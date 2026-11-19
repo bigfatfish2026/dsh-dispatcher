@@ -44,7 +44,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     outOfScopeAllowEnabled: true,
     outOfScopeAllow: [...DEFAULT_OUT_OF_SCOPE_ALLOW],
     sweepMs: 0,
-    waitingMinutes: 20,
+    waitingMinutes: 12,
     blockedMinutes: 60,
     runningReminderMinutes: 0,
     freshMinutes: 2,
