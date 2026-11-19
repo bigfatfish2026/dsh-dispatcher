@@ -58,6 +58,8 @@ import { outOfScopePaths } from './conflict'
 import { normalizeResource, normalizeResources, parseResource, scanResources } from './resources'
 import { TicketHandle } from './handle'
 import { ConflictArbiter, byClaimOrder } from './arbiter'
+import { EXEC_RETRY_WINDOW_MS, execReady } from './admission'
+import type { ExecReadiness } from './admission'
 import { WorkerRegistry } from './registry'
 import { buildLabel, buildPrompt, decidePreset, normalizeBrief, publishTicket, startWorker } from './publish'
 import type { ProbePort, ProbeRegistry } from './probe'
@@ -443,6 +445,13 @@ export class TicketDesk {
   private lastAuditAt: number | undefined = undefined
   /** 最近一次审计报告（只读把手，给读数和手工核对用）。 */
   private lastRevertAudit: RevertAuditReport | undefined = undefined
+  /**
+   * 派活失败的时刻（票 id → 毫秒时间戳）：只给重试节流用，不写票面。
+   *
+   * 派活失败会 `rollbackPlanned` 写回 planned；不节流的话每一拍巡检都会再试
+   * 一次、写两条事件。成功派出或重新声明时清掉这一条。
+   */
+  private readonly dispatchAttempts = new Map<string, number>()
   private readonly arbiter: ConflictArbiter
   private attached = false
   private timer: unknown
@@ -811,6 +820,8 @@ export class TicketDesk {
       })
       // 重新声明会把 phase 从 queued 折回 planned：排队作废，挂起那条也撤掉。
       this.forgetBlocked(target.id)
+      // 影响面变了：上一次派活失败的节流不再拦着这一轮，下一拍就能试。
+      this.dispatchAttempts.delete(target.id)
       // 挡路的票补了真声明：排队里的票当场重判一次。今天那张排队票白等了 4 分
       // 51 秒，就是因为声明落盘后没人重判，只能等下一次收工。
       await this.releaseBlocked()
@@ -1140,24 +1151,29 @@ export class TicketDesk {
           )
           continue
         }
-        // 探路超时：跟下面三档提醒各走各的。降级那一笔写完就当场 admit（见
-        // `degradeProbe`），所以降级成功这张票已经不在 planned 了，这一拍到此为止。
-        // 只认 status=running：blocked 是排队、waiting 有人在看，都不是「一轮在跑」。
-        if (ticket.status === 'running' && ticket.phase === 'planning') {
+        // 探路超时：只认 phase，不再拿 status 做前置。blocked 是被人手动挂起，
+        // 不在这里降级（否则 blocked-60m 那档提醒会被 continue 吃掉）；waiting
+        // 只说明探路会话收尾了，探路超时照样该降级并派活。
+        if (ticket.phase === 'planning' && ticket.status !== 'blocked') {
           if (await this.degradeProbe(ticket, now)) continue
-        } else if (ticket.status === 'running' && ticket.phase === 'planned') {
+        }
+        // 推进下一轮：唯一定义在 `execReady`。(waiting, planned) /
+        // (waiting, planning) / (open, planning) 都从这一个入口过，不再各写一份。
+        const readiness = this.readinessOf(ticket)
+        if (readiness.ready) {
           // 兜底：票面说「方案就绪、等派活」，就该有人接。不看 idle 事件来没来过
           // ——探路子会话可能在降级之前就已经 idle 过一次，那之后不会再有第二个 idle
           // 事件（t-mwgc7327-kc8h 拆掉空声明兜底之后就是这么死锁的）。判据只有
-          // 票面两条：phase=planned 且 declaredAt 在；活没活着由 `startTask` 按
-          // `pool.alive` 分：真没了就重起一只，还在就把这一轮 steer 回原会话。
+          // 票面；活没活着由 `startTask` 按 `pool.alive` 分：真没了就重起一只，
+          // 还在就把这一轮 steer 回原会话。
           const current = this.log.get(ticket.id) ?? ticket
           if (await this.admit(current)) {
             this.warn(`[dispatcher] 巡检兜底放行票 ${ticket.id}（${this.registry.describe(ticket)}）`)
             continue
           }
           // admit 没派成：要么落成了 blocked（下一拍按 blocked 那档提醒），要么
-          // 派活失败退回了 planned（下一拍接着试）。都不在这里再写票。
+          // 派活失败退回了 planned（节流到点后再试）。都不在这里再写票，也别
+          // continue 掉下面的提醒——推进和提醒是两件事。
         }
         const since = minutesSince(ticket.statusSince, now)
 
@@ -1662,7 +1678,7 @@ export class TicketDesk {
    * 那道守卫：分类器给出「要命令却没 bash」的档就驳回去，票落 `gated`
    * （status=waiting、note 写驳回理由），等主会话换档或改配置再放，不照派。
    */
-  private async startTask(ticket: TicketSnapshot): Promise<boolean> {
+  private async startTask(ticket: TicketSnapshot): Promise<boolean | 'gated'> {
     const parent = this.resolveAgent(ticket.publisher)
     if (!parent) {
       this.warn(`票 ${ticket.id} 的发布会话不在活表（${ticket.publisher ?? '空'}），这一轮派不出去`)
@@ -1751,7 +1767,9 @@ export class TicketDesk {
             cause: 'reaction',
             reason: rejection.reason,
           })
-          return false
+          // 「被驳回」不是「派活失败」：gated 已经把 phase 折成可判别的值，
+          // 调用方不许再 rollbackPlanned 写第二条 declared 把它抹回 planned。
+          return 'gated'
         }
       }
       await startWorker({
@@ -1781,18 +1799,20 @@ export class TicketDesk {
   /**
    * 判一次并决定派不派活。返回 true = 这一轮真派出去了。
    *
-   * 强冲突只落 `conflict-checked`（phase=queued + waitOn），一个字节的 status
-   * 都不写，票停在原地等放行；其余先落判定（phase=running + 弱冲突提示）再派
-   * 原任务。派不出去就把 phase 退回 planned——票面不许出现在干活其实没人。
+   * 前置只有一个：`execReady`。强冲突只落 `conflict-checked`（phase=queued +
+   * waitOn），一个字节的 status 都不写，票停在原地等放行；其余先落判定
+   * （phase=running + 弱冲突提示）再派原任务。派不出去就把 phase 退回 planned
+   * ——票面不许出现在干活其实没人。
    */
   private async admit(ticket: TicketSnapshot): Promise<boolean> {
     const current = this.log.get(ticket.id) ?? ticket
-    if (!isOpen(current.status) || current.phase !== 'planned') return false
-    // 硬校验：没有 declared 就不 admit。探路是每张票的必经流程，声明是它的
-    // 唯一产物；phase=planned 只由 `declared` 折出来，这里再兜一道——别让将来
-    // 任何一条新路径把没声明的票塞进执行轮。
-    if (!current.declaredAt) {
-      this.warn(`票 ${current.id} 没有声明（没有 declared 事件），不进执行轮`)
+    const readiness = this.readinessOf(current)
+    if (!readiness.ready) {
+      // 没有声明是唯一的「票面不合规」，喊一声；关票/挂起/排队/驳回都是正常
+      // 等待，这里不刷日志（否则巡检每拍都要喊一遍）。
+      if (readiness.reason === 'no-declare') {
+        this.warn(`票 ${current.id} 没有声明（没有 declared 事件），不进执行轮`)
+      }
       return false
     }
     const verdict = this.arbiter.checkAndRecord(current)
@@ -1808,11 +1828,35 @@ export class TicketDesk {
       })
       return false
     }
-    if (!(await this.startTask(current))) {
+    const outcome = await this.startTask(current)
+    if (outcome === 'gated') return false
+    if (!outcome) {
+      this.dispatchAttempts.set(current.id, this.clock.now().getTime())
       this.rollbackPlanned(current)
       return false
     }
+    this.dispatchAttempts.delete(current.id)
     return true
+  }
+
+  /**
+   * 票面能不能派：唯一入口，连重试节流一起判。
+   *
+   * 巡检、idle 续派、admit 都从这里问，谁也别再抄一份条件。
+   */
+  private readinessOf(ticket: TicketSnapshot): ExecReadiness {
+    return execReady(ticket, {
+      nowMs: this.clock.now().getTime(),
+      lastAttemptMs: this.dispatchAttempts.get(ticket.id),
+      retryWindowMs: EXEC_RETRY_WINDOW_MS,
+    })
+  }
+
+  /** 这张票还在派活失败的重试窗口里？排队放行那条路单独用它。 */
+  private retryWaiting(id: string): boolean {
+    const last = this.dispatchAttempts.get(id)
+    if (last === undefined) return false
+    return this.clock.now().getTime() - last < EXEC_RETRY_WINDOW_MS
   }
 
   /**
@@ -1861,10 +1905,16 @@ export class TicketDesk {
         }
         continue
       }
-      if (!(await this.startTask(current))) {
+      // 派活刚失败过就留在队里等节流到点，别每收一张票都重试一遍。
+      if (this.retryWaiting(current.id)) continue
+      const outcome = await this.startTask(current)
+      if (outcome === 'gated') continue
+      if (!outcome) {
+        this.dispatchAttempts.set(current.id, this.clock.now().getTime())
         this.rollbackPlanned(current)
         continue
       }
+      this.dispatchAttempts.delete(current.id)
       // 放行了：挂起那条从事实里撤掉，再推开票方一句，别让人干等。
       this.notifyReleased(current)
       released.push(current.id)
@@ -1969,7 +2019,8 @@ export class TicketDesk {
       const current = this.log.get(ticket.id) ?? ticket
       // 探路收工就是判定那一刻：这一轮不是「进 waiting」，而是判冲突然派执行轮。
       // 判输了就排队（phase=queued），status 一个字节都不动，人就停在 idle。
-      if (current.phase === 'planned') {
+      // 判定统一走 `execReady`：票面 (waiting/running, planned) 都从这一个口过。
+      if (this.readinessOf(current).ready) {
         await this.admit(current)
         continue
       }
@@ -1981,8 +2032,8 @@ export class TicketDesk {
         // 投不出去：票还是 running，但没有真活在跑。落 waiting 但标记人还在。
       }
       // 这行 continue 不能删（A7 复查）：没有它就会继续落到下面的
-      // `idled`，票变成 status=waiting + phase=planning；而 maintain 的探路降级
-      // 只认 status=running && phase=planning，这张票会永久卡住、再没人管。
+      // `idled`，票变成 status=waiting + phase=planning；巡检的探路降级按
+      // phase 认票，这张票会永久卡住、再没人管。
       if (current.phase === 'planning') continue
       this.commit({
         kind: 'idled',

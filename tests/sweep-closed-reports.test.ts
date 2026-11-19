@@ -95,8 +95,17 @@ describe('只有僵尸票才叫人', () => {
     const { id } = await h.desk.open(INTENT, h.main)
     await h.desk.report(id, '正文不该出现在提醒里')
     h.desk.attach()
+    // 造一张「真干过活的 waiting 票」：先探路交声明、派执行轮，再让执行轮结束。
+    // 不能「open 后直接 end」——那种票是 (waiting, planning)，巡检会按探路超时
+    // 降级并派活，不再是等 20 分钟提醒的僵尸票。
+    h.agents.markAlive('worker-1')
+    await h.desk.declare('worker-1', { summary: '探完了' }, { writes: [], reads: [] })
+    h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
+    await flush()
+    expect(h.log.get(id)!.phase).toBe('running')
     h.host.emit('subagent/end', { id: 'worker-1', stopReason: 'completed' })
     await flush()
+    expect(h.log.get(id)!.status).toBe('waiting')
 
     h.clock.advance(21 * 60_000)
     await h.desk.maintain()

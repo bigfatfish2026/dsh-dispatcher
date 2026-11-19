@@ -326,11 +326,14 @@ function applyKinded(state: Map<string, TicketSnapshot>, event: KindedTicketEven
     }
     case 'gated': {
       // 预演没过：票停在 waiting 等人看，不派活。终态票不受影响。
+      // phase 必须一起折成 gated：只改 status 的话票面回到 (waiting, planned)，
+      // 巡检的谓词下一拍照样判「该派」，每拍重派一次、刷满驳回日志。
       if (!previous || isTerminal(previous.status)) return
       state.set(
         event.id,
         advance(previous, event.at, {
           status: 'waiting',
+          phase: 'gated',
           workerAlive: false,
           note: event.reason,
         }),

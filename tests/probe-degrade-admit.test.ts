@@ -101,6 +101,9 @@ describe('探路超时当拍推进', () => {
     expect(h.subagents.spawned).toHaveLength(1)
 
     // 下一拍巡检不看 idle 事件：票面是 planned、活没在跑，就补一次 admit。
+    // 派活失败后有 1 分钟重试节流（admission.ts 的 EXEC_RETRY_WINDOW_MS）：
+    // 窗口内不重试，免得每 10 秒刷一条 declared + conflict-checked。
+    h.clock.advance(60_000)
     await h.desk.maintain()
 
     const ticket = h.log.get(id)!

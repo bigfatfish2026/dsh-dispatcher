@@ -402,12 +402,12 @@ describe('执行轮接线：原会话还在就 followup', () => {
     h.host.emit('agent/status', { status: 'idle', agent: { id: 'worker-1' } })
     await flush()
 
-    // 驳回就不派：第二只没起来，票落到 waiting + note，等人换档。
+    // 驳回就不派：第二只没起来，票落到 waiting + phase=gated，等人换档。
     expect(classify.calls).toBe(2)
     expect(h.subagents.spawned).toHaveLength(1)
     const ticket = h.log.get(id)!
     expect(ticket.status).toBe('waiting')
-    expect(ticket.phase).toBe('planned')
+    expect(ticket.phase).toBe('gated')
     expect(ticket.note).toContain('执行命令')
     expect(h.backend.kinds()).toContain('gated')
     expect(h.warnings.join('')).toContain('执行轮选档驳回')

@@ -51,8 +51,11 @@ export const TOOL_NAMES = Object.freeze({
 /** 票的六种状态。 */
 export const TICKET_STATUSES = Object.freeze(['open', 'running', 'waiting', 'blocked', 'done', 'dropped'] as const)
 
-/** 探路/排队相位；`queued` 专指等资源，`status=blocked` 专指等人。 */
-export const TICKET_PHASES = Object.freeze(['planning', 'planned', 'queued', 'running'] as const)
+/**
+ * 探路/排队相位；`queued` 专指等资源，`status=blocked` 专指等人，
+ * `gated` 专指预演没过、等换档（跟 `status=waiting` 分开，免得巡检再派一次）。
+ */
+export const TICKET_PHASES = Object.freeze(['planning', 'planned', 'queued', 'gated', 'running'] as const)
 
 /**
  * 写类工具：探路窗口与「被挡停手」共用同一份名单，顺序固定。
