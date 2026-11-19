@@ -115,27 +115,21 @@ describe('只有等使用方决定才叫醒', () => {
   })
 })
 
-describe('冲突排队：事实 + 推开票方', () => {
-  it('blocked 带 wake：事实里写清对手 id + brief + 路径，同时 wake 一句', async () => {
+describe('冲突排队：事实一条，叫醒只有 queued 那一句', () => {
+  it('blocked：事实里写清对手 id + brief + 路径，一句话都不 wake', async () => {
     const { facts, wakes, notifier } = setup()
 
     await notifier.blocked({
       ticketId: 't-wait',
       brief: '抢目录',
-      wake: true,
       waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
     })
 
     expect(facts.text()).toContain('票 t-wait 因 dir:/a/b 与 t-block「占住目录」 冲突挂起')
-    expect(wakes).toHaveLength(1)
-    expect(wakes[0]!.startsWith(SWEEP_PREFIX)).toBe(true)
-    expect(wakes[0]).toContain('t-wait「抢目录」')
-    expect(wakes[0]).toContain('t-block「占住目录」')
-    expect(wakes[0]).toContain('dir:/a/b')
-    expect(wakes[0]).toContain('不是使用方在说话')
+    expect(wakes).toHaveLength(0)
   })
 
-  it('人工挂起不带 wake：只记事实，一句话都不推', async () => {
+  it('人工挂起：只记事实', async () => {
     const { facts, wakes, notifier } = setup()
 
     await notifier.blocked({ ticketId: 't-manual', brief: '等拍板', reason: '等使用方拍板' })
@@ -144,7 +138,7 @@ describe('冲突排队：事实 + 推开票方', () => {
     expect(wakes).toHaveLength(0)
   })
 
-  it('指名开票方：blocked 与 released 都把 publisher 交给 wake 的第二参', async () => {
+  it('queued：进排队那刻推一句，指名开票方，带票号/标题/对手/资源/三个入口', async () => {
     const facts = createSweepFacts({ clock: fakeClock() })
     const calls: { text: string; to?: string }[] = []
     const notifier = createNotifier({
@@ -155,36 +149,42 @@ describe('冲突排队：事实 + 推开票方', () => {
       },
     })
 
-    await notifier.blocked({
+    await notifier.queued!({
       ticketId: 't-wait',
       brief: '抢目录',
-      wake: true,
       publisher: 'session-main',
       waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
     })
-    await notifier.released({ ticketId: 't-wait', brief: '抢目录', publisher: 'session-main', releasedBy: ['t-block'] })
 
-    // 两条都指名同一个开票方：主会话不止一个时，话不能被推到另一个那里去。
-    expect(calls.map((call) => call.to)).toEqual(['session-main', 'session-main'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.to).toBe('session-main')
+    const text = calls[0]!.text
+    expect(text.startsWith(SWEEP_PREFIX)).toBe(true)
+    expect(text).toContain('t-wait「抢目录」')
+    expect(text).toContain('t-block「占住目录」')
+    expect(text).toContain('dir:/a/b')
+    expect(text).toContain('自动放行')
+    expect(text).toContain('dispatch_list')
+    expect(text).toContain('dispatch_send t-wait')
+    expect(text).toContain('dispatch_close t-wait')
+    expect(text).toContain('不是使用方在说话')
+    // 叫醒不写事实：排队事实由 blocked 那条负责，同一件事不说两遍。
+    expect(facts.text()).toBe('')
   })
 
-  it('released：摘掉挂起事实，再推一句「轮到它了」', async () => {
+  it('resumed：只摘挂起事实，不再推第二句', async () => {
     const { facts, wakes, notifier } = setup()
     await notifier.blocked({
       ticketId: 't-wait',
       brief: '抢目录',
-      wake: true,
       waitOn: [{ ticketId: 't-block', brief: '占住目录', resources: ['dir:/a/b'] }],
     })
     expect(facts.size()).toBe(1)
 
-    await notifier.released({ ticketId: 't-wait', brief: '抢目录', releasedBy: ['t-block'] })
+    await notifier.resumed('t-wait')
 
     expect(facts.text()).toBe('')
-    const last = wakes.at(-1)!
-    expect(last).toContain('t-wait「抢目录」已放行')
-    expect(last).toContain('t-block 已收工')
-    expect(last).toContain('不是使用方在说话')
+    expect(wakes).toHaveLength(0)
   })
 })
 

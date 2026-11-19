@@ -1522,11 +1522,12 @@ export class TicketDesk {
    * 票挂起那刻记一条巡检事实。
    *
    * 走 facts 不走 followup：主会话下一个回合在 runtime context 里自己看得见。
+   * 冲突排队的叫醒单独由 `notifyQueued` 在「刚折成 queued」那一刻发，不在这里。
    * 两处登记（kind 联合、ORDER）都在 `sweep-facts.ts`，漏了会一直挂到 close。
    */
   private rememberBlocked(
     ticket: TicketSnapshot,
-    extra: { waitOn?: readonly ConflictWait[]; reason?: string; wake?: boolean } = {},
+    extra: { waitOn?: readonly ConflictWait[]; reason?: string } = {},
   ): void {
     // 冲突事实里带上对手的 brief：主会话看见「被谁挡的」不用再翻票。
     const waitOn = extra.waitOn?.map((wait) => {
@@ -1541,7 +1542,6 @@ export class TicketDesk {
         ...(ticket.publisher ? { publisher: ticket.publisher } : {}),
         ...(waitOn?.length ? { waitOn } : {}),
         ...(extra.reason ? { reason: extra.reason } : {}),
-        ...(extra.wake === true ? { wake: true } : {}),
       })
       .catch((error) => this.warn(`挂起提醒没记上：${messageOf(error)}`))
   }
@@ -1554,10 +1554,11 @@ export class TicketDesk {
   }
 
   /**
-   * 冲突排队放行：摘掉挂起事实 + 推开票方一句「轮到它了」。
+   * 冲突排队放行：摘掉挂起事实 + 告诉子会话「轮到它了」。
    *
-   * 挡路的票号从票上原来的 `waitOn` 取（这一轮判完 waitOn 已经是空的）；
-   * 收工的票还在日志里，brief 不会因为排到它而丢。
+   * 主会话不再收第二句：进排队那一刻已经推过一次（`notifyQueued`），放行是
+   * 自动的，再叫就是噪音。挡路的票号从票上原来的 `waitOn` 取（这一轮判完
+   * waitOn 已经是空的）；收工的票还在日志里，brief 不会因为排到它而丢。
    */
   private notifyReleased(ticket: TicketSnapshot): void {
     const releasedBy = (ticket.waitOn ?? []).map((wait) => wait.ticketId)
@@ -1571,14 +1572,32 @@ export class TicketDesk {
         ...(releasedBy.length > 0 ? { releasedBy } : {}),
       })
       .catch((error) => this.warn(`放行通知没送到（票 ${ticket.id}）：${messageOf(error)}`))
-    void this.notifier
-      .released({
+  }
+
+  /**
+   * 票刚折成 `queued`：给开票方主会话推一句。
+   *
+   * 只在「非 queued → queued」那一刻调用（admit 在落 conflict-checked 前取到的
+   * phase）；巡检多拍、releaseBlocked 重写 waitOn、自动放行都不走这里。
+   * ego 提的票不叫醒：别绕过它自己的回合（和原先冲突 wake 的口径一致）。
+   */
+  private notifyQueued(ticket: TicketSnapshot, waitOn: readonly ConflictWait[]): void {
+    const notify = this.notifier.queued
+    if (typeof notify !== 'function') return
+    // 对手的 brief 从日志补：主会话看见「被谁挡的」不用再翻票。
+    const waits = waitOn.map((wait) => {
+      const other = this.log.get(wait.ticketId)
+      const brief = other ? briefOf(other, this.config.briefMaxColumns) : undefined
+      return { ticketId: wait.ticketId, resources: [...wait.resources], ...(brief ? { brief } : {}) }
+    })
+    void notify
+      .call(this.notifier, {
         ticketId: ticket.id,
         brief: briefOf(ticket, this.config.briefMaxColumns),
+        ...(waits.length > 0 ? { waitOn: waits } : {}),
         ...(ticket.publisher ? { publisher: ticket.publisher } : {}),
-        ...(releasedBy.length > 0 ? { releasedBy } : {}),
       })
-      .catch((error) => this.warn(`放行提醒没送出去：${messageOf(error)}`))
+      .catch((error) => this.warn(`排队通知没送出去（票 ${ticket.id}）：${messageOf(error)}`))
   }
 
   /** 宿主信号统一入口：进队列、吞异常——宿主回调里抛错会打断别人的监听。 */
@@ -1815,17 +1834,21 @@ export class TicketDesk {
       }
       return false
     }
+    // 进排队判据：admit 只在 phase=planned 时才走到这里（execReady 先挡了
+    // queued），所以这一笔 conflict-checked 正常就是「非 queued → queued」；
+    // 留一份进入前的相位，未来多一条调用路也不会重复通知。
+    const wasQueued = current.phase === 'queued'
     const verdict = this.arbiter.checkAndRecord(current)
     if (verdict.level === 'strong') {
       const blockedBy = verdict.waitOn.map((wait) => wait.ticketId).join('、')
       this.warn(`票 ${current.id} 撞上 ${blockedBy}，先排队等放行`)
-      // 排队的那一刻写进巡检事实，主会话下一轮就能看见在等谁；origin 是 main
-      // 的票同时推开票方一句——它就是主会话，在跑的话下一个 step 就收到。
-      // ego 提的票只落事实：不把叫人绕过 ego 自己的回合。
-      this.rememberBlocked(this.log.get(current.id) ?? current, {
-        waitOn: verdict.waitOn,
-        wake: (current.origin ?? 'main') !== 'ego',
-      })
+      // 排队那一刻写进巡检事实（runtime context 一直看得见）；叫醒只在刚进
+      // 排队这一下发一次。之后 releaseBlocked 重判/重写 waitOn、自动放行都
+      // 不再推，主会话不会每 10 秒被同一条提醒吵一次。
+      const snapshot = this.log.get(current.id) ?? current
+      this.rememberBlocked(snapshot, { waitOn: verdict.waitOn })
+      // ego 提的票只落事实：不把叫人绕过 ego 自己的回合（和原冲突 wake 同口径）。
+      if (!wasQueued && (current.origin ?? 'main') !== 'ego') this.notifyQueued(snapshot, verdict.waitOn)
       return false
     }
     const outcome = await this.startTask(current)
@@ -1921,7 +1944,8 @@ export class TicketDesk {
         continue
       }
       this.dispatchAttempts.delete(current.id)
-      // 放行了：挂起那条从事实里撤掉，再推开票方一句，别让人干等。
+      // 放行了：挂起那条从事实里撤掉，再给子会话一声「轮到你了」；主会话这边
+      // 进排队时已经推过，不再重复。
       this.notifyReleased(current)
       released.push(current.id)
     }

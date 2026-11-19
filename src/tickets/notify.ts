@@ -6,8 +6,9 @@
  * - 有未读报告、一轮干完没交报告、票干完/跑太久没收工 —— 记成巡检事实，走
  *   `ctx.systemPrompt.context()` 的动态上下文。宿主把它渲染成 runtime-context
  *   快照，模型看见的是环境状态，不会当成使用方发的指令回话。
- * - 冲突排队（`blocked` 带上 `wake`）—— 记事实之外再推开票方一句；主会话不在
- *   活表里就只剩事实，下一轮 runtime context 照样看得见。人工挂起不 wake。
+ * - 票刚折成 `queued`（冲突排队）—— 记一条事实之外，**只在进入那一刻**推开票方
+ *   一句；主会话不在活表里就只剩事实，下一轮 runtime context 照样看得见。放行
+ *   是自动的，不再推第二句。人工挂起只记事实。
  * - 票停在那儿没人接（`waiting` 满阈值）、或者挂起超过阈值（等使用方决定）——
  *   才真的 `followup` 一条，开头 `[sweep] `，第二句明说这是巡检、不是使用方在
  *   说话。这种「叫醒」只能走 user 消息，所以话得自己说清，还要带上怎么收场。
@@ -73,20 +74,6 @@ export interface BlockedInput {
   reason?: string
   /** 开票方 sessionId：通知指名送给它，别推给别的主会话。 */
   publisher?: string
-  /**
-   * 冲突挂起那一刻推一把开票方：主会话在活表里就 followup 一句话，不在就只剩
-   * 巡检事实。人工挂起不传这一栏——挂起不是叫醒人的理由，冲突才是。
-   */
-  wake?: boolean
-}
-
-export interface ReleasedInput {
-  ticketId: string
-  brief: string
-  /** 挡在前面的票；收工后才轮到这单。没有就不细说。 */
-  releasedBy?: readonly string[]
-  /** 开票方 sessionId：放行那句指名送给它。 */
-  publisher?: string
 }
 
 export interface OwnerNotifier {
@@ -94,14 +81,18 @@ export interface OwnerNotifier {
   idle(input: IdleInput): Promise<boolean>
   noReport(input: NoReportInput): Promise<boolean>
   /**
-   * 票挂起那刻记一条巡检事实；`wake` 为 true（冲突排队）时再推开票方一句。
-   * 人工挂起仍然只记事实。
+   * 票挂起那刻记一条巡检事实。人工挂起、冲突排队都走这里，都不叫醒人：
+   * 冲突排队的叫醒由 `queued` 那条负责。
    */
   blocked(input: BlockedInput): Promise<boolean>
   /** 票放行或收工：把挂起那条摘掉，别一直挂着。 */
   resumed(ticketId: string): Promise<boolean>
-  /** 冲突排队放行：摘掉挂起事实，再推开票方一句「轮到它了」。 */
-  released(input: ReleasedInput): Promise<boolean>
+  /**
+   * 票刚折成 `queued`（phase 非 queued → queued）：叫醒开票方主会话一次。
+   * 只在进入排队那一刻发；巡检多拍、重复 commit、自动放行都不走这里。
+   * 老宿主/假件可以不实现，票台的调用点会判 `typeof === 'function'`。
+   */
+  queued?(input: QueuedInput): Promise<boolean>
   /**
    * 收工时发现票动了没声明的资源：给开票方推一句。老宿主/假件可以不实现，
    * 票台的调用点会判 `typeof === 'function'`。
@@ -118,7 +109,40 @@ export interface OutOfScopeInput {
   publisher?: string
 }
 
+/** 冲突排队通知：票号、标题、被哪张票/哪个资源挡住，加上三个入口。 */
+export interface QueuedInput {
+  ticketId: string
+  brief: string
+  /** 判出来的对手与资源（`conflict-checked` 的 waitOn）。 */
+  waitOn?: readonly { ticketId: string; resources: readonly string[]; brief?: string }[]
+  /** 开票方 sessionId：这条通知指名送给它，别推给别的主会话。 */
+  publisher?: string
+}
+
 const OUT_OF_SCOPE_MAX = 3
+const QUEUED_RESOURCES_MAX = 3
+
+/**
+ * 进冲突排队那一刻的文案：说清被谁挡住、撞在哪、接下来会自己发生什么。
+ *
+ * 只在这一刻发一次，放行不再推；所以「等它收工后自动放行，不用手动派」这句
+ * 必须写进来，否则主会话容易以为要自己动手。同样不喊主人。
+ */
+export function queuedText(input: QueuedInput): string {
+  const waits = input.waitOn ?? []
+  const who = waits.length ? waiters(waits) : '前面的票'
+  const resources = [...new Set(waits.flatMap((wait) => wait.resources))]
+  const shown = resources.slice(0, QUEUED_RESOURCES_MAX).join('、')
+  const why = shown
+    ? `，撞在 ${shown}${resources.length > QUEUED_RESOURCES_MAX ? ` 等 ${resources.length} 处` : ''}`
+    : ''
+  return (
+    `${SWEEP_PREFIX}票台：票 ${input.ticketId}「${input.brief}」已进冲突排队，排在 ${who} 后面${why}；` +
+    '等它们收工后自动放行，不用手动派。' +
+    `看队列 dispatch_list；要补要求 dispatch_send ${input.ticketId}；不想等了 dispatch_close ${input.ticketId}。` +
+    '这是票台通知，不是使用方在说话。'
+  )
+}
 
 export function outOfScopeText(input: OutOfScopeInput): string {
   const shown = input.paths.slice(0, OUT_OF_SCOPE_MAX).join('、')
@@ -157,20 +181,6 @@ export function noReportText(input: NoReportInput): string {
 /** 对手的写法：有 brief 就带上一句，主会话不用再翻票。 */
 function waiters(waits: readonly { ticketId: string; brief?: string }[]): string {
   return waits.map((wait) => (wait.brief ? `${wait.ticketId}「${wait.brief}」` : wait.ticketId)).join('、')
-}
-
-/** 冲突挂起推给开票方的那一句：谁被挡、被谁挡、撞在哪。 */
-export function conflictText(input: BlockedInput): string {
-  const waits = input.waitOn ?? []
-  const resources = [...new Set(waits.flatMap((wait) => wait.resources))].join('、')
-  const why = resources ? `，冲突在 ${resources}` : ''
-  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」被 ${waiters(waits)} 挡住${why}，已排队等它收工后自动放行。这是票台通知，不是使用方在说话。`
-}
-
-/** 放行推给开票方的那一句。 */
-export function releasedText(input: ReleasedInput): string {
-  const by = input.releasedBy?.length ? `（${input.releasedBy.join('、')} 已收工）` : ''
-  return `${SWEEP_PREFIX}票 ${input.ticketId}「${input.brief}」已放行${by}，执行轮派出去了。这是票台通知，不是使用方在说话。`
 }
 
 export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
@@ -238,8 +248,8 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
       )
     },
     blocked(input) {
-      // 冲突排队必须留一条事实：主会话每个回合自己会读到 runtime context；
-      // 没有事实表就只剩 followup（下面 wake 那条）这一条路。
+      // 冲突排队、人工挂起都只留一条事实：主会话每个回合自己会读到 runtime
+      // context。叫醒只发生在「刚进排队」那一刻，由 `queued` 负责。
       const waitOn = input.waitOn?.length
         ? input.waitOn.map((wait) => ({
             ticketId: wait.ticketId,
@@ -255,18 +265,16 @@ export function createNotifier(deps: NotifierDeps = {}): OwnerNotifier {
         ...(waitOn ? { waitOn } : {}),
         ...(input.reason ? { reason: input.reason } : {}),
       })
-      // 人工挂起不 wake；冲突排队才推。没有 wake（宿主没给 followup 口）就
-      // 只留事实，下一轮 runtime context 里照样看得见。
-      if (input.wake !== true) return Promise.resolve(deps.facts !== undefined)
-      return send(conflictText(input), false, input.publisher)
+      return Promise.resolve(deps.facts !== undefined)
     },
     resumed(ticketId) {
       deps.facts?.forget(ticketId, ['blocked'])
       return Promise.resolve(true)
     },
-    released(input) {
-      deps.facts?.forget(input.ticketId, ['blocked'])
-      return send(releasedText(input), false, input.publisher)
+    queued(input) {
+      // 只在票从非 queued 折成 queued 的那一笔调用（desk 判 transition）；
+      // 放行是自动的，不再推第二句。
+      return send(queuedText(input), false, input.publisher)
     },
     outOfScope(input) {
       return send(outOfScopeText(input), false, input.publisher)

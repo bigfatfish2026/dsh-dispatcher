@@ -93,9 +93,9 @@ describe('探路收工那刻判定', () => {
     expect(intentPlanLines(view)).toContain(`    waiting on ${first} (${DIR})`)
   })
 
-  it('第二张 declare 撞车：当场通知开票方；前一张收工放行时再通知一次', async () => {
+  it('第二张 declare 撞车：进排队那刻通知开票方一次；放行不再推', async () => {
     const blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]> = []
-    const releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]> = []
+    const queuedCalls: Array<Parameters<NonNullable<OwnerNotifier['queued']>>[0]> = []
     const notifier: OwnerNotifier = {
       reportArrived: async () => true,
       idle: async () => true,
@@ -105,8 +105,8 @@ describe('探路收工那刻判定', () => {
         return true
       },
       resumed: async () => true,
-      released: async (input) => {
-        releasedCalls.push(input)
+      queued: async (input) => {
+        queuedCalls.push(input)
         return true
       },
     }
@@ -129,12 +129,18 @@ describe('探路收工那刻判定', () => {
     const queued = h.log.get(second)!
     expect(queued.phase).toBe('queued')
     expect(queued.waitOn).toEqual([{ ticketId: first, resources: [DIR] }])
-    // 开票方当场收到：被挡的票、被谁挡的（id + brief）、撞在哪些路径上。
+    // 事实照记：被挡的票、被谁挡的（id + brief）、撞在哪些路径上。
     expect(blockedCalls).toHaveLength(1)
     expect(blockedCalls[0]).toMatchObject({
       ticketId: second,
       brief: '抢目录',
-      wake: true,
+      waitOn: [{ ticketId: first, resources: [DIR], brief: '占住目录' }],
+    })
+    // 恰好一条 followup：进排队那一刻发，内容给主会话看。
+    expect(queuedCalls).toHaveLength(1)
+    expect(queuedCalls[0]).toMatchObject({
+      ticketId: second,
+      brief: '抢目录',
       waitOn: [{ ticketId: first, resources: [DIR], brief: '占住目录' }],
     })
 
@@ -142,13 +148,8 @@ describe('探路收工那刻判定', () => {
     await flush()
 
     expect(h.log.get(second)!.phase).not.toBe('queued')
-    // 放行也吱一声：谁放行的、轮到谁了。
-    expect(releasedCalls).toHaveLength(1)
-    expect(releasedCalls[0]).toMatchObject({
-      ticketId: second,
-      brief: '抢目录',
-      releasedBy: [first],
-    })
+    // 放行是自动的，不再打扰开票方：还是那一条，没有第二句。
+    expect(queuedCalls).toHaveLength(1)
   })
 
   it('弱冲突：照常派活，票面上留一行提示票号', async () => {
@@ -358,14 +359,14 @@ describe('排队序号', () => {
 })
 
 describe('先来后到按交声明顺序，不按谁先被判定', () => {
-  /** 记下 notifier 被叫了哪些：blocked / released 各自一条一条攒。 */
+  /** 记下 notifier 被叫了哪些：事实 blocked 与叫醒 queued 各自一条一条攒。 */
   function capture(): {
     notifier: OwnerNotifier
     blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]>
-    releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]>
+    queuedCalls: Array<Parameters<NonNullable<OwnerNotifier['queued']>>[0]>
   } {
     const blockedCalls: Array<Parameters<OwnerNotifier['blocked']>[0]> = []
-    const releasedCalls: Array<Parameters<OwnerNotifier['released']>[0]> = []
+    const queuedCalls: Array<Parameters<NonNullable<OwnerNotifier['queued']>>[0]> = []
     const notifier: OwnerNotifier = {
       reportArrived: async () => true,
       idle: async () => true,
@@ -375,12 +376,12 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
         return true
       },
       resumed: async () => true,
-      released: async (input) => {
-        releasedCalls.push(input)
+      queued: async (input) => {
+        queuedCalls.push(input)
         return true
       },
     }
-    return { notifier, blockedCalls, releasedCalls }
+    return { notifier, blockedCalls, queuedCalls }
   }
 
   /** 只开票不声明：让测试自己摆 declare 的先后。 */
@@ -390,7 +391,7 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
   }
 
   it('A 先 declare、B 后 declare：A 的探路子会话后收工也先跑，B 排队 waitOn A', async () => {
-    const { notifier, blockedCalls, releasedCalls } = capture()
+    const { notifier, blockedCalls, queuedCalls } = capture()
     const h = makeDesk({ config: { defaultPreset: 't1', sweepMs: 0 }, probe: fakeProbe(), notifier })
     h.desk.attach()
     const a = await openBare(h, 'A 先声明')
@@ -414,21 +415,26 @@ describe('先来后到按交声明顺序，不按谁先被判定', () => {
     // 已经跑起来的 A 不被后到的 B 改判：phase 还是 running，也没多派一轮。
     expect(h.log.get(a)!.phase).toBe('running')
     expect(h.subagents.spawned).toHaveLength(spawnedAfterA)
-    // 通知到开票方：被挡那一刻一条，放行再一条，都指名 publisher。
+    // 通知到开票方：进排队那一刻恰好一条，指名 publisher；放行不再推。
     expect(blockedCalls).toHaveLength(1)
     expect(blockedCalls[0]).toMatchObject({
       ticketId: b,
       brief: 'B 后声明',
       publisher: 'session-main',
-      wake: true,
+      waitOn: [{ ticketId: a, brief: 'A 先声明', resources: [DIR] }],
+    })
+    expect(queuedCalls).toHaveLength(1)
+    expect(queuedCalls[0]).toMatchObject({
+      ticketId: b,
+      brief: 'B 后声明',
+      publisher: 'session-main',
       waitOn: [{ ticketId: a, brief: 'A 先声明', resources: [DIR] }],
     })
 
     await h.desk.close(a, { actor: h.main })
     expect(h.log.get(b)!.phase).toBe('running')
     expect(h.log.get(b)!.waitOn).toBeUndefined()
-    expect(releasedCalls).toHaveLength(1)
-    expect(releasedCalls[0]).toMatchObject({ ticketId: b, publisher: 'session-main', releasedBy: [a] })
+    expect(queuedCalls).toHaveLength(1)
   })
 
   it('反向：B 后开票但先 declare，先到先得跟着 declare 顺序走', async () => {
