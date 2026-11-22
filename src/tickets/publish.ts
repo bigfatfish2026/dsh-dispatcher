@@ -17,6 +17,7 @@ import type { Clock } from './clock'
 import type { WorkerPool, WorkerRegistration } from './workers'
 import type { ProbeRegistry } from './probe'
 import type { WorkerToolPort } from './worker-tools'
+import type { PresetCriteriaSnapshot } from './preset-catalog'
 import { textBlocks } from './workers'
 
 /** 注册表里的一档：只取票台用得上的两栏。 */
@@ -36,6 +37,8 @@ export interface PresetCatalog {
    * 驳回，不猜。没挂 toolset 的档返回 undefined（没减工具）。
    */
   tools(id: string): Promise<PresetTools | undefined>
+  /** 拼好的各档判据 + 降级清单（加载期从 loader entries 组装，不落盘）。 */
+  criteria?(): PresetCriteriaSnapshot
 }
 
 export interface ClassifyInput {

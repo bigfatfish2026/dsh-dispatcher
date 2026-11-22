@@ -8,7 +8,15 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../../src/config'
-import { DEFAULT_OUT_OF_SCOPE_ALLOW } from '../../src/defaults'
+import {
+  DEFAULT_CRITERIA_REQUIRED,
+  DEFAULT_CRITERIA_SILENT,
+  DEFAULT_OUT_OF_SCOPE_ALLOW,
+  GEMINI_DECISION_BASE_URL,
+  GEMINI_DECISION_MIN_CONFIDENCE,
+  GEMINI_DECISION_MODEL,
+  GEMINI_DECISION_TIMEOUT_MS,
+} from '../../src/defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from '../../src/tickets/preset-guard'
 import type { Config } from '../../src/config'
 import { apply, ticketEventQueue } from '../../src/index'
@@ -67,6 +75,11 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
     workerPrompt: '',
     presets: [],
+    criteria: {
+      labels: [],
+      required: { names: [...DEFAULT_CRITERIA_REQUIRED], onMissing: 'warn' },
+      silent: [...DEFAULT_CRITERIA_SILENT],
+    },
     noWaitGuard: true,
     maxCommandMs: 30000,
     maxWaitMs: 5000,
@@ -350,7 +363,21 @@ export function fakePluginHost(
   return host
 }
 
-/** 装一次插件：`services` 里放 subagents / llm / agentPresets。 */
+/** 一条档位声明的 loader entry（真宿主里由 loader 从 YAML 建出来）。 */
+function presetEntry(id: string, name: string, allow: string[]) {
+  return {
+    options: {
+      name: '@deepseek-ai/dsh-agent-preset',
+      config: {
+        id,
+        name,
+        plugins: [{ name: 'dsh-preset-toolset', config: { allow } }],
+      },
+    },
+  }
+}
+
+/** 装一次插件：`services` 里放 subagents / llm / agentPresets / loader。 */
 export function mountPlugin(
   options: {
     config?: Partial<Config>
@@ -365,20 +392,20 @@ export function mountPlugin(
     ...(options.existingAgents !== undefined ? { existingAgents: options.existingAgents } : {}),
     services: {
       subagents: subagents.seam,
-      // 档位注册表：真宿主里是 agent-preset-registry，这里给最小的样子。
+      // 档位注册表：真宿主里是 agent-preset-registry。工具面不走它了，这里只给
+      // 列表与默认档（档位声明的结构化 config 在下面的 loader 上）。
       agentPresets: {
         list: async () => [
           { id: 't1', name: '常规' },
           { id: 't2', name: '只读' },
         ],
         defaultId: 't1',
-        // 真宿主读的是档位声明全文；这里给最小可解析的样子：t2 只读，其余能跑。
-        readDocument: async (id: string) => ({
-          content:
-            id === 't2'
-              ? "- name: 'dsh-preset-toolset'\n  config:\n    allow:\n      - read\n      - grep\n"
-              : "- name: 'dsh-preset-toolset'\n  config:\n    allow:\n      - bash\n      - read\n      - write\n",
-        }),
+      },
+      // loader：真宿主里是 cordis-plugin-loader 的 EntryTree。每档一条
+      // `@deepseek-ai/dsh-agent-preset` entry，options.config 是补丁叠好后的
+      // PresetDefinition；t2 只读，其余能跑。
+      loader: {
+        entries: () => [presetEntry('t1', '常规', ['bash', 'read', 'write']), presetEntry('t2', '只读', ['read', 'grep'])],
       },
       ...(options.services ?? {}),
     },

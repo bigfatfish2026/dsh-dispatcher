@@ -76,6 +76,18 @@ export const COMMAND_HINT_TIMEOUT_MS = 4_000
 export const COMMAND_HINT_MODEL = 'deepseek/deepseek-flash'
 export const COMMAND_HINT_EFFORT = 'off'
 
+/**
+ * 命令判定的第三层：本机 decision 桥（方案 backlog-bl-mwiwuevq-176f 的 D2）。
+ *
+ * 只在模型判不出结论时问一次；超时上限 2000ms（方案 §1 写死），晚到就按关键词表
+ * 先派。模型、地址、置信度门槛都只在这里写一份，schema 默认值从这里取。
+ */
+export const GEMINI_DECISION_BASE_URL = 'http://127.0.0.1:3427'
+export const GEMINI_DECISION_MODEL = 'gemini-decision-1'
+export const GEMINI_DECISION_TIMEOUT_MS = 2_000
+/** 判「要执行命令」的概率到这条线才替代词表；低于它仍走关键词兜底。 */
+export const GEMINI_DECISION_MIN_CONFIDENCE = 0.85
+
 /** 撤回审计：往回扫 3 天，两次审计最小间隔 1 小时。 */
 export const REVERT_AUDIT_DAYS = 3
 export const REVERT_AUDIT_MS = 60 * 60 * 1000
@@ -124,3 +136,20 @@ export const DEFAULT_OUT_OF_SCOPE_ALLOW: readonly string[] = [
   '*~',
   '.DS_Store',
 ]
+
+/**
+ * 判据拼装：`required.names` 的默认基线。
+ *
+ * 这些名字是「每档都该有」的干活底座：读、找、交活、喊人。命中它们不出能力
+ * 标签，只参与缺项检查（缺了打 `crit_missing_required`）。名单只在这里写一遍，
+ * config 的 schema 默认值从这里取。
+ */
+export const DEFAULT_CRITERIA_REQUIRED: readonly string[] = ['read', 'glob', 'grep', 'dispatch_report', 'send_message']
+
+/**
+ * 判据拼装：`silent` 的默认值。
+ *
+ * 有也不出标签：`dispatch_declare` / `dispatch_touch` 是票务动作，不归任何能力
+ * 组；列出来只是让「未匹配工具」的 warn 不把它们算成配置漂移。
+ */
+export const DEFAULT_CRITERIA_SILENT: readonly string[] = ['dispatch_declare', 'dispatch_touch']

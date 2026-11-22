@@ -23,9 +23,9 @@ import type { SweepFacts } from '../tickets/sweep-facts'
 import { attachServiceWatch, createSweepDriver } from '../tickets/sweep-driver'
 import type { SweepDriver, SweepEventsService, SweepScheduleService } from '../tickets/sweep-driver'
 import { realClock } from '../tickets/clock'
-import { parseToolsetDocument } from '../tickets/preset-guard'
-import type { PresetTools } from '../tickets/preset-guard'
-import type { PresetCatalog } from '../tickets/publish'
+import { createPresetCatalog } from '../tickets/preset-catalog'
+import type { PresetLoaderLike } from '../tickets/preset-catalog'
+import { presetPromptSuffix } from '../tickets/worker-prompt'
 import type { SubagentSeam } from '../tickets/workers'
 import type { WorkerTicketTools } from '../tickets/worker-tools'
 import type { MainSessionFilter } from '../tickets/main-session'
@@ -53,7 +53,6 @@ interface PresetRegistry {
   list?: () => Promise<PresetRow[]>
   defaultId?: string
   composedPreset?: (ctx: unknown) => string | undefined
-  readDocument?: (id: string) => Promise<{ content?: string }>
 }
 
 export interface DeskInstallerDeps {
@@ -73,58 +72,6 @@ export interface DeskInstallerResult {
   desk: ReturnType<typeof createDesk>
   sweepFacts: SweepFacts
   agentsOf: () => AgentsService | undefined
-}
-
-/**
- * 档位目录：注册表读取、默认档、工具面解析与缓存。导出给单测直接喂假注册表，
- * 安装器里只负责接真服务。
- */
-export function createPresetCatalog(
-  registryOf: () => PresetRegistry | undefined,
-  warn: (message: string) => void,
-  cache: Map<string, PresetTools | undefined> = new Map(),
-): PresetCatalog {
-  let warnedNoReadDocument = false
-  return {
-    async list() {
-      const registry = registryOf()
-      let rows: PresetRow[] = []
-      try {
-        rows = (await registry?.list?.()) ?? []
-      } catch (error) {
-        warn(`[dispatcher] 读不到档位注册表：${error instanceof Error ? error.message : String(error)}`)
-        return []
-      }
-      return rows
-        .filter((row) => typeof row.id === 'string' && row.id.length > 0)
-        .map((row) => ({
-          id: row.id as string,
-          ...(row.name ? { name: row.name } : {}),
-          ...(row.description ? { description: row.description } : {}),
-        }))
-    },
-    defaultId() {
-      const id = registryOf()?.defaultId
-      return typeof id === 'string' && id ? id : undefined
-    },
-    async tools(id) {
-      if (cache.has(id)) return cache.get(id)
-      const registry = registryOf()
-      if (typeof registry?.readDocument !== 'function') {
-        if (!warnedNoReadDocument) {
-          warnedNoReadDocument = true
-          warn('[dispatcher] 档位注册表没有 readDocument，选档校验只能看档名，读不到工具面')
-        }
-        return undefined
-      }
-      const document = await registry.readDocument(id)
-      const content = typeof document?.content === 'string' ? document.content : ''
-      if (!content.trim()) throw new Error(`档 ${id} 的声明是空的`)
-      const tools = parseToolsetDocument(content)
-      cache.set(id, tools)
-      return tools
-    },
-  }
 }
 
 /**
@@ -171,15 +118,23 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
   const agentsOf = (): AgentsService | undefined => deps.service<AgentsService>(ctx, 'agents')
   const llmOf = () => deps.service<LlmService>(ctx, 'llm')
   const registryOf = () => deps.service<PresetRegistry>(ctx, 'agentPresets')
+  // loader 是宿主自己的服务：档位声明和叠好的 patch 都在它的 entry 树上。
+  const loaderOf = () => deps.service<PresetLoaderLike>(ctx, 'loader')
 
-
-  /** 选档守卫的工具面缓存；解析失败不缓存（下一次还会重新读一遍）。 */
-  const presetToolsCache = new Map<string, PresetTools | undefined>()
-  ctx.on('tools/change', () => {
-    presetToolsCache.clear()
+  const presets = createPresetCatalog({
+    entries: () => loaderOf()?.entries() ?? [],
+    registryOf,
+    promptSuffixOf: (id) => presetPromptSuffix(config.presets, id),
+    criteria: config.criteria,
+    warn,
+    info,
   })
-
-  const presets = createPresetCatalog(registryOf, warn, presetToolsCache)
+  // 工具面或 loader 配置变了，目录里的旧结论一起作废。`loader/config-update`
+  // 的事件声明由 cordis-plugin-loader 带进来，本包没引它的类型，这里只按
+  // 「事件名 + 无参监听器」用——不需要它的 payload。
+  const onHost = ctx.on as unknown as (event: string, listener: () => void) => unknown
+  onHost('tools/change', () => presets.invalidate())
+  onHost('loader/config-update', () => presets.invalidate())
 
 
   // 允许档位镜像是从 profile 手抄的：启动时对一遍注册表，抄错的名字要吭声。

@@ -9,7 +9,8 @@
  *      `classifyNeedsCommand` 回一个布尔值，这里只收结论，不自己再算一遍口径。
  *      收的是 false 时仍查一遍关键词，命中即矛盾——那是「任务书写明要命令」的
  *      强信号守门，不是第二个判定器）；
- *   2. 这个档的工具面里有没有能执行命令的工具（从档位声明的 YAML 读 allow/deny）。
+ *   2. 这个档的工具面里有没有能执行命令的工具（工具面来自 loader 的结构化声明，
+ *      见 `tickets/preset-catalog.ts`）。
  *
  * 三条规则按顺序判，第一条中就不往下走：
  *
@@ -24,10 +25,10 @@
  * `checkPresetChoice` 只返回驳回理由，接线层（desk）记一行 rejected 日志再把
  * `PresetRejectedError` 甩给工具层，`dispatch_open` 的返回文本就是它。
  *
- * 工具面解析的对象是 preset 注册表的 `readDocument(id)`——它回的是档位声明里
- * `plugins` 的 YAML 文本，不是工具名列表（注册表没有这个 API）。所以这里只做
- * 一件窄事：找 `dsh-preset-toolset` 那行下面的 `allow` / `deny` 序列。没挂
- * toolset = 没减工具 = 全局工具面都在，能跑命令。换档位写法时先看这段。
+ * 工具面由 `tickets/preset-catalog.ts` 从 loader entry 的结构化 config 里读好，
+ * 这里只收 `PresetTools` 这个形状：`toolsOf` 回 `undefined` = 没减工具 = 全局
+ * 工具面都在，能跑命令。早先那条「读 YAML 文本再正则扫」的路已经拆掉——它在
+ * 补丁、缩进或表达式变样时会悄悄算错，而算错的代价是放行一个干不了活的档。
  */
 
 /** 能执行命令的工具名。名单只在这里维护，判断处一律走 `toolRunsCommands`。 */
@@ -58,74 +59,6 @@ export function presetRunsCommands(tools: PresetTools | undefined): boolean {
   const hasCommandTool = [...tools.names].some(toolRunsCommands)
   // deny 模式下「有命令工具」意味着它被挡了。
   return tools.mode === 'allow' ? hasCommandTool : !hasCommandTool
-}
-
-/** 声明里那行 `- name: 'dsh-preset-toolset'`（引号可有可无）。 */
-const TOOLSET_NAME_LINE = /^(\s*)-\s*name:\s*['"]?dsh-preset-toolset['"]?\s*$/
-
-function unquote(value: string): string {
-  return value
-    .replace(/\s+#.*$/, '')
-    .trim()
-    .replace(/^['"]|['"]$/g, '')
-    .trim()
-}
-
-/**
- * 从 `readDocument(id).content` 里读工具面。
- *
- * - 没有任何 toolset 行 → `undefined`（没减工具）。
- * - 多行 toolset 时按 restrict 的语义合并：allow 取交集，deny 取并集，再从交集里
- *   扣掉被 deny 的。全是 deny 就返回并集。
- *
- * YAML 是 `dump()` 出来的，所以只认「缩进 + 短横线」这一种形状；认不出就是
- * 「没有工具面声明」，由调用方决定是放行还是驳回（本文件的选择是驳回）。
- */
-export function parseToolsetDocument(content: string): PresetTools | undefined {
-  const lines = content.split(/\r?\n/)
-  const rows: { mode: 'allow' | 'deny'; names: Set<string> }[] = []
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const head = TOOLSET_NAME_LINE.exec(lines[index] ?? '')
-    if (!head) continue
-    const pluginIndent = (head[1] ?? '').length
-
-    for (let scan = index + 1; scan < lines.length; scan += 1) {
-      const line = lines[scan] ?? ''
-      const trimmed = line.trim()
-      if (trimmed === '') continue
-      const indent = line.length - line.trimStart().length
-      // 回到同层或更外层：这一行 toolset 的声明结束了。
-      if (indent <= pluginIndent) break
-      const key = /^\s*(allow|deny):\s*$/.exec(line)
-      if (!key) continue
-      const keyIndent = indent
-      const names = new Set<string>()
-      for (let item = scan + 1; item < lines.length; item += 1) {
-        const entry = lines[item] ?? ''
-        const text = entry.trim()
-        if (text === '') continue
-        const itemIndent = entry.length - entry.trimStart().length
-        if (itemIndent <= keyIndent) break
-        const value = /^-\s*(.+?)\s*$/.exec(text)
-        if (value?.[1]) names.add(unquote(value[1]))
-      }
-      rows.push({ mode: key[1] === 'allow' ? 'allow' : 'deny', names })
-    }
-  }
-
-  if (rows.length === 0) return undefined
-  const allows = rows.filter((row) => row.mode === 'allow')
-  const denies = rows.filter((row) => row.mode === 'deny')
-  if (allows.length > 0) {
-    let names = new Set(allows[0]!.names)
-    for (const row of allows.slice(1)) {
-      names = new Set([...names].filter((name) => row.names.has(name)))
-    }
-    const denied = new Set(denies.flatMap((row) => [...row.names]))
-    return { mode: 'allow', names: new Set([...names].filter((name) => !denied.has(name))) }
-  }
-  return { mode: 'deny', names: new Set(denies.flatMap((row) => [...row.names])) }
 }
 
 /**

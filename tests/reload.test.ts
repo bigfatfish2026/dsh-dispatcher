@@ -3,7 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
-import { DEFAULT_OUT_OF_SCOPE_ALLOW } from '../src/defaults'
+import {
+  DEFAULT_CRITERIA_REQUIRED,
+  DEFAULT_CRITERIA_SILENT,
+  DEFAULT_OUT_OF_SCOPE_ALLOW,
+  GEMINI_DECISION_BASE_URL,
+  GEMINI_DECISION_MIN_CONFIDENCE,
+  GEMINI_DECISION_MODEL,
+  GEMINI_DECISION_TIMEOUT_MS,
+} from '../src/defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from '../src/tickets/preset-guard'
 import type { Config } from '../src/config'
 import { apply } from '../src/index'
@@ -57,6 +65,11 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     handoffPolicyText: DEFAULT_HANDOFF_POLICY,
     workerPrompt: '',
     presets: [],
+    criteria: {
+      labels: [],
+      required: { names: [...DEFAULT_CRITERIA_REQUIRED], onMissing: 'warn' },
+      silent: [...DEFAULT_CRITERIA_SILENT],
+    },
     noWaitGuard: true,
     maxCommandMs: 30000,
     maxWaitMs: 5000,

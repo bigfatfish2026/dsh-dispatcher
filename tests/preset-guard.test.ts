@@ -4,7 +4,6 @@ import {
   checkPresetChoice,
   commandHint,
   DEFAULT_COMMAND_KEYWORDS,
-  parseToolsetDocument,
   presetRunsCommands,
   toolRunsCommands,
 } from '../src/tickets/preset-guard'
@@ -23,34 +22,8 @@ const toolsOfFrom = (map: Record<string, PresetTools | Error | undefined>) => as
   return value
 }
 
-describe('档位工具面：从声明里读 allow/deny', () => {
-  it('allow 名单读出来，能认出 bash', () => {
-    const content = `- name: dsh-preset-toolset
-  config:
-    allow:
-      - read
-      - bash
-      - dispatch_report
-`
-    const tools = parseToolsetDocument(content)
-    expect(tools?.mode).toBe('allow')
-    expect([...(tools?.names ?? [])]).toEqual(['read', 'bash', 'dispatch_report'])
-    expect(presetRunsCommands(tools)).toBe(true)
-  })
-
-  it('deny 名单读出来，bash 被挡就不能跑命令', () => {
-    const tools = parseToolsetDocument(`- name: 'dsh-preset-toolset'
-  config:
-    deny:
-      - bash
-      - write
-`)
-    expect(tools).toEqual({ mode: 'deny', names: new Set(['bash', 'write']) })
-    expect(presetRunsCommands(tools)).toBe(false)
-  })
-
-  it('没有 toolset 行 = 没减工具 = 能跑命令', () => {
-    expect(parseToolsetDocument('- name: something-else\n  config: {}\n')).toBeUndefined()
+describe('工具面形状：能不能跑命令', () => {
+  it('没挂 toolset（undefined）= 没减工具 = 能跑命令', () => {
     expect(presetRunsCommands(undefined)).toBe(true)
   })
 
@@ -60,18 +33,8 @@ describe('档位工具面：从声明里读 allow/deny', () => {
     expect(presetRunsCommands(allow('read', 'mcp__shell__run_command'))).toBe(true)
   })
 
-  it('两个 toolset 行按交集算：第二个没 bash 就没 bash', () => {
-    const content = `- name: dsh-preset-toolset
-  config:
-    allow:
-      - bash
-      - read
-- name: dsh-preset-toolset
-  config:
-    allow:
-      - read
-`
-    expect(presetRunsCommands(parseToolsetDocument(content))).toBe(false)
+  it('deny 模式下被挡的 bash 不算命令工具', () => {
+    expect(presetRunsCommands({ mode: 'deny', names: new Set(['bash']) })).toBe(false)
   })
 })
 

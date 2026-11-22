@@ -8,6 +8,12 @@ import {
   COMMAND_HINT_EFFORT,
   COMMAND_HINT_MODEL,
   COMMAND_HINT_TIMEOUT_MS,
+  GEMINI_DECISION_BASE_URL,
+  GEMINI_DECISION_MIN_CONFIDENCE,
+  GEMINI_DECISION_MODEL,
+  GEMINI_DECISION_TIMEOUT_MS,
+  DEFAULT_CRITERIA_REQUIRED,
+  DEFAULT_CRITERIA_SILENT,
   DEFAULT_STATE_FILE,
   DEFAULT_STORE_BACKEND,
   DEFAULT_OUT_OF_SCOPE_ALLOW,
@@ -22,6 +28,7 @@ import {
   WAITING_MINUTES,
 } from './defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from './tickets/preset-guard'
+import type { CriteriaConfig } from './tickets/preset-catalog'
 import { TOOL_NAMES } from './protocol'
 import type { TicketBackendName } from './store/backend'
 
@@ -274,6 +281,12 @@ export interface Config {
    * 档名 + `promptSuffix`；两种混着写。档名对不上注册表的那条静默不生效。
    */
   presets: PresetPromptConfig[]
+  /**
+   * 判据拼装：`labels` 把工具名 glob 换成能力标签，`required` / `silent` 划出
+   * 不出标签的名字，`expectedPresets` 只当档数告警阈值。`labels` 没有默认名单，
+   * 没配就只拼 promptSuffix 并 warn。
+   */
+  criteria: CriteriaConfig
   /** Refuse main-session tool calls that would sit and wait. */
   noWaitGuard: boolean
   /** Longest a single command may hold the main session, in milliseconds. */
@@ -496,6 +509,52 @@ export const Config: Schema<Config> = Schema.object({
     .default([])
     .description(
       'Per-preset prompt text. Accepts "t1" (id only, adds nothing) or { name: t1, promptSuffix: "..." }; the two forms mix. A name the registry does not know is ignored. Order is workerPrompt first, this preset suffix second, one blank line between.',
+    ),
+  criteria: Schema.object({
+    labels: Schema.array(
+      Schema.object({
+        label: Schema.string()
+          .required()
+          .description('Capability label printed in the preset criteria, e.g. 执行命令.'),
+        match: Schema.array(Schema.string())
+          .required()
+          .description(
+            'Tool-name globs for this label: * matches any run (empty included), whole-name anchored, case-sensitive.',
+          ),
+      }),
+    )
+      .default([])
+      .description(
+        'Tool name → capability label table. Array order is the output order. No default list on purpose: the only copy lives in the profile config. Empty means criteria carries only promptSuffix and logs crit_labels_missing.',
+      ),
+    required: Schema.object({
+      names: Schema.array(Schema.string())
+        .default([...DEFAULT_CRITERIA_REQUIRED])
+        .description('Tools every preset should carry. They never produce a label; a missing one logs crit_missing_required.'),
+      onMissing: Schema.union(['warn', 'ignore'] as const)
+        .default('warn')
+        .description(
+          'warn (default) logs crit_missing_required; ignore silences it. Missing names still show up in the criteria snapshot.',
+        ),
+    })
+      .default({ names: [...DEFAULT_CRITERIA_REQUIRED], onMissing: 'warn' })
+      .description('Baseline tool names and what to do when one is missing.'),
+    silent: Schema.array(Schema.string())
+      .default([...DEFAULT_CRITERIA_SILENT])
+      .description(
+        'Tools that never produce a label and are not counted as unmatched (dispatch_declare / dispatch_touch by default).',
+      ),
+    expectedPresets: Schema.natural().description(
+      'Alarm threshold only: when the loader scan finds fewer presets than this, log crit_presets_short. Omit to skip the check; empty slots are never invented.',
+    ),
+  })
+    .default({
+      labels: [],
+      required: { names: [...DEFAULT_CRITERIA_REQUIRED], onMissing: 'warn' },
+      silent: [...DEFAULT_CRITERIA_SILENT],
+    })
+    .description(
+      'Criteria assembly: labels (tool-name globs → capability labels, array order = output order), required baseline names, silent names, and an optional preset-count alarm. The unique source of the tool→label mapping.',
     ),
   noWaitGuard: Schema.boolean()
     .default(true)
