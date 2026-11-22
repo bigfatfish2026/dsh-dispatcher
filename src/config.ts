@@ -193,6 +193,19 @@ export interface Config {
   /** 命令判定最多等多久，毫秒。比选档更短：晚到就按词表先派。 */
   commandHintTimeoutMs: number
   /**
+   * 命令判定的第三层：本机 decision 桥（方案 D2）。默认关；关着时
+   * `classifyNeedsCommand` 一次请求都不发，结论与接入前逐字一致。
+   * 强信号与模型结论都不经过它——只在模型判不出结论时补一票。
+   */
+  geminiDecision: {
+    enabled: boolean
+    baseUrl: string
+    model: string
+    timeoutMs: number
+    /** 判「要执行命令」的概率门槛；低于它仍走关键词表。 */
+    minConfidence: number
+  }
+  /**
    * 允许档位镜像。选出来的档不在这里就驳回。空数组 = 不校验（给不想开这道
    * 门的人留的后路）；正常部署抄 profile 里 tool-subagent 的 allowedAgentPresets。
    */
@@ -385,6 +398,37 @@ export const Config: Schema<Config> = Schema.object({
     .description(
       'How long the command judgement may take, in milliseconds. Shorter than classifyTimeoutMs on purpose: a late answer is worth less than dispatching on the keyword table.',
     ),
+  geminiDecision: Schema.object({
+    enabled: Schema.boolean()
+      .default(false)
+      .description(
+        'Third layer of the command judgement: ask the local gemini-decision bridge only when the model gave no conclusion. Off by default; while off, no request is made and the keyword table decides exactly as before. Strong signals and model answers never go through the bridge.',
+      ),
+    baseUrl: Schema.string()
+      .default(GEMINI_DECISION_BASE_URL)
+      .description('Local decision bridge; the path /systemone is fixed. The plugin never reads the API key.'),
+    model: Schema.string()
+      .default(GEMINI_DECISION_MODEL)
+      .description('Model name forwarded to the bridge as is.'),
+    timeoutMs: Schema.natural()
+      .default(GEMINI_DECISION_TIMEOUT_MS)
+      .description(
+        'One request timeout, in milliseconds (plan cap: 2000). On timeout the advice is dropped and the keyword table decides; never wait for the bridge.',
+      ),
+    minConfidence: Schema.number()
+      .default(GEMINI_DECISION_MIN_CONFIDENCE)
+      .description(
+        'Probability needed before a "yes" replaces the keyword table. Below it the keyword table still decides, even when the bridge says yes.',
+      ),
+  })
+    .default({
+      enabled: false,
+      baseUrl: GEMINI_DECISION_BASE_URL,
+      model: GEMINI_DECISION_MODEL,
+      timeoutMs: GEMINI_DECISION_TIMEOUT_MS,
+      minConfidence: GEMINI_DECISION_MIN_CONFIDENCE,
+    })
+    .description('Local gemini-decision bridge for the command judgement (plan D2).'),
   allowedPresets: Schema.array(Schema.string())
     .default([])
     .description(

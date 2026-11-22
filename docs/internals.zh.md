@@ -29,6 +29,11 @@ README 的脚注：配置全表、事件模型、巡检与工具面。日常用�
 | `classifyModel` | string | `deepseek/deepseek-flash` | 选档模型，写成 `provider/model` |
 | `classifyEffort` | string | `off` | 选档推理档；空串 = 路由默认 |
 | `classifyTimeoutMs` | number | `8000` | 选档最多等多久，超时回落默认档 |
+| `geminiDecision.enabled` | boolean | `false` | 命令判定的第三层：模型判不出结论时问本机 decision 桥；默认关，关着时一次请求都不发 |
+| `geminiDecision.baseUrl` | string | `http://127.0.0.1:3427` | 本机桥地址，路径固定 `/systemone`；插件不读 key |
+| `geminiDecision.model` | string | `gemini-decision-1` | 桥透传给上游的模型名 |
+| `geminiDecision.timeoutMs` | number | `2000` | 单次请求超时；到点建议作废，走关键词表 |
+| `geminiDecision.minConfidence` | number | `0.85` | 判 yes 的概率门槛；低于它仍走关键词表 |
 | `allowedPresets` | string[] | `[]` | 允许档位镜像，空 = 不校验；正常部署抄 profile 的 `allowedAgentPresets` |
 | `commandKeywords` | string[] | 内置 17 词 | 「要跑命令」关键词兜底表，可改 |
 | `rejectOnMismatch` | boolean | `true` | 选档一致性校验总开关 |

@@ -20,6 +20,7 @@
 import type { LlmStreamChunk, LlmService } from './classify'
 import { deadline, parseModelRoute, parseNeedsCommand, TimeoutReason } from './classify'
 import { commandHint, DEFAULT_COMMAND_KEYWORDS } from './preset-guard'
+import type { GeminiDecision } from './gemini-decision'
 
 /** 判定要读的三样：目标、一行摘要、工作目录。 */
 export interface NeedsCommandInput {
@@ -36,6 +37,8 @@ export type NeedsCommandSource =
   | 'llm'
   /** 模型不中用，退回关键词表（命中即 yes）。 */
   | 'keyword'
+  /** 模型没结论，本机 decision 桥给出高置信 yes（D2 第三层）。 */
+  | 'gemini'
 
 export interface NeedsCommandVerdict {
   needsCommand: boolean
@@ -58,10 +61,75 @@ export interface CommandJudgeDeps {
   keywords?: readonly string[]
   maxOutputTokens?: number
   warn?: (message: string) => void
+  /**
+   * 第三层：本机 gemini-decision 桥（方案 D2）。不传 / 开关关着 = 走老路，
+   * 一次请求都不发。只在模型判不出结论时问一次，强信号与模型结论都不经过它。
+   */
+  decide?: GeminiDecision
 }
 
 /** 一行 yes/no 的输出上限；给多了纯浪费。 */
 const DEFAULT_MAX_OUTPUT_TOKENS = 20
+
+/** 日志里的置信度只留三位小数：够看趋势，也不把上游浮点原文抄进日志。 */
+function fixed3(value: number | undefined): string {
+  return Number.isFinite(value) ? Number(value).toFixed(3) : '0.000'
+}
+
+/** 失败原因换成方案 §5 的 kind 枚举（region_400 / rate_429 / upstream_5xx / network / -）。 */
+function failKind(reason: string | undefined): string {
+  const code = String(reason ?? '')
+  if (code === 'http_400') return 'region_400'
+  if (code === 'http_429') return 'rate_429'
+  if (/^http_5\d\d$/.test(code)) return 'upstream_5xx'
+  if (code === 'timeout' || code === 'network') return 'network'
+  return '-'
+}
+
+/** 发给桥的那句话：只有票面事实，超 800 字截断；不许进日志。 */
+function bridgeState(input: NeedsCommandInput): string {
+  const text = `目标：${String(input.goal ?? '').trim()}\n摘要：${String(input.brief ?? '').trim()}`.trim()
+  return text.length > 800 ? `${text.slice(0, 800)}…` : text
+}
+
+/**
+ * D2 第三层：模型判不出结论时，问一次本机桥「这活要不要真的执行命令」。
+ *
+ * 采纳条件写死：桥判 yes 且 confidence ≥ cfg.minConfidence 才替代关键词表；
+ * 桥判 no、置信度不够、超时、校验不过，一律回 undefined，调用方照旧走词表。
+ * 顺序写死：先跑完模型那条路，失败之后才问桥。
+ */
+async function adviseNeedsCommand(
+  input: NeedsCommandInput,
+  deps: CommandJudgeDeps,
+): Promise<NeedsCommandVerdict | undefined> {
+  const decide = deps.decide
+  if (!decide?.enabled) return undefined
+  const result = await decide.ask({
+    state: bridgeState(input),
+    instructions:
+      '这张工单要派给子会话执行。只判断一件事：它需不需要真的运行命令（bash、脚本、git、测试、解压、journalctl 之类）？'
+      + '完全不用跑命令、只读文件就能做完的活答 no；看起来是只读排查但要跑命令才能完成的，答 yes。',
+    criteria: {
+      yes: '需要真的执行命令：要跑 bash / 脚本 / 测试 / git / 解压 / 查进程和日志，只读文件做不完',
+      no: '不需要执行命令：只读文件、grep 文本、联网查、翻记忆就能做完',
+    },
+  })
+  if (!result.ok) {
+    deps.warn?.(
+      `gemini:fail site=dispatcher.command kind=${failKind(result.reason)} ms=${result.ms} reason=${result.reason}`,
+    )
+    return undefined
+  }
+  const taken = result.choice === 'yes' && Number(result.confidence) >= decide.cfg.minConfidence
+  deps.warn?.(
+    `gemini:call site=dispatcher.command choice=${result.choice} conf=${fixed3(result.confidence)} ms=${result.ms}`,
+  )
+  deps.warn?.(
+    `gemini:use site=dispatcher.command taken=${taken ? 1 : 0} why=${taken ? 'advice_yes' : 'rule_wins'} conf=${fixed3(result.confidence)}`,
+  )
+  return taken ? { needsCommand: true, source: 'gemini' } : undefined
+}
 
 /**
  * 「任务书明写要执行命令」的强信号词。
@@ -193,11 +261,16 @@ export async function classifyNeedsCommand(
     if (hit) return { needsCommand: true, source: 'keyword', matchedKeyword: hit }
     return { needsCommand: false, source: 'llm' }
   } catch (error) {
+    // 第三层（D2）：模型没结论时才问本机桥；开关关着时连这一步都不进。
+    const advice = await adviseNeedsCommand(input, deps)
     const hit = commandHint(input.goal, keywords)
     warn(
       `[dispatcher] 命令判定失败（${deps.model}，${Date.now() - startedAt}ms）：${messageOf(error)}；` +
-        `退回关键词表${hit ? `，命中「${hit}」` : '，没命中'}`,
+        (advice
+          ? 'decision 桥判要执行命令，按桥的结论走'
+          : `退回关键词表${hit ? `，命中「${hit}」` : '，没命中'}`),
     )
+    if (advice) return advice
     return {
       needsCommand: hit !== undefined,
       source: 'keyword',

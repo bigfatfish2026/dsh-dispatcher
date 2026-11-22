@@ -16,6 +16,7 @@ import { createLlmClassifier } from '../tickets/classify'
 import type { LlmService } from '../tickets/classify'
 import { classifyNeedsCommand } from '../tickets/classify-command'
 import type { NeedsCommandInput } from '../tickets/classify-command'
+import { createGeminiDecision } from '../tickets/gemini-decision'
 import { createNotifier } from '../tickets/notify'
 import { createReportDigest } from '../tickets/report-digest'
 import { createSweepFacts } from '../tickets/sweep-facts'
@@ -194,6 +195,8 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
    * `static` 策略是「不花那次调用选档」，这里也一并不花：守卫退回关键词表
    * （`commandKeywords`），行为跟改造前一致。`llm` 策略才接。
    */
+  // D2 第三层的桥客户端：enabled=false 时 ask() 连 fetch 都不会进，构造它没有副作用。
+  const decideCommand = createGeminiDecision(config.geminiDecision)
   const judgeCommand: CommandJudge | undefined =
     config.presetStrategy === 'static'
       ? undefined
@@ -205,6 +208,7 @@ export function installDesk(ctx: Context, config: Config, deps: DeskInstallerDep
             timeoutMs: config.commandHintTimeoutMs,
             keywords: config.commandKeywords,
             warn,
+            decide: decideCommand,
           })
 
   /**

@@ -29,6 +29,11 @@ The footnotes to the README: the full config table, the event model, sweeps, and
 | `classifyModel` | string | `deepseek/deepseek-flash` | Model for preset selection, as `provider/model` |
 | `classifyEffort` | string | `off` | Reasoning level for that call; empty means the route default |
 | `classifyTimeoutMs` | number | `8000` | How long selection may take before falling back to the default preset |
+| `geminiDecision.enabled` | boolean | `false` | Third layer of the command judgement: ask the local decision bridge only when the model gave no conclusion. Off by default; while off no request is made |
+| `geminiDecision.baseUrl` | string | `http://127.0.0.1:3427` | Local bridge; path `/systemone` is fixed. The plugin never reads the API key |
+| `geminiDecision.model` | string | `gemini-decision-1` | Model name forwarded to the bridge |
+| `geminiDecision.timeoutMs` | number | `2000` | One request timeout; on expiry the advice is dropped and the keyword table decides |
+| `geminiDecision.minConfidence` | number | `0.85` | Probability needed before a "yes" replaces the keyword table |
 | `allowedPresets` | string[] | `[]` | Mirror of the presets this deployment may pick; empty disables the check. Copy `allowedAgentPresets` from the profile |
 | `commandKeywords` | string[] | 17 built-ins | Fallback keywords meaning "this needs commands"; editable |
 | `rejectOnMismatch` | boolean | `true` | Master switch for the preset consistency guard |

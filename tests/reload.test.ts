@@ -40,6 +40,13 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     commandHintModel: 'deepseek/deepseek-flash',
     commandHintEffort: 'off',
     commandHintTimeoutMs: 4000,
+    geminiDecision: {
+      enabled: false,
+      baseUrl: GEMINI_DECISION_BASE_URL,
+      model: GEMINI_DECISION_MODEL,
+      timeoutMs: GEMINI_DECISION_TIMEOUT_MS,
+      minConfidence: GEMINI_DECISION_MIN_CONFIDENCE,
+    },
     allowedPresets: [],
     commandKeywords: [...DEFAULT_COMMAND_KEYWORDS],
     rejectOnMismatch: true,
