@@ -53,6 +53,7 @@ import {
 } from '../defaults'
 import { createNotifier } from './notify'
 import type { IdleReason, OwnerNotifier } from './notify'
+import { undeclaredReportHeader } from '../tools-shared'
 import type { WorkerWatch } from './watch'
 import { outOfScopePaths } from './conflict'
 import { normalizeResource, normalizeResources, parseResource, scanResources } from './resources'
@@ -249,6 +250,11 @@ export interface ReportReceipt {
   id: string
   epoch: number
   pendingReports: number
+  /**
+   * 交活时对出来的、这一轮 touched 里没被 intent.writes / reads 覆盖的路径：
+   * 只是提醒，报告已经照常落库。关票时同一套判定还会再算一次并记账。
+   */
+  outOfScope?: string[]
 }
 
 export interface CloseReceipt {
@@ -717,6 +723,7 @@ export class TicketDesk {
     text: string,
     source: 'worker' | 'auto' = 'worker',
     actor?: Actor,
+    opts: { paths?: readonly string[] } = {},
   ): Promise<ReportReceipt> {
     return this.serialize(async () => {
       const body = text.trim()
@@ -726,9 +733,87 @@ export class TicketDesk {
       const handle = new TicketHandle(this.log, id)
       if (actor) handle.assertMayReport(actor)
       else handle.current()
-      this.appendReport(id, body, source)
+      // 补声明：交活时把这一轮漏报的路径带上，并进 intent.writes 与 touched。
+      // 只追加信息，status 一个字节不动；补完这条账就不再出现在下面的软提醒里。
+      if (opts.paths && opts.paths.length > 0) this.amendWrites(handle.current(), opts.paths)
+      const ticket = handle.current()
+      const base = ticket.dir?.trim() || undefined
+      // 交活时的软提醒：touched 里既没被 writes 也没被 reads 覆盖的项，就是这一轮
+      // 漏声明的改动。只读调用（read/grep/glob）不进 touched；混进来的声明过的
+      // 读由 reads 这一侧减掉，别把它们当改动报——这就是「只读路径被当 touched」
+      // 那个坑的收口。合理产物白名单与关票那一刀用同一份。
+      //
+      // 只提醒、不拦交活：报告照常落库，票面 status / intent / touched 一个字节
+      // 不动，差集拼在正文最前面给主会话看。这里不写票面 outOfScope、也不推
+      // notifier——关票才是唯一的记账与推送点，同一张票不会因为交活再多一条
+      // 「收工时对不上账」。补了声明（declare 或下次 report 带 paths）之后，关票
+      // 重算自然干净；不补，关票才记一次最终账。主会话在 send 里追加的允许范围
+      // 不进 intent.writes，所以那条路不会让提醒消失。
+      const outOfScope = outOfScopePaths(ticket.touched, ticket.intent?.writes, {
+        allow: this.config.outOfScopeAllowEnabled ? this.config.outOfScopeAllow : [],
+        ...(ticket.intent?.reads?.length ? { reads: ticket.intent.reads } : {}),
+        ...(base ? { base } : {}),
+      })
+      // 自动补的报告是收工兜底拿最后一段输出拼的，正文不是小鱼写的，别往里塞
+      // 头部；那种票的越界留给关票那一刀。
+      const recorded =
+        source === 'worker' && outOfScope.length > 0
+          ? `${undeclaredReportHeader(outOfScope)}\n---\n${body}`
+          : body
+      this.appendReport(id, recorded, source)
       const after = this.log.get(id)!
-      return { id, epoch: after.epoch, pendingReports: pending(after.reports).length }
+      return {
+        id,
+        epoch: after.epoch,
+        pendingReports: pending(after.reports).length,
+        ...(outOfScope.length > 0 ? { outOfScope } : {}),
+      }
+    })
+  }
+
+  /**
+   * 交活时补声明：把这一轮实际动过、intent 却没写到的路径并进 writes，并记一条
+   * `touch-reported`。补进来的路径当场就被 writes 覆盖，本次交活的软提醒里不再列
+   * 它们，关票对账也不会再报。
+   *
+   * 走 `declared` 而不是 `declare()`：reducer 对 running 上的声明保持 running
+   * （`reducer.ts` 的 keepRunning），而 `declare()` 还要 forgetBlocked /
+   * releaseBlocked / 清派活节流——那些是探路阶段的动作，执行轮补声明不该把正在
+   * 跑的票踢回排队。入参已在工具层归一过前缀，这里按票的 dir 再归一一次，跟
+   * declare / touch 用同一把尺子。
+   */
+  private amendWrites(ticket: TicketSnapshot, paths: readonly string[]): void {
+    const base = ticket.dir?.trim() || undefined
+    const normalized = normalizeResources(paths, base ? { base } : {})
+    if (normalized.length === 0) return
+    const intent = ticket.intent ?? {}
+    const writes = [...(intent.writes ?? [])]
+    const seen = new Set(writes)
+    const added: string[] = []
+    for (const path of normalized) {
+      if (seen.has(path)) continue
+      seen.add(path)
+      writes.push(path)
+      added.push(path)
+    }
+    if (added.length > 0) {
+      this.commit({
+        kind: 'declared',
+        id: ticket.id,
+        at: this.at(),
+        cause: 'tool',
+        plan: ticket.plan ?? {},
+        intent: { ...intent, writes },
+        ...(ticket.workerId ? { workerId: ticket.workerId } : {}),
+      })
+    }
+    this.commit({
+      kind: 'touch-reported',
+      id: ticket.id,
+      at: this.at(),
+      cause: 'tool',
+      actor: 'worker',
+      paths: normalized,
     })
   }
 
@@ -961,10 +1046,13 @@ export class TicketDesk {
       const outcome = opts.outcome ?? 'done'
       const note = opts.note?.trim()
       const voided = pending(ticket.inputs).length
-      // 越界对账（P4）：关票那一刻拿 touched 跟声明的 writes 比，没被覆盖的算越界。
+      // 越界对账（P4）：关票那一刻拿 touched 跟声明的 writes / reads 比，两边都没
+      // 覆盖的才算越界。touch 只有一个扁平 paths，读过的路径也在里面，所以 reads
+      // 这侧必须一起减，否则只读调研票会把整轮读过的文件都报成越界。
       // 没有声明 writes 就没有边界可比，outOfScopePaths 返回空，不留痕。
       const outOfScope = outOfScopePaths(ticket.touched, ticket.intent?.writes, {
         allow: this.config.outOfScopeAllowEnabled ? this.config.outOfScopeAllow : [],
+        ...(ticket.intent?.reads?.length ? { reads: ticket.intent.reads } : {}),
         ...(ticket.dir?.trim() ? { base: ticket.dir.trim() } : {}),
       })
       this.commit({

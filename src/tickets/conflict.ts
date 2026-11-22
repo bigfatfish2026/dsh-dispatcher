@@ -335,6 +335,13 @@ export interface OutOfScopeOptions {
    * 工作目录之外的临时产物才忽略。
    */
   base?: string
+  /**
+   * 同一张票声明里只读的那一侧（`intent.reads`）。`dispatch_touch` 只有一个扁平
+   * 的 `paths`，这一轮读过的路径也混在里面一起报，对账时要减掉它们，否则只读
+   * 调研票收工必报一串「动了没声明的资源」。口径跟 writes 一样：`scanResources`
+   * 归一化，`covers` 按目录边界判包含。
+   */
+  reads?: readonly string[]
 }
 
 /** 取路径最后一段。 */
@@ -440,15 +447,20 @@ export function isAllowedProduct(uri: string, allow: readonly string[], base?: s
 }
 
 /**
- * 越界对账（P4）：`touched` 里没有被票上声明的 `writes` 覆盖、也不属于合理产物
- * 的项。
+ * 越界对账（P4）：`touched` 里既没有被票上声明的 `writes` 或 `reads` 覆盖、
+ * 也不属于合理产物的项。
+ *
+ * `touched` 是 `dispatch_touch` 报上来的实际碰过的路径，但那个工具只有一个扁平
+ * `paths`，读过的和写过的混在一起；所以声明过的只读路径必须一并减掉，否则只读
+ * 调研票收工必报「动了没声明的资源」——这正是一类纯误报。
  *
  * 入参两边都先过 `scanResources`，跟冲突判定读同一个写法；输出是归一化后
  * 的资源串，按 touched 的首次出现顺序。没有声明 writes 就没有边界可比，返回
  * 空数组——快路径的票不该因为没写声明就满屏越界。
  *
  * 白名单只挡「票外产物」（备份、临时文件、构建输出），业务源码不在此列：
- * 声明之外的 `src/` 文件照样报出来。
+ * 声明之外的 `src/` 文件照样报出来。减掉 reads 只放过声明过的读，真写了任何
+ * 没声明过的路径仍然报。
  */
 export function outOfScopePaths(
   touched: readonly string[] | undefined,
@@ -457,11 +469,13 @@ export function outOfScopePaths(
 ): string[] {
   const declared = toPlainResources(writes)
   if (declared.length === 0) return []
+  const readOnly = toPlainResources(options.reads)
   const allow = options.allow ?? []
   const outside: string[] = []
   for (const item of toPlainResources(touched)) {
     if (isAllowedProduct(item.uri, allow, options.base)) continue
     if (declared.some((write) => covers(write, item))) continue
+    if (readOnly.some((read) => covers(read, item))) continue
     outside.push(item.uri)
   }
   return outside

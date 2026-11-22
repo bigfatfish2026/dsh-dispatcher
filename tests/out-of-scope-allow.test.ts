@@ -162,3 +162,35 @@ describe('归一化后的路径参与匹配', () => {
     expect(isAllowedProduct('file:/home/julia/notbackups/x.db', DEFAULT_OUT_OF_SCOPE_ALLOW)).toBe(false)
   })
 })
+
+describe('已声明的只读路径不算越界', () => {
+  // dispatch_touch 只有一个扁平 paths，读过的路径也报在里面；票面 reads 要能减掉。
+  const READS = [`file:${BASE}/src/store/reducer.ts`, `dir:${BASE}/docs`]
+
+  it('读声明不算越界：touched 里已声明 reads 的路径不报，未声明照报', () => {
+    expect(
+      outOfScopePaths(
+        [
+          `file:${BASE}/src/store/reducer.ts`,
+          `file:${BASE}/docs/internals.zh.md`,
+          `file:${BASE}/src/tickets/desk.ts`,
+        ],
+        WRITES,
+        { reads: READS },
+      ),
+    ).toEqual([`file:${BASE}/src/tickets/desk.ts`])
+  })
+
+  it('reads 的目录边界按段判：dir 覆盖内部文件，近邻不吃', () => {
+    expect(outOfScopePaths([`file:${BASE}/docs2/x.md`], WRITES, { reads: READS })).toEqual([
+      `file:${BASE}/docs2/x.md`,
+    ])
+    expect(outOfScopePaths([`file:${BASE}/docs/x.md`], WRITES, { reads: READS })).toEqual([])
+  })
+
+  it('没给 reads 保持老口径：只读路径照报', () => {
+    expect(outOfScopePaths([`file:${BASE}/src/store/reducer.ts`], WRITES)).toEqual([
+      `file:${BASE}/src/store/reducer.ts`,
+    ])
+  })
+})

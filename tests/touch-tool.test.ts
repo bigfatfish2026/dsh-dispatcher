@@ -35,7 +35,7 @@ function rows(file: string): Array<Record<string, unknown>> {
 }
 
 /** 一张已派出子会话的执行票：声明了 src/index.ts 与 tests 目录。 */
-function touchTicket(status?: 'done' | 'dropped'): string {
+function touchTicket(status?: 'done' | 'dropped', reads?: string[]): string {
   return logFile([
     {
       kind: 'published',
@@ -49,6 +49,7 @@ function touchTicket(status?: 'done' | 'dropped'): string {
       requestId: 'req-touch-1',
       intent: {
         writes: [`file:${SRC}`, `dir:${BASE}/tests`],
+        ...(reads?.length ? { reads } : {}),
         reversibility: 'auto',
       },
     },
@@ -162,6 +163,7 @@ describe('关票对账', () => {
     const { host, call } = mount(file, config)
     const agent = worker(host, 'worker-touch-1')
     await call('dispatch_touch', { paths }, { agent })
+    // 这条 helper 测的是关票对账：越界项要留到 close 那刀，交活这步别拦。
     await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })
     await host.call('dispatch_close', { id: 't-touch' })
     return { file, host }
@@ -184,6 +186,26 @@ describe('关票对账', () => {
     expect(text).toContain('收工时对不上账')
     expect(text).toContain('动了没声明的资源')
     expect(text).toContain(`file:${EVENTS}`)
+  })
+
+  it('已声明的只读路径不算越界：touch 同时报 reads 与未声明路径，只报未声明那条', async () => {
+    const file = touchTicket(undefined, [`file:${EVENTS}`, `dir:${BASE}/src/tickets`])
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    // SRC 声明为写，EVENTS 声明为读，desk.ts 落在声明为读的目录里，REDUCER 谁都没声明。
+    await call(
+      'dispatch_touch',
+      { paths: [SRC, EVENTS, `${BASE}/src/tickets/desk.ts`, REDUCER] },
+      { agent },
+    )
+    await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })
+    await host.call('dispatch_close', { id: 't-touch' })
+
+    const written = rows(file).at(-1)!
+    expect(written.kind).toBe('closed')
+    expect(written.outOfScope).toEqual([`file:${REDUCER}`])
+    expect(new TicketStore(file).get('t-touch')!.outOfScope).toEqual([`file:${REDUCER}`])
+    expect(host.agents[0]!.messages.join('\n')).not.toContain(`file:${EVENTS}`)
   })
 
   it('没越界不推：通知里没有对账那一句', async () => {
@@ -259,6 +281,7 @@ describe('越界 render', () => {
     const { host, call } = mount(file)
     const agent = worker(host, 'worker-touch-1')
     await call('dispatch_touch', { paths: [SRC, EVENTS] }, { agent })
+    // 越界要留到 close 才由票面显示，这条用例别让交活那一步先拦住。
     await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })
     await host.call('dispatch_close', { id: 't-touch' })
 
@@ -302,5 +325,169 @@ describe('越界 render', () => {
     const lines = intentPlanLines({ outOfScope })
     expect(lines[0]).toMatch(/等 \d+ 处$/)
     expect(lines[0]).not.toContain('/x/5.ts')
+  })
+})
+
+describe('交活软提醒', () => {
+  it('差集为空：正文原样落库，回执不带 outOfScope，render 只报一行', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    await call('dispatch_touch', { paths: [SRC] }, { agent })
+
+    const receipt = (await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })) as {
+      pendingReports: number
+      outOfScope?: string[]
+    }
+    expect(receipt).toMatchObject({ pendingReports: 1 })
+    expect(receipt.outOfScope).toBeUndefined()
+    const written = rows(file).at(-1)!
+    expect(written.kind).toBe('reported')
+    expect((written.report as { text: string }).text).toBe('干完了')
+
+    const text = render(host, 'dispatch_report', { id: 't-touch', text: '干完了' }, receipt)
+    expect(text).toContain('report recorded')
+    expect(text).not.toContain('未声明的改动')
+  })
+
+  it('有差集：报告照常落库，顶部拼出未声明的改动，票面一个字节不动', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    await call('dispatch_touch', { paths: [SRC, EVENTS] }, { agent })
+    const before = rows(file).length
+
+    const receipt = (await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })) as {
+      outOfScope?: string[]
+      pendingReports: number
+    }
+    expect(receipt.outOfScope).toEqual([`file:${EVENTS}`])
+    expect(receipt.pendingReports).toBe(1)
+    // 不拦交活：日志多了一条 reported，正文是「头部 + 分隔线 + 原正文」。
+    expect(rows(file)).toHaveLength(before + 1)
+    const written = rows(file).at(-1)!
+    expect(written.kind).toBe('reported')
+    const body = (written.report as { text: string }).text
+    expect(body.startsWith('未声明的改动：')).toBe(true)
+    expect(body).toContain(EVENTS)
+    expect(body.endsWith('干完了')).toBe(true)
+    // 头部说清 send 里追加的允许范围不算声明，也指出去哪儿补。
+    expect(body).toContain('send')
+    expect(body).toContain('paths')
+
+    // 票面不动：状态还是 running，intent / touched / outOfScope 都没被这次提醒改。
+    const snapshot = new TicketStore(file).get('t-touch')!
+    expect(snapshot.status).toBe('running')
+    expect(snapshot.intent?.writes).toEqual([`file:${SRC}`, `dir:${BASE}/tests`])
+    expect(snapshot.touched).toEqual([`file:${SRC}`, `file:${EVENTS}`])
+    expect(snapshot.outOfScope).toBeUndefined()
+
+    // 模型看到的回执：清单 + 补声明用法。
+    const text = render(host, 'dispatch_report', { id: 't-touch', text: '干完了' }, receipt)
+    expect(text).toContain('未声明的改动')
+    expect(text).toContain(EVENTS)
+    expect(text).toContain('paths')
+  })
+
+  it('多文件：差集全报，头部最多列 5 个、行尾写等 N 处', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    // 短路径才放得下 5 个：截断规则先砍清单、再保行尾「等 N 处」。
+    const extra = Array.from({ length: 7 }, (_, index) => `/x/${index}.ts`)
+    await call('dispatch_touch', { paths: [SRC, ...extra] }, { agent })
+
+    const receipt = (await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })) as {
+      outOfScope?: string[]
+    }
+    expect(receipt.outOfScope).toEqual(extra.map((path) => `file:${path}`))
+
+    const body = (rows(file).at(-1)!.report as { text: string }).text
+    for (const index of [0, 1, 2, 3, 4]) expect(body).toContain(`/x/${index}.ts`)
+    expect(body).not.toContain('/x/5.ts')
+    expect(body).toContain('等 2 处')
+  })
+
+  it('只读路径不误报：声明过的 reads 与落在 reads 目录里的 touched 都不进差集', async () => {
+    const file = touchTicket(undefined, [`file:${EVENTS}`, `dir:${BASE}/src/tickets`])
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    // SRC 声明为写；EVENTS 声明为读；desk.ts 落在声明为读的目录里。
+    await call(
+      'dispatch_touch',
+      { paths: [SRC, EVENTS, `${BASE}/src/tickets/desk.ts`] },
+      { agent },
+    )
+
+    const receipt = (await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })) as {
+      outOfScope?: string[]
+    }
+    expect(receipt.outOfScope).toBeUndefined()
+    expect((rows(file).at(-1)!.report as { text: string }).text).toBe('干完了')
+  })
+
+  it('带 paths 补声明：差集当场消掉，顶部不拼头部，关票也不再报', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    await call('dispatch_touch', { paths: [SRC, EVENTS] }, { agent })
+
+    // 同一路径重复提交（裸路径与 file: 各一次）只算一条。
+    const receipt = (await call(
+      'dispatch_report',
+      { id: 't-touch', text: '干完了', paths: [EVENTS, `file:${EVENTS}`] },
+      { agent },
+    )) as { outOfScope?: string[]; pendingReports: number }
+    expect(receipt.outOfScope).toBeUndefined()
+    expect(receipt.pendingReports).toBe(1)
+    expect((rows(file).at(-1)!.report as { text: string }).text).toBe('干完了')
+
+    const snapshot = new TicketStore(file).get('t-touch')!
+    expect(snapshot.intent?.writes).toEqual([`file:${SRC}`, `dir:${BASE}/tests`, `file:${EVENTS}`])
+    expect(snapshot.touched).toEqual([`file:${SRC}`, `file:${EVENTS}`])
+
+    await host.call('dispatch_close', { id: 't-touch' })
+    expect(rows(file).at(-1)!).not.toHaveProperty('outOfScope')
+    expect(new TicketStore(file).get('t-touch')!.outOfScope).toBeUndefined()
+  })
+
+  it('提醒不等于记账：交活只写报告不推送，不补声明时关票那刀照旧记越界并推一句', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    await call('dispatch_touch', { paths: [SRC, EVENTS] }, { agent })
+    await call('dispatch_report', { id: 't-touch', text: '干完了' }, { agent })
+
+    // 交活这一步不推越界通知：同一条路径只在关票时记一次最终账。
+    expect(host.agents[0]!.messages.join('\n')).not.toContain('收工时对不上账')
+    expect(new TicketStore(file).get('t-touch')!.outOfScope).toBeUndefined()
+
+    await host.call('dispatch_close', { id: 't-touch' })
+    expect(rows(file).at(-1)!.outOfScope).toEqual([`file:${EVENTS}`])
+    expect(host.agents[0]!.messages.join('\n')).toContain('收工时对不上账')
+  })
+
+  it('补声明只收路径：svc:/port: 这类不是改动面，当场拒掉，不往 intent.writes 里塞', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+
+    await expect(
+      call('dispatch_report', { id: 't-touch', text: '干完了', paths: ['svc:nginx'] }, { agent }),
+    ).rejects.toThrow(/只收文件路径/)
+    expect(new TicketStore(file).get('t-touch')!.intent?.writes).toEqual([`file:${SRC}`, `dir:${BASE}/tests`])
+    expect(new TicketStore(file).get('t-touch')!.reports).toHaveLength(0)
+  })
+
+  it('补声明一次最多 50 条：超了报错让人分批，不静默截断', async () => {
+    const file = touchTicket()
+    const { host, call } = mount(file)
+    const agent = worker(host, 'worker-touch-1')
+    const many = Array.from({ length: 51 }, (_, index) => `${BASE}/src/gen/${index}.ts`)
+
+    await expect(
+      call('dispatch_report', { id: 't-touch', text: '干完了', paths: many }, { agent }),
+    ).rejects.toThrow(/最多补 50 条/)
+    expect(new TicketStore(file).get('t-touch')!.reports).toHaveLength(0)
   })
 })

@@ -160,6 +160,47 @@ export function displayPath(uri: string): string {
   return uri.replace(/^(?:file|dir|git|dev):/, '')
 }
 
+/**
+ * 一条「标签 + 路径清单」：最多列 5 个，多了只报还剩几处。
+ *
+ * 越界行和交活软提醒的头部共用这一份：两边都是「一串路径给人扫一眼」，截断规则
+ * 只该有一处，否则一边列 5 个、另一边列 7 个，看的人还得自己对齐口径。
+ */
+export function pathListLine(label: string, paths: readonly string[]): string {
+  const total = paths.length
+  const shown = paths.slice(0, 5).map(displayPath)
+  // 路径太长时宁可少列两个，也要把「等 N 处」留在行尾：截断砍掉的恰好是它。
+  let line = ''
+  for (let count = shown.length; count >= 1; count -= 1) {
+    const rest = total - count
+    const candidate = `${label}${shown.slice(0, count).join('、')}${rest > 0 ? ` 等 ${rest} 处` : ''}`
+    line = candidate
+    if (truncateColumns(candidate, 200) === candidate) break
+    line = truncateColumns(candidate, 200)
+  }
+  return line
+}
+
+/**
+ * 交活软提醒的报告头部：差集非空时拼在报告正文最前面，给主会话看。
+ *
+ * `dispatch_report` 这一刀只提醒、不拦交活：报告照常落库，票面 status / intent /
+ * touched 一个字节不动。判定口径与关票对账共用 `outOfScopePaths`（一样减
+ * `intent.reads` 与合理产物白名单），区别只在去向——这里只进报告正文，不写票面
+ * `outOfScope`、不推通知；关票才是唯一的记账点。小鱼按提醒补了声明（declare 或
+ * 下次 report 带 `paths`），关票时这条自然消失；不补，关票才记一次最终账。
+ *
+ * 主会话在 `send` 里追加的允许范围只进排队消息，不进 `intent.writes`，所以那条
+ * 路不会让这条提醒消失——要消掉只能真去改声明。
+ */
+export function undeclaredReportHeader(paths: readonly string[]): string {
+  return [
+    pathListLine('未声明的改动：', paths),
+    '    这几处在本票 touched 里，但 intent.writes 没写；主会话 send 里追加的允许范围不算声明。',
+    '    补法：dispatch_declare 的 intent.writes，或再交一次 dispatch_report 带 paths；不补，关票时仍按越界记一次。',
+  ].join('\n')
+}
+
 export function intentPlanLines(view: {
   intent?: IntentSpec
   plan?: TicketPlan
@@ -203,18 +244,7 @@ export function intentPlanLines(view: {
   }
   // 越界对账：最多列 5 个，多的只报还剩几处；没有越界就一个字都不加。
   if (view.outOfScope?.length) {
-    const total = view.outOfScope.length
-    const paths = view.outOfScope.slice(0, 5).map(displayPath)
-    // 路径太长时宁可少列两个，也要把「等 N 处」留在行尾：截断砍掉的恰好是它。
-    let line = ''
-    for (let count = paths.length; count >= 1; count -= 1) {
-      const rest = total - count
-      const candidate = `越界：${paths.slice(0, count).join('、')}${rest > 0 ? ` 等 ${rest} 处` : ''}`
-      line = candidate
-      if (truncateColumns(candidate, 200) === candidate) break
-      line = truncateColumns(candidate, 200)
-    }
-    lines.push(`    ${line}`)
+    lines.push(`    ${pathListLine('越界：', view.outOfScope)}`)
   }
   return lines
 }

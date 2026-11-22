@@ -20,6 +20,7 @@ import {
   intentPlanLines,
   intentSpecOf,
   planSpecOf,
+  pathListLine,
   requestIdOf,
   ticketLine,
   statusMark,
@@ -27,6 +28,46 @@ import {
 } from '../tools-shared'
 
 const STATUSES = TICKET_STATUSES
+
+const RESOURCE_PREFIX = /^(?:file|dir|git|svc|port|dev):/i
+const PATH_PREFIX = /^(?:file|dir|git|dev):/i
+
+/**
+ * 票工具收路径：裸路径补 `file:` 前缀，已是六种资源前缀的原样留下。
+ *
+ * `normalizeResources` 只认前缀，而这一层最靠近「人写路径」，别让子会话为了报
+ * 个文件先学资源串语法。`dispatch_touch` 与 `dispatch_report` 的 paths 共用它。
+ *
+ * `pathOnly` 给 dispatch_report 的补声明用：那一栏只收文件路径，`svc:` / `port:`
+ * 不是改动面，直接拒掉，别补成 `file:svc:...` 混进 intent.writes。`max` 是条数
+ * 上限，超了报错让人分批，不静默截断。
+ */
+function pathResources(raw: unknown, options: { pathOnly?: boolean; max?: number } = {}): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const trimmed = item.trim()
+    if (!trimmed) continue
+    const known = RESOURCE_PREFIX.test(trimmed)
+    if (options.pathOnly && known && !PATH_PREFIX.test(trimmed)) {
+      throw new Error(
+        `dispatch_report 的 paths 只收文件路径，${trimmed} 不是；服务、端口这类写进 intent.writes 要走 dispatch_declare`,
+      )
+    }
+    const uri = known ? trimmed : `file:${trimmed}`
+    if (seen.has(uri)) continue
+    seen.add(uri)
+    out.push(uri)
+  }
+  if (options.max !== undefined && out.length > options.max) {
+    throw new Error(
+      `dispatch_report 一次最多补 ${options.max} 条路径（这次 ${out.length} 条），请分批重交`,
+    )
+  }
+  return out
+}
 
 export interface ToolsInstallerDeps {
   config: Config
@@ -529,10 +570,16 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
   const reportTool = defineTool({
     name: TOOL_NAMES.report,
     description:
-      'Hand a report back on the ticket you are working. Append-only: the ticket state stays where it is, the router decides. Call it once when this round is done, or to state a blocker and stop.',
+      'Hand a report back on the ticket you are working. Append-only: the ticket state stays where it is, the router decides. Call it once when this round is done, or to state a blocker and stop. The report is always recorded: if the paths this round actually touched are not declared in intent, the list is printed at the top of the report and echoed back — pass them again in paths (they are added to intent.writes) or declare them with dispatch_declare. A path allowed only in a send message is not a declaration.',
     parameters: {
       id: { type: 'string', required: true, description: 'Ticket id you were given.' },
       text: { type: 'string', required: true, description: 'What you did, found, or are blocked on.' },
+      paths: {
+        type: 'array',
+        description:
+          'Files you actually wrote or edited this round that the ticket intent did not declare. Absolute paths (a file: prefix is also accepted); duplicates are merged; at most 50 per call. They are added to intent.writes before the report is recorded. Optional.',
+        items: { type: 'string' },
+      },
     },
     output: {
       schema: {
@@ -542,15 +589,35 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
           id: { type: 'string' },
           epoch: { type: 'number' },
           pendingReports: { type: 'number' },
+          outOfScope: { type: 'array', items: { type: 'string' } },
         },
       },
-      render: (_args, value) => [
-        { type: 'text', text: `report recorded on ticket ${value.id} (round ${value.epoch})` },
-      ],
+      render: (_args, value) => {
+        // 报告已经落库；差集非空时把清单和补声明用法一并给出去。模型看到的就是
+        // 这段文本，光给一个 outOfScope 字段它不知道下一步干什么。
+        const head = `report recorded on ticket ${value.id} (round ${value.epoch})`
+        if (!value.outOfScope?.length) return [{ type: 'text', text: head }]
+        return [
+          { type: 'text', text: head },
+          { type: 'text', text: pathListLine('未声明的改动：', value.outOfScope) },
+          {
+            type: 'text',
+            text: '加了声明就不会出现在关票对账里：dispatch_declare 的 intent.writes，或再交一次 dispatch_report 带 paths。',
+          },
+        ]
+      },
     },
     async execute(args, exec) {
-      const receipt = await desk.report(args.id, args.text, 'worker', callerActorOf(exec))
-      return { id: receipt.id, epoch: receipt.epoch, pendingReports: receipt.pendingReports }
+      const paths = pathResources((args as { paths?: unknown }).paths, { pathOnly: true, max: 50 })
+      const receipt = await desk.report(args.id, args.text, 'worker', callerActorOf(exec), {
+        ...(paths.length > 0 ? { paths } : {}),
+      })
+      return {
+        id: receipt.id,
+        epoch: receipt.epoch,
+        pendingReports: receipt.pendingReports,
+        ...(receipt.outOfScope?.length ? { outOfScope: receipt.outOfScope } : {}),
+      }
     },
   })
 
@@ -739,16 +806,7 @@ export function installTools(ctx: Context, deps: ToolsInstallerDeps): WorkerTick
       ],
     },
     async execute(args, exec) {
-      const raw = (args as { paths?: unknown }).paths
-      const listed = Array.isArray(raw)
-        ? raw.filter((path): path is string => typeof path === 'string' && path.trim() !== '')
-        : []
-      // 裸路径补 file: 前缀：normalizeResources 只认六种前缀，这里是最靠近
-      // 「人写路径」的那一层，别让子会话为了报个文件先学资源串语法。
-      const paths = listed.map((path) => {
-        const trimmed = path.trim()
-        return /^(?:file|dir|git|svc|port|dev):/i.test(trimmed) ? trimmed : `file:${trimmed}`
-      })
+      const paths = pathResources((args as { paths?: unknown }).paths)
       const receipt = await desk.touch(actorOf(exec).sessionId, paths)
       return { id: receipt.id, paths: receipt.paths, total: receipt.total }
     },
