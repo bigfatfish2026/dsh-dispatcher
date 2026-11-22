@@ -2,6 +2,26 @@
 
 版本历史。条目只写改了什么，不记内部工单号与日期。
 
+## Unreleased
+
+### Added
+
+命令判定的第三层接入本机 gemini-decision 桥（方案 D2）：新增配置段 `geminiDecision`，开关 `geminiDecision.enabled` 默认 `false`，关着时一次请求都不发、结论与接入前逐字一致。打开后只在 `src/tickets/classify-command.ts` 的模型失败分支问一次桥（强信号和模型正常结论都不经过它）：桥判 yes 且 `confidence ≥ 0.85` 才替代关键词表，否则仍走 `commandKeywords`；单次请求超时 `2000ms`，超时 / 400 / 429 / 5xx / 坏 JSON / 形状不合法一律立刻回原分支，不重试。桥给的答案在插件侧做六项校验（2xx、answers 形状、choice 属于候选、probabilities 键集合与 criteria 全等、Σp 落在 1±1e-6、confidence 与 p[choice] 一致）。
+
+交活环节加一道软提醒：`dispatch_report` 落库前拿票上的 `touched` 跟声明的 `intent.writes` / `intent.reads` 对一遍（`outOfScopePaths`，跟关票对账同一个口径，含合理产物白名单），差集非空时把「未声明的改动」几行拼在报告正文最前面，工具回执里也给同一份清单和补法（`dispatch_declare` 的 `intent.writes`，或再交一次带 `paths`，最多 50 条）。这一步只提醒、不拦交活：报告照常落库，票面 status / intent / touched 与 `outOfScope` 一个字节都不动，也不推通知——关票仍是唯一的记账与推送点，补了声明关票重算自然干净，不补才在关票时记一次最终账，同一张票不会因为交活多一条「收工时对不上账」。主会话在 `send` 里追加的允许范围只进排队消息、不进 `intent.writes`，所以那条路消不掉这条提醒，要改声明才算数。
+
+### Changed
+
+档位工具面改从 loader 的结构化 config 读，不再解析 YAML 文本。新增 `src/tickets/preset-catalog.ts`：扫 loader entry 的 `options.config`（`id` / `name` / `description` / `order` / `plugins`），`plugins[]` 里 `dsh-preset-toolset` 那行的 `allow` / `deny` 直接是字符串数组，多行按 allow 取交集、deny 取并集、再从交集里扣掉 deny。早先读 `registry.readDocument(id)` 拿 YAML 文本再正则找那行的路拆掉了——文本是渲染结果，补丁、缩进或表达式任何一处变样正则就悄悄算错，代价是放行一个干不了活的档。`disabled` 的 entry 跳过；同档名后出现的覆盖前一条并 warn；缺 `id`、`plugins` 不是数组、`allow` / `deny` 写坏（不是字符串数组、空数组、两样都没给）一律不猜：工具面回 `undefined`（不分档，不限制工具、全部工具可见）并 warn 一行。档位与工具面按档缓存，`tools/change` / `loader/config-update` 到了就重扫。
+
+判据拼装也收在这里：config 新增 `criteria`（`labels` / `required` / `silent` / `expectedPresets`）。`labels` 把工具名 glob（只认 `*`，整名锚定、区分大小写）换成能力标签，数组顺序即输出顺序；`required` 是每档都该有的基线名字，缺了照算、由 `onMissing` 决定打不打 warn；`silent` 是不出标签的名字；`expectedPresets` 只当档数告警阈值，不补空档。工具名到标签的对应只在配置里留一份，代码不存第二份名单。新增 `composeCriteria` / `labelsFromAllow` 两个纯函数拼出「promptSuffix + 工具面（由 allow 生成）：有 …；无 …。」，空集合不占位。五种 warn 都以 `crit_` 开头、同一行只打一次：`crit_labels_missing`（没配 labels）、`crit_unknown_tool`（工具名没命中任何标签，也不是 required / silent）、`crit_missing_required`（`required.names` 里缺的名字）、`crit_presets_short`（扫到的档数少于 `expectedPresets`）、`crit_allow_empty`（只给了 deny，或 allow 被 deny 扣空）。取不到档位（目录为空、档没声明、toolset 读不出）一律降级为不分档并 warn，不静默。`PresetCriteriaSnapshot` 类型也收在这里定义一份，`publish.ts` 按 `import type` 引用，不再两边各留一份。
+
+### Fixed
+
+收工对账把已声明的只读路径误报成越界：`dispatch_touch` 只收一个扁平 `paths`，这一轮读过的文件也一起报上来，而关票时只拿 `touched` 减 `intent.writes`，于是只读调研票收工时整轮读过的源码都被记成「动了没声明的资源」（一张只读调研票一次报了 9 处）。`outOfScopePaths` 现在同时减掉 `intent.reads`，与 writes 共用同一套归一化和目录边界判定，只报「既不在 writes 也不在 reads 里」的路径；没声明 reads 的老票口径不变，真写了没声明过的文件仍然照报。
+
+Tests: 全量 `npm test` 81 个文件 922 条全绿，`tsc --noEmit` 干净，`npm run build` 通过。
+
 ## 2.3.0
 
 ### Added
