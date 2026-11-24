@@ -7,6 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config'
 import { isWorkerSession, noWaitReason } from '../no-wait'
+import { hasComposedPreset } from '../preset-face'
 import type { SweepFacts } from '../tickets/sweep-facts'
 import type { MainSessionFilter } from '../tickets/main-session'
 import { composeWorkerPrompt, presetPromptSuffix } from '../tickets/worker-prompt'
@@ -45,8 +46,12 @@ export function installPromptGuard(ctx: Context, config: Config, deps: PromptGua
     let announced = false
     ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const assembled = await next()
+      const agent = (context as { agent?: PromptAgent })?.agent
       const header = (context as { agent?: { session?: { header?: PromptHeader } } })?.agent?.session?.header
       if (header?.origin === 'subagent') return assembled
+      // 自带档的会话（ego helper 等）不是主会话：它拿到的是档里那套工具面，
+      // 主会话的派活话术对它自相矛盾。判据与 installRestrict 共用同一个。
+      if (hasComposedPreset(ctx, agent)) return assembled
       if (!announced) {
         announced = true
         deps.info(`[dispatcher] hand-off policy injected into the main session prompt (${handoffText.length} chars)`)

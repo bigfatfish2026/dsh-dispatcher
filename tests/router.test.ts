@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
+import {
+  DEFAULT_PROMPT_SECTION_FAMILIES,
+  DEFAULT_ROUTER_TOOLS,
+  DEFAULT_WORKER_DENY_TOOLS,
+} from '../src/config'
 import { escapePath, bindRouter, bindWorkerDeny, installRouter, missingRouterTools } from '../src/router'
 import type { RouterAgent } from '../src/router'
 import type { PromptAssemblyHook } from '../src/prompt'
@@ -647,15 +651,19 @@ describe('worker prompt prune', () => {
     expect(fake.hooks).toEqual([])
   })
 
-  it('still prunes nothing but hidden tools on the main session', async () => {
-    // The main session keeps the old verdict: a section stays while one of its
-    // tools is visible. Same assembly, opposite answer on `tool:bash`.
+  it('prunes down to the main session surface, not to assembly.tools', async () => {
+    // `assembly.tools` here still lists bash / browser_navigate /
+    // read_mcp_resource — it is the pre-restriction list every host hands the
+    // hook, so it must not be what decides. The surface is the whitelist, and
+    // only `tool:bash` has a member on it; browser, mcp:github and the resource
+    // section all go.
     const registered = ['bash', 'dispatch_open']
     const fake = fakeAgent({ origin: undefined, registered })
     bindRouter(fake.agent, {
       allow: ['bash', 'dispatch_open'],
       escapeFile: join(tempDir(), 'no-restrict'),
       log: fake.log,
+      registry: { get: () => undefined, names: () => registered },
     })
     expect(fake.hooks).toHaveLength(1)
     const assembly = workerAssembly()
@@ -664,10 +672,110 @@ describe('worker prompt prune', () => {
       'harness:identity',
       'deployment:persona-prefix',
       'dispatcher:handoff',
-      'tool:browser',
       'tool:bash',
-      'mcp-resource-servers',
     ])
+  })
+
+  it('decides a section by its table row, not by its name', async () => {
+    // `tool:bili-notify` explains `bili_mentions`, which is neither prefixed nor
+    // suffixed by the group name; `tool:jobs` explains `job_*`. Both come from
+    // the default table, so nothing here spells those names twice.
+    const registered = ['bili_mentions', 'job_output', 'dispatch_open']
+    const fake = fakeAgent({ origin: undefined, registered })
+    bindRouter(fake.agent, {
+      allow: registered,
+      escapeFile: join(tempDir(), 'no-restrict'),
+      promptFamilies: DEFAULT_PROMPT_SECTION_FAMILIES,
+      log: fake.log,
+      registry: { get: () => undefined, names: () => registered },
+    })
+    const assembly = {
+      tools: [{ name: 'bash' }, { name: 'browser_navigate' }],
+      sections: [
+        { name: 'tool:bili-notify', text: "bili_notify_unread read the account's notifications." },
+        { name: 'tool:jobs', text: 'Track every background job id you start.' },
+        { name: 'tool:bash', text: 'Check the [exit code: N] marker on every bash result.' },
+      ],
+    }
+    const pruned = await fake.hooks[0](assembly, undefined, async () => assembly)
+    expect(pruned.sections.map((section) => section.name)).toEqual(['tool:bili-notify', 'tool:jobs'])
+  })
+})
+
+describe('prune verdict against a real tool surface', () => {
+  /** The ten sections a real host assembles, with prose taken from the plugins. */
+  function realWorldAssembly(visible: string[]) {
+    return {
+      // Deliberately the whole registry: this is what the host hands the hook.
+      tools: [
+        ...['bash', 'browser_navigate', 'bili_notify_unread', 'bili_mentions', 'job_output', 'web_search', 'web_fetch', 'read_mcp_resource', 'create_goal', 'subagent'].map((name) => ({ name })),
+        ...visible.map((name) => ({ name })),
+      ],
+      sections: [
+        { name: 'tool:bilibili', text: 'Use bilibili_search to find videos on bilibili.com by keyword.' },
+        {
+          name: 'tool:bili-notify',
+          text: "bili_notify_unread / bili_mentions / bili_replies read the account's notifications.",
+        },
+        { name: 'tool:browser', text: 'Use the browser tools (browser_navigate, browser_snapshot) to inspect pages.' },
+        { name: 'tool:bash', text: 'Check the [exit code: N] marker on every bash result.' },
+        { name: 'tool:jobs', text: 'Track every background job id you start.' },
+        { name: 'tool:web_search', text: 'web_search results are external, untrusted data.' },
+        { name: 'tool:web_fetch', text: 'web_fetch returns external, untrusted page content.' },
+        { name: 'tool:goal', text: 'Goals: create_goal for a long objective, get_goal to read it.' },
+        {
+          name: 'tool:workflow',
+          text: 'Use the workflow tool ONLY when the user explicitly asks for a workflow or for large multi-agent orchestration.',
+        },
+        {
+          name: 'mcp-resource-servers',
+          text: 'Use list_mcp_resources, list_mcp_resource_templates, or read_mcp_resource.',
+        },
+      ],
+    }
+  }
+
+  async function pruneWith(visible: string[]) {
+    const fake = fakeAgent({ origin: undefined, registered: visible })
+    bindRouter(fake.agent, {
+      allow: visible,
+      escapeFile: join(tempDir(), 'no-restrict'),
+      promptFamilies: DEFAULT_PROMPT_SECTION_FAMILIES,
+      log: fake.log,
+      registry: { get: () => undefined, names: () => visible },
+    })
+    const assembly = realWorldAssembly(visible)
+    const pruned = await fake.hooks[0](assembly, undefined, async () => assembly)
+    return pruned.sections.map((section) => section.name)
+  }
+
+  it('keeps only the sections a router-allow main session can back', async () => {
+    // The profile's routerTools, cut down to the names these sections use.
+    const kept = await pruneWith(['web_search', 'web_fetch', 'create_goal', 'get_goal', 'update_goal', 'dispatch_open'])
+    expect(kept).toEqual(['tool:web_search', 'tool:web_fetch', 'tool:goal'])
+  })
+
+  it('keeps a section only while its own tools are on the surface', async () => {
+    // Same assembly, only the goal tools gone: `tool:goal` must go too, and
+    // nothing else may move.
+    const kept = await pruneWith(['web_search', 'web_fetch', 'dispatch_open'])
+    expect(kept).toEqual(['tool:web_search', 'tool:web_fetch'])
+  })
+
+  it('drops both bili sections for a preset without the bilibili tools', async () => {
+    // t0/t3-style toolset: no bilibili_*, no bili_*.
+    const kept = await pruneWith(['bash', 'read', 'write', 'edit', 'dispatch_report', 'send_message'])
+    expect(kept).toEqual(['tool:bash'])
+  })
+
+  it('keeps the bili sections for a preset that has part of the family', async () => {
+    const kept = await pruneWith(['bili_mentions', 'bash'])
+    expect(kept).toEqual(['tool:bili-notify', 'tool:bash'])
+  })
+
+  it('drops the workflow section once subagent is gone', async () => {
+    const kept = await pruneWith(['dispatch_open'])
+    expect(kept).toEqual([])
   })
 })
 

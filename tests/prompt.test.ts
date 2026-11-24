@@ -352,7 +352,7 @@ describe('installPromptFilter', () => {
 
   it('prunes the assembled prompt through the scoped hook', async () => {
     const { scope, hooks } = fakeScope()
-    expect(installPromptFilter(scope, { allow: DEFAULT_ROUTER_TOOLS })).toBe(true)
+    expect(installPromptFilter(scope, { allow: DEFAULT_ROUTER_TOOLS, surface: () => VISIBLE })).toBe(true)
     expect(hooks).toHaveLength(1)
     const assembly = mainSessionAssembly()
     const out = await hooks[0](assembly, {}, () => Promise.resolve(assembly))
@@ -364,20 +364,37 @@ describe('installPromptFilter', () => {
     expect(names(out)).toContain('dispatcher:handoff')
   })
 
-  it('says so, once, which sections it dropped', async () => {
+  it('says so on every assembly, so a quiet pass is visible as a quiet pass', async () => {
     const { scope, hooks, messages, log } = fakeScope()
-    installPromptFilter(scope, { allow: DEFAULT_ROUTER_TOOLS, log })
+    installPromptFilter(scope, { allow: DEFAULT_ROUTER_TOOLS, surface: () => VISIBLE, log })
+    const assembly = mainSessionAssembly()
+    await hooks[0](assembly, {}, () => Promise.resolve(assembly))
+    await hooks[0](assembly, {}, () => Promise.resolve(assembly))
+    const lines = messages.filter((line) => line.includes('pruned'))
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('tool:browser')
+    expect(lines[0]).toMatch(/^\[dispatcher\] pruned \d+ /)
+  })
+
+  it('falls back to once when logEach is turned off', async () => {
+    const { scope, hooks, messages, log } = fakeScope()
+    installPromptFilter(scope, {
+      allow: DEFAULT_ROUTER_TOOLS,
+      surface: () => VISIBLE,
+      logEach: false,
+      log,
+    })
     const assembly = mainSessionAssembly()
     await hooks[0](assembly, {}, () => Promise.resolve(assembly))
     await hooks[0](assembly, {}, () => Promise.resolve(assembly))
     expect(messages.filter((line) => line.includes('pruned'))).toHaveLength(1)
-    expect(messages[0]).toContain('tool:browser')
   })
 
   it('reports a host without a scoped hook instead of pretending', () => {
     const { scope, messages } = fakeScope({ scoped: false })
     const installed = installPromptFilter(scope, {
       allow: DEFAULT_ROUTER_TOOLS,
+      surface: () => VISIBLE,
       log: (message) => void messages.push(message),
     })
     expect(installed).toBe(false)
@@ -389,7 +406,7 @@ describe('installPromptFilter', () => {
     // worker's tool set is the preset's business and the prompt can only be
     // wrong about it. Persona, hand-off rules and policy stay.
     const { scope, hooks } = fakeScope()
-    installPromptFilter(scope, { allow: [], dropAllToolSections: true })
+    installPromptFilter(scope, { allow: [], surface: () => new Set(), dropAllToolSections: true })
     const assembly: PromptAssembly = {
       tools: [{ name: 'bash' }, { name: 'browser_navigate' }],
       sections: [

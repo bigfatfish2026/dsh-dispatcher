@@ -9,21 +9,36 @@
  * hidden, and nothing else.
  *
  * A section is judged by the family of tool names it stands for, not by the
- * words its prose happens to contain. `tool:<group>` covers the group itself
- * plus every name that starts with `group_` or ends with `_group`; that is what
- * makes `tool:browser` the section for `browser_navigate` and `tool:goal` the
- * section for `create_goal` / `get_goal` / `update_goal`, without making
- * `browser` and `goal` themselves registered tools. MCP guidance has its own
- * two shapes — `mcp:<server>` for one server's tools, all named
- * `mcp__<server>__*`, and the single `mcp-resource-servers` section for the
- * three shared resource tools — and is judged the same way. Anything that is
- * not one of those sections is somebody else's prose: persona, plan policy, the
- * hand-off rules this plugin appends, and is never touched.
+ * words its prose happens to contain. The table in `src/config.ts`
+ * (`promptSectionFamilies`) says, per section name, which tools that section
+ * explains — because a section name is not always a tool prefix or suffix:
+ * `tool:bili-notify` also explains `bili_mentions`, `tool:jobs` explains
+ * `job_output`, and `tool:workflow` explains `subagent`. A `tool:<group>`
+ * section the table does not name falls back to the group itself plus every
+ * name that starts with `group_` or ends with `_group`; that is what makes
+ * `tool:browser` the section for `browser_navigate`, without making `browser`
+ * itself a registered tool. MCP guidance has its own shapes —
+ * `mcp:<server>` for one server's tools, all named `mcp__<server>__*`, and the
+ * single `mcp-resource-servers` section for the three shared resource tools —
+ * and is judged the same way. Anything that is not one of those sections is
+ * somebody else's prose: persona, plan policy, the hand-off rules this plugin
+ * appends, and is never touched.
  *
- * The prose is only a fallback: a section survives if a name inside it is still
- * visible, but a bare word counts only when the section names no snake_case
- * tool at all. That is what stopped `tool:browser` from being kept alive by the
- * word "read" in "After navigating, read browser_snapshot before deciding".
+ * What "still has a tool" means is the session's **tool surface**, not
+ * `assembly.tools`: that list is every schema the host collected before any
+ * restriction ran (dsh-system-prompt assemble, `orderTools(collected, …)`),
+ * and a restriction only filters what a scope *inherits* — a scope's own
+ * registrations always stay. Asking `assembly.tools` therefore keeps every
+ * section whose tools are registered anywhere, which is all of them. The
+ * caller computes the surface (`visibleSurface` in `src/router.ts`): each
+ * globally registered name, resolved through `tools.get(name, agentCtx)` so
+ * this scope's restrictions answer it, plus that scope's own names.
+ *
+ * The prose is only a fallback: a section survives if a name inside it is on
+ * the surface, but a bare word counts only when the section names no
+ * snake_case tool at all. That is what stopped `tool:browser` from being kept
+ * alive by the word "read" in "After navigating, read browser_snapshot before
+ * deciding".
  */
 
 /** The slice of one assembled prompt section this module needs. */
@@ -56,6 +71,19 @@ export type PromptAssemblyHook = (
 const TOOL_SECTION_PREFIX = 'tool:'
 
 /**
+ * One row of the section-name → tool-family table.
+ *
+ * Imported as a type only: the table's shape lives in `src/config.ts`, the
+ * rules that read it live here, so neither file has to import the other.
+ */
+export interface PromptSectionFamily {
+  /** The section name exactly as `ctx.systemPrompt.section()` registered it. */
+  section: string
+  /** Tool names it explains: exact, `prefix*`, `*suffix`, or `*infix*`. */
+  tools: string[]
+}
+
+/**
  * The MCP naming: the client registers one section per server as
  * `mcp:<server>` and names that server's tools `mcp__<server>__<rawName>`, while
  * the resource plugin owns one shared section for the three tools it registers
@@ -64,6 +92,11 @@ const TOOL_SECTION_PREFIX = 'tool:'
 const MCP_SERVER_PREFIX = 'mcp:'
 const MCP_TOOL_PREFIX = 'mcp__'
 const MCP_RESOURCE_SECTION = 'mcp-resource-servers'
+/**
+ * The three shared resource tools, used only when a table does not name the
+ * `mcp-resource-servers` section: without that row the section would fall back
+ * to the `mcp_resource_servers` group, which matches nothing.
+ */
 const MCP_RESOURCE_TOOLS: ReadonlySet<string> = new Set([
   'list_mcp_resources',
   'list_mcp_resource_templates',
@@ -80,6 +113,22 @@ const WORD = /[A-Za-z][A-Za-z0-9]*/g
 
 /** The test a section's tools have to pass to keep that section in the prompt. */
 type ToolFamily = (toolName: string) => boolean
+
+/**
+ * Whether one configured pattern covers a tool name.
+ *
+ * One `*` is allowed and may sit anywhere — `browser*`, `*_goal`, `*mcp_resource*`
+ * — because that is all the table needs to say the three shapes plugin authors
+ * use (prefix, suffix, infix). Without a `*` the name has to match whole.
+ */
+export function matchesToolPattern(tool: string, pattern: string): boolean {
+  const star = pattern.indexOf('*')
+  if (star < 0) return tool === pattern
+  const head = pattern.slice(0, star)
+  const tail = pattern.slice(star + 1)
+  if (!tool.startsWith(head) || tool.length < head.length + tail.length) return false
+  return tool.endsWith(tail)
+}
 
 /**
  * The tool group a section explains, or `undefined` for any other section.
@@ -102,8 +151,21 @@ export function toolSectionGroup(name: string): string | undefined {
  * group on either end of the name — `browser_navigate` prefixes it,
  * `create_goal` suffixes it — and the exact name is kept so a section named
  * after a real tool (`tool:bash`, `tool:present`) still matches it.
+ *
+ * `families` is the configured table and is consulted first: it is the only
+ * way to say that `tool:bili-notify` also explains `bili_mentions`, or that
+ * `tool:workflow` explains `subagent`. Leave it out and every `tool:` section
+ * is judged by its group alone, which is what the tests of the old rule pin.
  */
-export function sectionToolFamily(name: string): ToolFamily | undefined {
+export function sectionToolFamily(
+  name: string,
+  families: readonly PromptSectionFamily[] = [],
+): ToolFamily | undefined {
+  const row = families.find((entry) => entry.section === name)
+  if (row !== undefined) {
+    if (row.tools.length === 0) return undefined
+    return (tool) => row.tools.some((pattern) => matchesToolPattern(tool, pattern))
+  }
   if (name === MCP_RESOURCE_SECTION) {
     return (tool) => MCP_RESOURCE_TOOLS.has(tool)
   }
@@ -143,27 +205,32 @@ export function mentionedToolNames(text: string, vocabulary: ReadonlySet<string>
 }
 
 /**
- * Whether one section only explains tools this session can no longer see.
+ * Whether one section only explains tools this session can no longer call.
  *
- * Two ways to stay. A member of the section's tool family is still in the
- * visible schemas — `tool:goal` keeps its place because `create_goal` is there,
- * `tool:browser` goes because no `browser_*` is — or the prose names a visible
- * tool (see {@link mentionedToolNames}). Nothing is inferred from the allow
- * list: a name this session cannot actually call must not keep a section alive,
- * or the model reads guidance for a tool the schema list does not have.
+ * Two ways to stay. A member of the section's tool family is still on the
+ * session's tool surface — `tool:goal` keeps its place because `create_goal`
+ * is there, `tool:browser` goes because no `browser_*` is — or the prose names
+ * a tool the surface still has (see {@link mentionedToolNames}). Nothing is
+ * inferred from the allow list: a name this session cannot actually call must
+ * not keep a section alive, or the model reads guidance for a tool the schema
+ * list does not have.
+ *
+ * `surface` is the session's tool surface, not `assembly.tools`; see the
+ * module comment for why the distinction is the whole fix.
  */
 export function prunesToolSection(
   section: PromptSection,
-  visible: ReadonlySet<string>,
+  surface: ReadonlySet<string>,
   vocabulary: ReadonlySet<string>,
+  families: readonly PromptSectionFamily[] = [],
 ): boolean {
-  const family = sectionToolFamily(section.name)
+  const family = sectionToolFamily(section.name, families)
   if (family === undefined) return false
-  for (const tool of visible) {
+  for (const tool of surface) {
     if (family(tool)) return false
   }
   const mentioned = mentionedToolNames(section.text, vocabulary)
-  return !mentioned.some((name) => visible.has(name))
+  return !mentioned.some((name) => surface.has(name))
 }
 
 /** What one prune pass did, so the caller can say it once. */
@@ -185,6 +252,15 @@ interface PruneOptions {
    * the hand-off rules are never touched.
    */
   dropAllToolSections?: boolean
+  /** The section-name → tool-family table; see {@link PromptSectionFamily}. */
+  families?: readonly PromptSectionFamily[]
+  /**
+   * The session's tool surface. When given it is the only visibility source:
+   * `assembly.tools` is the pre-restriction list (see the module comment) and
+   * would keep every section alive. When omitted the pass falls back to
+   * `assembly.tools`, which is what the pure-function tests pin.
+   */
+  surface?: ReadonlySet<string>
 }
 
 /** The per-section verdict one pass uses, so the loop below stays one shape. */
@@ -193,25 +269,27 @@ function pruneVerdict(
   allow: readonly string[],
   options: PruneOptions,
 ): (section: PromptSection) => boolean {
+  const families = options.families ?? []
   if (options.dropAllToolSections === true) {
-    return (section) => sectionToolFamily(section.name) !== undefined
+    return (section) => sectionToolFamily(section.name, families) !== undefined
   }
-  const visible = new Set<string>((assembly.tools ?? []).map((tool) => tool.name))
-  const vocabulary = new Set<string>([...allow, ...visible])
+  const surface =
+    options.surface ?? new Set<string>((assembly.tools ?? []).map((tool) => tool.name))
+  const vocabulary = new Set<string>([...allow, ...surface])
   for (const section of assembly.sections) {
     const group = toolSectionGroup(section.name)
     if (group !== undefined) vocabulary.add(group)
   }
-  return (section) => prunesToolSection(section, visible, vocabulary)
+  return (section) => prunesToolSection(section, surface, vocabulary, families)
 }
 
 /**
  * Drop the tool sections the session cannot back.
  *
- * Visibility is read from `assembly.tools`, which the tool registry already
- * filled through this scope's restrictions — the same set the model is about
- * to receive. Nothing here re-derives it from the allow list, so a name that is
- * whitelisted but not registered does not keep a section alive.
+ * Visibility is the session's tool surface ({@link PruneOptions.surface}); the
+ * fallback to `assembly.tools` is for callers with no scope in hand. Nothing
+ * here re-derives it from the allow list, so a name that is whitelisted but
+ * not registered does not keep a section alive.
  *
  * `options.dropAllToolSections` skips that question and drops the whole family
  * (see {@link PruneOptions}); everything outside the family stays either way.
@@ -246,10 +324,24 @@ interface PromptScope {
 }
 
 interface PromptFilterOptions {
+  /**
+   * The session's tool surface, read fresh on every assembly. A function, not a
+   * set: the registry changes under a live session (`tools/change`) and a
+   * captured set would go stale exactly when a plugin registers late.
+   */
+  surface(): ReadonlySet<string>
   /** The whitelist, used only to widen the vocabulary. */
   allow: readonly string[]
+  /** The section-name → tool-family table; default is the group rule only. */
+  families?: readonly PromptSectionFamily[]
   /** Passed through to {@link pruneToolSections}; see {@link PruneOptions}. */
   dropAllToolSections?: boolean
+  /**
+   * Say which sections went on every assembly, not once per binding. On by
+   * default: the pass runs every step, and a once-only line is how this went
+   * quiet for weeks.
+   */
+  logEach?: boolean
   /** The effect label this pass is armed under; main and worker stay apart. */
   effectLabel?: string
   log?(message: string): void
@@ -291,6 +383,7 @@ export function bindPromptFilter(
     event: 'system-prompt/assemble',
     listener: PromptAssemblyHook,
   ) => () => void
+  const logEach = options.logEach !== false
   let announced = false
   let stop: (() => void) | undefined
   scope.effect(
@@ -299,10 +392,19 @@ export function bindPromptFilter(
         // 监听器签名固定：这一层只看 next() 返回的装配结果。
         void assembly
         const assembled = await next()
+        let surface: ReadonlySet<string>
+        try {
+          surface = options.surface()
+        } catch {
+          // 上限算不出来：照旧拿 assembly.tools，宁可多留也不误删。
+          surface = new Set<string>((assembled.tools ?? []).map((tool) => tool.name))
+        }
         const { assembly: pruned, removed } = pruneToolSections(assembled, options.allow, {
           dropAllToolSections: options.dropAllToolSections === true,
+          ...(options.families !== undefined ? { families: options.families } : {}),
+          surface,
         })
-        if (removed.length > 0 && !announced) {
+        if (removed.length > 0 && (logEach || !announced)) {
           announced = true
           const what =
             options.dropAllToolSections === true ? 'tool sections from a worker prompt' : 'sections for hidden tools'

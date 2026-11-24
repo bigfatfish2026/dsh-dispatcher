@@ -89,16 +89,56 @@ function probed<T>(ctx: Context, name: string): T | undefined {
 
 export { intentPlanLines } from './tools-shared'
 
+/**
+ * 只给「提示段裁剪」那一类日志开 stderr 通道的标记。
+ *
+ * 为什么只这一类：`ctx.logger` 在本机不落 journald（会话日志里两次独立核过），
+ * 而提示段裁剪正是因此静默了好几周——所以它必须有一条能在 `journalctl` 里
+ * grep 到的路。别的 warn / info（白名单重装、worker deny、指派规矩注入……）
+ * 量不小，再在 stderr 里抄一份只会把 journal 灌满，所以它们只走 logger。
+ *
+ * 判据是文案前缀，不是调用点：调用点散在 router / installer 里，改前缀比传
+ * 一个新参数进每一层便宜，而这一行本来就该被 grep。
+ */
+const STDERR_MARKER = '[dispatcher] pruned '
+
+/** 这条日志要不要同时写 stderr。 */
+export function mirrorsToStderr(message: string): boolean {
+  return message.startsWith(STDERR_MARKER)
+}
+
+/**
+ * 记一条 `[dispatcher]` 日志：一律进 logger，`pruned` 那一类再进 stderr。
+ *
+ * stderr 由 journald 收，所以 `journalctl --user -u dsh-qqbot | grep pruned`
+ * 能看见；写不出去（桩进程、已关的管道）就当没写，日志不许影响装配。
+ */
+function say(logger: ((message: string) => void) | undefined, message: string): void {
+  // 传进来的必须是已经 bind 过宿主的函数：宿主 logger 是 cordis `Logger` 的实例，
+  // 它继承的 `info/warn/debug` 是 `function(...args){ return this()[type](...) }`，
+  // 把方法摘下来裸调（`logger?.info(message)` 或 `const f = logger.info; f(msg)`）
+  // 丢了 this 就抛 `TypeError: this is not a function`，apply() 当场中断，整条
+  // dispatcher 没挂上，`dispatch_*` 全没。桩 logger 是普通箭头函数，丢不丢 this
+  // 都一样，所以测试一直没抓到——所以调用点一律 `.bind(logger)`。
+  if (typeof logger === 'function') logger(message)
+  if (!mirrorsToStderr(message)) return
+  try {
+    process.stderr.write(`${message}\n`)
+  } catch {
+    // 写不出去就当没写：日志不许装配失败。
+  }
+}
+
 export function apply(ctx: Context, config: ConfigShape): void {
   const logger = (ctx as unknown as { logger?: Record<string, ((message: string) => void) | undefined> }).logger
   const warn = (message: string): void => {
-    logger?.warn?.(message)
+    say(typeof logger?.warn === 'function' ? logger.warn.bind(logger) : undefined, message)
   }
   const info = (message: string): void => {
-    logger?.info?.(message)
+    say(typeof logger?.info === 'function' ? logger.info.bind(logger) : undefined, message)
   }
   const debug = (message: string): void => {
-    logger?.debug?.(message)
+    if (typeof logger?.debug === 'function') logger.debug.call(logger, message)
   }
 
   /**

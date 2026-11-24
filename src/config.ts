@@ -29,6 +29,7 @@ import {
 } from './defaults'
 import { DEFAULT_COMMAND_KEYWORDS } from './tickets/preset-guard'
 import type { CriteriaConfig } from './tickets/preset-catalog'
+import type { PromptSectionFamily } from './prompt'
 import { TOOL_NAMES } from './protocol'
 import type { TicketBackendName } from './store/backend'
 
@@ -105,6 +106,39 @@ export const DEFAULT_WORKER_DENY_TOOLS: readonly string[] = [
   'memory_split',
   'memory_consolidate',
   'memory_sleep',
+]
+
+/**
+ * Which tools each prompt section explains.
+ *
+ * Section names are not tool prefixes: `tool:bili-notify` also explains
+ * `bili_mentions` / `bili_replies` / `bili_comment_reply`, `tool:jobs` explains
+ * the `job_*` tools, and `tool:workflow` explains `subagent`. This table is
+ * where that is written down, so the prune pass can judge a section by what it
+ * is about instead of by how its name happens to be spelled. Sections not in
+ * the table fall back to `tool:<group>` — the group itself plus `group_*` and
+ * `*_group` — and `mcp:<server>` is always judged by its server namespace.
+ *
+ * `*` may sit anywhere in a pattern (`browser*`, `*_goal`, `*mcp_resource*`);
+ * without one the name has to match whole. A pattern that matches nothing is
+ * warned about at load, because a typo here fails quietly: the section simply
+ * never goes.
+ */
+export const DEFAULT_PROMPT_SECTION_FAMILIES: readonly PromptSectionFamily[] = [
+  { section: 'tool:bilibili', tools: ['bilibili*'] },
+  {
+    section: 'tool:bili-notify',
+    tools: ['bili_notify*', 'bili_mentions', 'bili_replies', 'bili_comments', 'bili_comment_reply'],
+  },
+  { section: 'tool:browser', tools: ['browser*'] },
+  { section: 'tool:bash', tools: ['bash'] },
+  { section: 'tool:jobs', tools: ['job_*'] },
+  { section: 'tool:web_search', tools: ['web_search'] },
+  { section: 'tool:web_fetch', tools: ['web_fetch'] },
+  { section: 'tool:goal', tools: ['*_goal', 'goal'] },
+  { section: 'tool:workflow', tools: ['subagent', 'subagent_fork', 'workflow'] },
+  { section: 'tool:session-query', tools: ['chat_*', 'session_*'] },
+  { section: 'mcp-resource-servers', tools: ['*mcp_resource*'] },
 ]
 
 /**
@@ -320,6 +354,10 @@ export interface Config {
   workerDenyTools: string[]
   /** Drop every tool-guidance prompt section from a worker subagent's prompt. */
   workerPromptPrune: boolean
+  /** Section name → the tools that section explains; see {@link DEFAULT_PROMPT_SECTION_FAMILIES}. */
+  promptSectionFamilies: PromptSectionFamily[]
+  /** Say which sections the prune pass dropped on every assembly, not once. */
+  promptPruneLog: boolean
   /** Script that pushes one line of text to the person on QQ. */
   notifyScript: string
   /** Hard cap on one push, in milliseconds. */
@@ -641,6 +679,25 @@ export const Config: Schema<Config> = Schema.object({
     .default(true)
     .description(
       'Drop every tool-guidance section (tool:*, mcp:*, mcp-resource-servers) from a worker subagent system prompt. A worker tool set comes from its preset, so a static section can never match it. Main sessions are untouched, and the escape file still turns it off.',
+    ),
+  promptSectionFamilies: Schema.array(
+    Schema.object({
+      section: Schema.string()
+        .required()
+        .description('Section name exactly as ctx.systemPrompt.section() registered it, e.g. tool:bili-notify.'),
+      tools: Schema.array(Schema.string())
+        .required()
+        .description('Tools that section explains: exact names, or one * anywhere (browser*, *_goal, *mcp_resource*).'),
+    }),
+  )
+    .default(DEFAULT_PROMPT_SECTION_FAMILIES.map((entry) => ({ section: entry.section, tools: [...entry.tools] })))
+    .description(
+      'Section name → the tools that section explains. A section the table does not name falls back to tool:<group> plus its group_* and *_group members; mcp:<server> is always judged by its own namespace. Replaces the default table, so a profile that writes it must list every row it wants; a row whose patterns match no registered tool at load is warned about.',
+    ),
+  promptPruneLog: Schema.boolean()
+    .default(true)
+    .description(
+      'Log which tool sections the prune pass dropped on every assembly, not once per session. The dispatcher logger does not reach journald, so the line also goes to stderr.',
     ),
   notifyScript: Schema.string()
     .default(process.env.DSH_NOTIFY_SCRIPT ?? '')

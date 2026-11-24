@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../src/config'
+import {
+  DEFAULT_HANDOFF_POLICY,
+  DEFAULT_PROMPT_SECTION_FAMILIES,
+  DEFAULT_ROUTER_TOOLS,
+  DEFAULT_WORKER_DENY_TOOLS,
+} from '../src/config'
 import {
   DEFAULT_CRITERIA_REQUIRED,
   DEFAULT_CRITERIA_SILENT,
@@ -90,6 +95,11 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     workerToolDeny: true,
     workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
     workerPromptPrune: true,
+    promptSectionFamilies: DEFAULT_PROMPT_SECTION_FAMILIES.map((entry) => ({
+      section: entry.section,
+      tools: [...entry.tools],
+    })),
+    promptPruneLog: true,
     notifyScript: '',
     notifyTimeoutMs: 5000,
     ...overrides,
@@ -186,8 +196,22 @@ function fakeHost() {
         if (index >= 0) list.splice(index, 1)
       }
     }
+    // 跟宿主一样：cordis `Logger` 的 info/warn/debug 在原型上，是
+    // `function(...args){ return this()[type](...args) }`。摘下来裸调会抛
+    // `TypeError: this is not a function`——2026-11-24 那次 dispatcher 整个没挂上
+    // 就是栽在这上面，普通箭头函数桩永远抓不到。
+    const logger = {
+      sink: { info: (_message: string) => {}, warn: (message: string) => { warnings.push(message) } },
+      info: function (this: Record<string, unknown>, message: string) {
+        ;(this.sink as { info: (message: string) => void }).info(message)
+      },
+      warn: function (this: Record<string, unknown>, message: string) {
+        ;(this.sink as { warn: (message: string) => void }).warn(message)
+      },
+    }
     const ctx = {
       agents: { list: () => agents.map((entry) => entry.agent), get: () => undefined },
+      logger,
       effect(callback: () => () => void) {
         disposers.push(callback())
         return undefined
@@ -204,12 +228,6 @@ function fakeHost() {
           return () => {}
         },
         get: (name: string) => (registry.has(name) ? { name } : undefined),
-      },
-      logger: {
-        info: () => {},
-        warn: (message: string) => {
-          warnings.push(message)
-        },
       },
     }
     return {
@@ -293,5 +311,19 @@ describe('plugin reload', () => {
     const lastLift = host.events.lastIndexOf('lift')
     expect(lastLift).toBeGreaterThan(-1)
     expect(lastLift).toBeLessThan(host.events.indexOf('restrict', marks))
+  })
+
+  // 2026-11-24：`say()` 把宿主的 `logger.info` 摘下来裸调，cordis Logger 的原型
+  // 方法 `this()` 没了 this，抛 `TypeError: this is not a function`，apply() 在
+  // installStore 里就断了——服务没注入、工具一个没注册，router 会话手上只剩自己。
+  // 桩 logger 是箭头函数所以这套测试一直是绿的；现在 mount 里的 logger 跟宿主
+  // 同形，这一条挂就等于把那次事故钉住。
+  it('installs every tool and service when the host logger needs its this', () => {
+    const host = fakeHost()
+    const plugin = host.mount()
+    expect(() => apply(plugin.ctx as never, testConfig())).not.toThrow()
+    const tools = plugin.ctx.tools as { get: (name: string) => unknown }
+    for (const tool of DEFAULT_ROUTER_TOOLS) expect(tools.get(tool)).toBeDefined()
+    expect(host.restricts.length).toBeGreaterThan(0)
   })
 })

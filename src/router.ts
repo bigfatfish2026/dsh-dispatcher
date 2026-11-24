@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isWorkerSession } from './no-wait'
 import { bindPromptFilter } from './prompt'
-import type { PromptFilterBinding } from './prompt'
+import type { PromptFilterBinding, PromptSectionFamily } from './prompt'
 
 /**
  * The whitelist half of the dispatcher: a main session that can talk and hand
@@ -26,7 +26,12 @@ import type { PromptFilterBinding } from './prompt'
 /** The slice of `ctx.tools` this module needs. */
 interface RouterTools {
   restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }): () => void
-  get(name: string): unknown
+  /**
+   * Two arguments on purpose: the scope-less form answers for the global view,
+   * the scoped one answers for that agent and reads a restricted-away name as
+   * absent — which is what {@link visibleSurface} wants.
+   */
+  get(name: string, scope?: unknown): unknown
 }
 
 /** The slice of an agent this module needs. */
@@ -74,6 +79,10 @@ interface RouterOptions {
   pruneWorkerPrompt?: boolean
   /** An existing file here skips the whitelist entirely. `~` is expanded. */
   escapeFile: string
+  /** Section name → tool family; see `src/config.ts` and `src/prompt.ts`. */
+  promptFamilies?: readonly PromptSectionFamily[]
+  /** Say which sections went on every assembly instead of once. Default on. */
+  promptLogEach?: boolean
   /** Where the warnings go; omitted means quietly. */
   log?(message: string): void
   /** Where the "the whitelist grew" notes go; omitted means quietly. */
@@ -178,6 +187,52 @@ function registryLookup(
   const confirmed = (name: string): boolean =>
     Boolean(agent.ctx.tools.get(name)) || Boolean(options.registry?.get(name)) || names().includes(name)
   return { confirmed, names }
+}
+
+/** `ctx.tools` as {@link visibleSurface} needs it; anything else is a no-op. */
+interface ScopedTools {
+  get?(name: string, scope?: unknown): unknown
+}
+
+/** The `agent.ctx` slice {@link visibleSurface} reads. */
+export interface SurfaceAgent {
+  ctx?: unknown
+}
+
+/**
+ * The tool names one session can actually call, as of now.
+ *
+ * A restriction filters what a scope *inherits* — the global layer and every
+ * ancestor layer on its chain — and never what its own layer registers
+ * (dsh-tools `view(scope)`). So the surface is: every restrictable name, asked
+ * through the scoped `tools.get(name, agent.ctx)` so this scope's restrictions
+ * answer "absent", plus the names registered in this scope's own layer, which
+ * no restriction can take away.
+ *
+ * The scope is the one that was reached through: `agent.ctx.tools` is a proxy
+ * bound to the agent's scope, and the registry's `get` is looked up on it. The
+ * second argument is harmless and matches the documented `get(name, scope)`
+ * signature, so it is passed too.
+ *
+ * @param agent - the session; anything without a `ctx.tools` yields an empty set.
+ * @param globalNames - global registry names from the plugin context
+ *   (`ctx.tools.schemas()`, unrestricted), read once per pass by the caller.
+ */
+export function visibleSurface(agent: SurfaceAgent, globalNames: readonly string[]): Set<string> {
+  const ctx = agent.ctx as { tools?: ScopedTools } | undefined
+  const tools = ctx?.tools
+  const surface = new Set<string>()
+  if (tools === undefined) return surface
+  const ask = tools.get
+  for (const name of globalNames) {
+    if (typeof ask !== 'function') {
+      surface.add(name)
+      continue
+    }
+    if (ask.call(tools, name, ctx) === undefined) continue
+    surface.add(name)
+  }
+  return surface
 }
 
 /**
@@ -308,8 +363,43 @@ function createRestrictInstaller(
 }
 
 
+/** What one prune pass is told, beyond the agent and the shared options. */
+interface AgentCoreOptions {
+  /** Widens the prose vocabulary; the whitelist for a main session, empty for a worker. */
+  allow: readonly string[]
+  /** Worker verdict: every tool section goes, visible or not. */
+  dropAllToolSections?: boolean
+  effectLabel?: string
+}
+
 /**
- * Bind one worker subagent's deny list and install it once.
+ * Arm the prompt prune pass on one agent, reading its tool surface every step.
+ *
+ * This is the half every session gets — main, worker, preset-mounted — because
+ * the tool surface is a per-agent question and the prompt sections are
+ * global. {@link installPresetTrim} is the same thing without a restriction
+ * attached, for a session whose tools a preset already trims.
+ */
+function bindAgentCore(
+  agent: RouterAgent,
+  options: RouterOptions,
+  core: AgentCoreOptions,
+): PromptFilterBinding | undefined {
+  const surface: () => ReadonlySet<string> = () => visibleSurface(agent, globalToolNames(options))
+  return bindPromptFilter(agent.ctx, {
+    surface,
+    allow: core.allow,
+    ...(options.promptFamilies !== undefined ? { families: options.promptFamilies } : {}),
+    ...(core.dropAllToolSections === true ? { dropAllToolSections: true } : {}),
+    ...(options.promptLogEach !== undefined ? { logEach: options.promptLogEach } : {}),
+    ...(core.effectLabel !== undefined ? { effectLabel: core.effectLabel } : {}),
+    ...(options.log !== undefined ? { log: options.log } : {}),
+  })
+}
+
+/**
+ * Bind a worker subagent's deny list and install it once.
+ *
  *
  * Why a deny list instead of the reverse whitelist (`allow` = everything
  * registered minus the denied names) the ticket first suggested: `restrict`
@@ -353,11 +443,10 @@ export function bindWorkerDeny(agent: RouterAgent, options: RouterOptions): Rout
         confirmed(name) || state.current.includes(name)
       if (mode.prompt === 'dropAll' && !state.promptTried) {
         state.promptTried = true
-        state.promptBinding = bindPromptFilter(agent.ctx, {
+        state.promptBinding = bindAgentCore(agent, options, {
           allow: [],
           dropAllToolSections: true,
           effectLabel: 'dsh-dispatcher.worker-prompt',
-          log: options.log,
         })
       }
       state.arm()
@@ -507,7 +596,7 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
       }
       const added = installed.filter((name) => !state.current.includes(name))
       const removed = state.current.filter((name) => !installed.includes(name))
-      const nextPrompt = bindPromptFilter(agent.ctx, { allow: installed, log: options.log })
+      const nextPrompt = bindAgentCore(agent, options, { allow: installed })
       const previousStop = state.stopRestrict
       const previousPrompt = state.promptBinding
       state.stopRestrict = attempt.stop
@@ -547,6 +636,42 @@ export function bindRouter(agent: RouterAgent, options: RouterOptions): RouterBi
   )
 }
 
+
+/**
+ * Arm the prune pass on a session whose tools a preset already trims, and
+ * install no restriction at all.
+ *
+ * A preset decides the tool surface; the dispatcher must not narrow it a second
+ * time (`installers/restrict.ts` hands those sessions here). What is still
+ * wrong in such a prompt is the guidance: every tool plugin registers its
+ * section globally, so the model reads "Use the browser tools …" while the
+ * preset gave it no `browser_*`. The pass reads the session's real surface and
+ * drops exactly those sections.
+ *
+ * The escape file does not turn this off: it exists to give the tool surface
+ * back, and this pass never takes one away.
+ */
+export function installPresetTrim(agent: RouterAgent, options: RouterOptions): PromptFilterBinding | undefined {
+  return bindAgentCore(agent, options, {
+    allow: [],
+    effectLabel: 'dsh-dispatcher.preset-prompt',
+  })
+}
+
+/**
+ * Read the global registry names once: what {@link visibleSurface} probes.
+ *
+ * `registry.names()` is the plugin context's view — no scoped restriction
+ * reaches it — so it is the full list of names a restriction could keep or
+ * drop. Without a registry this is empty and the pass keeps its sections.
+ */
+function globalToolNames(options: RouterOptions): readonly string[] {
+  try {
+    return options.registry?.names?.() ?? []
+  } catch {
+    return []
+  }
+}
 
 /**
  * Install the whitelist (or, for a worker, the deny list) on one agent, at most

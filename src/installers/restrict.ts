@@ -9,9 +9,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { routerAllowList } from '../config'
 import type { Config } from '../config'
 import { isWorkerSession } from '../no-wait'
+import { hasComposedPreset } from '../preset-face'
 import { TOOL_NAMES } from '../protocol'
-import { bindRouter } from '../router'
+import { bindRouter, installPresetTrim } from '../router'
 import type { RouterAgent, RouterBinding } from '../router'
+import type { PromptFilterBinding } from '../prompt'
 
 /** worker 无论配置怎么写都不该拿到的本包工具：开票、发话、读票、关票、挂起、列表、打点。 */
 export const WORKER_FORBIDDEN_TOOLS = [
@@ -35,6 +37,8 @@ export function installRestrict(ctx: Context, config: Config, deps: RestrictInst
   const routerSeen = new WeakSet<object>()
   const bindings = new Set<RouterBinding>()
   const bound = new WeakMap<object, RouterBinding>()
+  /** 有档会话身上的提示段裁剪：档定工具面，dispatcher 只剥对不上的说明段。 */
+  const trims = new WeakMap<object, PromptFilterBinding | undefined>()
   let announced = false
   let workerAnnounced = false
   let tearingDown = false
@@ -58,11 +62,24 @@ export function installRestrict(ctx: Context, config: Config, deps: RestrictInst
     deny: config.workerToolDeny ? [...new Set([...config.workerDenyTools, ...WORKER_FORBIDDEN_TOOLS])] : [],
     pruneWorkerPrompt: config.workerPromptPrune,
     escapeFile: config.routerEscapeFile,
+    promptFamilies: config.promptSectionFamilies,
+    promptLogEach: config.promptPruneLog,
     log: deps.warn,
     info: deps.info,
     registry,
   }
   const install = (agent: RouterAgent): void => {
+    // 会话自带档：工具面上限归那档的 toolset，dispatcher 的 allow / worker deny
+    // 都不该再叠一层（叠上去只会取交集，把档里给的工具剪掉）。但提示段还得剥：
+    // 段是全局注册的，档没给的工具有一段照样会被读到。没档的会话照旧走下面。
+    if (hasComposedPreset(ctx, agent)) {
+      // 幂等：热重载会给已存在的 agent 再走一遍，重挂等于同一段剪两次。
+      if (trims.has(agent)) return
+      const binding = installPresetTrim(agent, options)
+      trims.set(agent, binding)
+      agent.ctx.effect(() => () => binding?.dispose(), 'dsh-dispatcher.preset-prompt-release')
+      return
+    }
     const worker = isWorkerSession(agent.session.header.origin)
     if (worker ? !config.workerToolDeny && !config.workerPromptPrune : !config.routerRestrict) return
     let binding = bound.get(agent)

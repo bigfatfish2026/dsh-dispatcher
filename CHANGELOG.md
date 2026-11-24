@@ -6,6 +6,12 @@
 
 ### Added
 
+提示段按「这段讲哪些工具」判，不再按段名拼。新增配置 `promptSectionFamilies`（段名 → 工具 glob 表，默认 11 行），`tool:bili-notify` 现在认得 `bili_mentions` / `bili_replies` / `bili_comment_reply`，`tool:jobs` 认得 `job_*`，`tool:workflow` 认得 `subagent`——这三段以前因为段名凑不出成员而永远剪不掉。表外的 `tool:<group>` 段照旧按前缀/后缀判，`mcp:<server>` 照旧按自己的命名空间判。
+
+裁剪判据的「工具可不可见」从 `assembly.tools` 换成**会话的工具面上限**：`assembly.tools` 是 restriction 之前的全量，拿它判等于每个段都「有成员可见」，一个都剪不掉；上限按 `ctx.tools.get(name, agent.ctx)` 逐个探（restriction 会读成 absent），全局名字取自插件 ctx 的 `tools.schemas()`。`src/router.ts` 拆出 `installAgentCore` / `installWorkerRestrict`，新增 `installPresetTrim`：挂了 preset 的会话（工具面归那档）现在也挂裁剪钩子，只剥对不上的说明段、不装任何 restriction，同一只会话重复 `agent/created` 只挂一遍。新增 `promptPruneLog`（默认 true）：每拍装配都打一行 `[dispatcher] pruned N sections for hidden tools: …`，不再一轮只打一次。
+
+`[dispatcher]` 的 warn / info 同时写 stderr。`ctx.logger` 在本机不落 journald，提示段裁剪因此静默了好几周——现在 `journalctl --user -u dsh-qqbot | grep pruned` 能看见。
+
 命令判定的第三层接入本机 gemini-decision 桥（方案 D2）：新增配置段 `geminiDecision`，开关 `geminiDecision.enabled` 默认 `false`，关着时一次请求都不发、结论与接入前逐字一致。打开后只在 `src/tickets/classify-command.ts` 的模型失败分支问一次桥（强信号和模型正常结论都不经过它）：桥判 yes 且 `confidence ≥ 0.85` 才替代关键词表，否则仍走 `commandKeywords`；单次请求超时 `2000ms`，超时 / 400 / 429 / 5xx / 坏 JSON / 形状不合法一律立刻回原分支，不重试。桥给的答案在插件侧做六项校验（2xx、answers 形状、choice 属于候选、probabilities 键集合与 criteria 全等、Σp 落在 1±1e-6、confidence 与 p[choice] 一致）。
 
 交活环节加一道软提醒：`dispatch_report` 落库前拿票上的 `touched` 跟声明的 `intent.writes` / `intent.reads` 对一遍（`outOfScopePaths`，跟关票对账同一个口径，含合理产物白名单），差集非空时把「未声明的改动」几行拼在报告正文最前面，工具回执里也给同一份清单和补法（`dispatch_declare` 的 `intent.writes`，或再交一次带 `paths`，最多 50 条）。这一步只提醒、不拦交活：报告照常落库，票面 status / intent / touched 与 `outOfScope` 一个字节都不动，也不推通知——关票仍是唯一的记账与推送点，补了声明关票重算自然干净，不补才在关票时记一次最终账，同一张票不会因为交活多一条「收工时对不上账」。主会话在 `send` 里追加的允许范围只进排队消息、不进 `intent.writes`，所以那条路消不掉这条提醒，要改声明才算数。

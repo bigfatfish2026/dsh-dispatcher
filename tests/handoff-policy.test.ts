@@ -34,11 +34,12 @@ type AssemblyHook = (
 ) => Promise<PromptAssembly>
 
 /** A host that only has to answer the questions `apply` asks on the prompt path. */
-function promptHost() {
+function promptHost(services: Record<string, unknown> = {}) {
   const hooks: AssemblyHook[] = []
   const ctx = {
     agents: { list: () => [], get: () => undefined },
     effect: (callback: () => () => void) => callback(),
+    get: (name: string) => services[name],
     on(event: string, listener: unknown) {
       if (event === 'system-prompt/assemble') hooks.push(listener as AssemblyHook)
       return () => {}
@@ -56,16 +57,20 @@ function promptHost() {
  * hand-off hook only joins when the policy is on, so the two are told apart by
  * what they append, not by how many hooks there are.
  */
-async function injectedSection(config: Record<string, unknown>): Promise<string | undefined> {
+async function injectedSection(
+  config: Record<string, unknown>,
+  options: { agent?: unknown; services?: Record<string, unknown> } = {},
+): Promise<string | undefined> {
   const parsed = Config({ stateFile: join(tempDir(), 'tickets.jsonl'), ...config } as never)
-  const host = promptHost()
+  const host = promptHost(options.services)
   apply(host.ctx as never, parsed)
   expect(host.hooks.length).toBeGreaterThan(0)
 
+  const agent = options.agent ?? { session: { header: {} } }
   let assembled: PromptAssembly = { sections: [{ name: 'persona', text: 'base' }], contexts: [], tools: [] }
   for (const hook of host.hooks) {
     const current = assembled
-    assembled = await hook(current, { agent: { session: { header: {} } } }, async () => current)
+    assembled = await hook(current, { agent }, async () => current)
   }
   return assembled.sections.find((section) => section.name === 'dispatcher:handoff')?.text
 }
@@ -103,5 +108,30 @@ describe('handoff policy text comes from config', () => {
 
   it('injects nothing when handoffPolicy is off, whatever the text says', async () => {
     expect(await injectedSection({ handoffPolicy: false, handoffPolicyText: '不该出现' })).toBeUndefined()
+  })
+
+  it('自带档的会话不注主会话话术：判据与 router allow 共用', async () => {
+    const agentCtx = { scoped: true }
+    const agent = { session: { header: {} }, ctx: agentCtx }
+    const text = await injectedSection(
+      { handoffPolicy: true },
+      {
+        agent,
+        services: {
+          agentPresets: {
+            composedPreset: (ctx: unknown) => (ctx === agentCtx ? 't1' : undefined),
+          },
+        },
+      },
+    )
+    expect(text).toBeUndefined()
+  })
+
+  it('没挂档的会话照旧注入主会话话术', async () => {
+    const text = await injectedSection(
+      { handoffPolicy: true },
+      { services: { agentPresets: { composedPreset: () => undefined } } },
+    )
+    expect(text).toBe(DEFAULT_HANDOFF_POLICY)
   })
 })

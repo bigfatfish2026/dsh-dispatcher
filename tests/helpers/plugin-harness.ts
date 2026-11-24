@@ -7,7 +7,12 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_HANDOFF_POLICY, DEFAULT_ROUTER_TOOLS, DEFAULT_WORKER_DENY_TOOLS } from '../../src/config'
+import {
+  DEFAULT_HANDOFF_POLICY,
+  DEFAULT_PROMPT_SECTION_FAMILIES,
+  DEFAULT_ROUTER_TOOLS,
+  DEFAULT_WORKER_DENY_TOOLS,
+} from '../../src/config'
 import {
   DEFAULT_CRITERIA_REQUIRED,
   DEFAULT_CRITERIA_SILENT,
@@ -100,6 +105,11 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     workerToolDeny: true,
     workerDenyTools: [...DEFAULT_WORKER_DENY_TOOLS],
     workerPromptPrune: true,
+    promptSectionFamilies: DEFAULT_PROMPT_SECTION_FAMILIES.map((entry) => ({
+      section: entry.section,
+      tools: [...entry.tools],
+    })),
+    promptPruneLog: true,
     notifyScript: join(dir, 'notify.sh'),
     notifyTimeoutMs: 5000,
     ...overrides,
@@ -305,7 +315,9 @@ export function fakePluginHost(
         }
       },
       get: (name: string) => (registry.has(name) ? { name } : undefined),
-      schemas: () => [...tools.keys()].map((name) => ({ name })),
+      // 真宿主的 `schemas()` 是整张全局表（别的插件注册的也在里面），不只本包
+      // 注册的那几个；`registered` 就是「装载时已有的名字」。
+      schemas: () => [...new Set([...registry, ...tools.keys()])].map((name) => ({ name })),
     },
     logger: {
       info: (message: string) => {
